@@ -85,6 +85,13 @@ const HARNESSES = [
   { id: 'codex', name: 'Codex', endpoint: '— not connected', status: 'idle', caps: [], models: ['GPT-5.5'], primary: false },
 ];
 
+const INTEGRATIONS = [
+  { id: 'github', name: 'GitHub', icon: 'gitGraph', status: 'connected', wiring: 'agent-side', mechanism: 'gh CLI · GitHub MCP', account: 'acme · 4 repositories', enables: ['Branch & commit in-session', 'Open pull request (gated)'], host: 'authorised on host · token never leaves it', required: 'generation · pull requests' },
+  { id: 'jira', name: 'Jira', icon: 'package', status: 'connected', wiring: 'projection-side', mechanism: 'Jira MCP', account: 'acme.atlassian.net · PAY board', enables: ['Create story from spec status', 'Move story on status change'], host: 'authorised on host · token never leaves it', required: 'projection of tickets' },
+  { id: 'azure', name: 'Azure DevOps', icon: 'layers', status: 'partial', wiring: 'both', mechanism: 'az CLI · Azure DevOps MCP', account: 'dev.azure.com/acme', enables: ['Repos (agent-side)', 'Work items (projection)'], host: 'work-items scope needs re-auth on host', required: 'projection of work items' },
+  { id: 'gitlab', name: 'GitLab', icon: 'gitGraph', status: 'disconnected', wiring: '—', mechanism: 'glab CLI · GitLab MCP', account: '—', enables: ['Branch, commit, open merge request'], host: 'not connected', required: 'optional' },
+];
+
 const TIERS = [
   { tier: 'frontier', label: 'Frontier tier', model: 'claude-opus-4', note: 'authoring & review' },
   { tier: 'standard', label: 'Standard tier', model: 'claude-sonnet-4', note: 'implementation' },
@@ -104,8 +111,10 @@ export const store = createStore({
   projections: PROJECTIONS,
   agents: AGENTS,
   harnesses: HARNESSES,
+  integrations: INTEGRATIONS,
   tiers: TIERS,
   permission: null,
+  entryFolder: null,
   theme: 'light',
   density: 'comfortable',
   runtimeMode: 'supervised',

@@ -7,6 +7,8 @@ import { Review, Generation } from './screens/review-generation';
 import { Board, Session, DiffReview, PermissionOverlay } from './screens/board-session-diff-permission';
 import { Audit, Projections, Agents, Notifications } from './screens/audit-projections-roster-notifications';
 import { Harnesses, Settings } from './screens/harnesses-settings';
+import { Integrations } from './screens/config';
+import { LaunchScreen } from './screens/launch';
 import { Tweaks } from './tweaks';
 
 const e = React.createElement;
@@ -20,6 +22,7 @@ const SCREENS: Record<string, React.ComponentType<any>> = {
   session: Session,
   diff: DiffReview,
   projections: Projections,
+  integrations: Integrations,
   audit: Audit,
   notifications: Notifications,
   agents: Agents,
@@ -28,19 +31,20 @@ const SCREENS: Record<string, React.ComponentType<any>> = {
 };
 
 const CRUMBS: Record<string, string[]> = {
-  library: ['Library'],
-  cockpit: ['Author', 'Cockpit'],
-  review: ['Author', 'Review'],
-  generation: ['Author', 'Generation'],
-  board: ['Execute', 'Board'],
-  session: ['Execute', 'Session'],
-  diff: ['Execute', 'Diff'],
-  projections: ['Observe', 'Projections'],
-  audit: ['Observe', 'Audit'],
-  notifications: ['Observe', 'Notifications'],
-  agents: ['System', 'Agents'],
-  harnesses: ['System', 'Harnesses'],
-  settings: ['System', 'Settings'],
+  library: ['Specifications'],
+  cockpit: ['SPEC-014', 'Authoring cockpit'],
+  review: ['SPEC-014', 'Review panel'],
+  generation: ['SPEC-014', 'Generation'],
+  board: ['Delivery board'],
+  session: ['Delivery board', 'Session'],
+  diff: ['Delivery board', 'Diff review'],
+  projections: ['Record sync'],
+  integrations: ['Integrations'],
+  audit: ['Audit & activity'],
+  notifications: ['Notifications'],
+  agents: ['Agent roster'],
+  harnesses: ['Harnesses & models'],
+  settings: ['Settings'],
 };
 
 function ScreenContent({ view }: { view: string }) {
@@ -52,15 +56,27 @@ function ScreenContent({ view }: { view: string }) {
 }
 
 export function Root() {
-  const { view, pendingPermission } = useStore();
+  const s = useStore();
+  const { view } = s;
+  const [booting, setBooting] = React.useState(true);
 
-  // Start the live event engine on mount
+  // Apply theme on change
+  React.useEffect(() => { engine.applyTheme(); }, [s.theme, s.density, s.accent]);
+
+  // Start the live event engine once a project is open
   React.useEffect(() => {
-    engine.start();
+    if (s.project) { engine.start(); } else { engine.stop(); }
     return () => engine.stop();
-  }, []);
+  }, [s.project]);
 
-  if (view === 'picker') {
+  const handleLaunchDone = React.useCallback(() => setBooting(false), []);
+
+  // Show launch screen on first boot
+  if (booting) {
+    return e(LaunchScreen, { onDone: handleLaunchDone });
+  }
+
+  if (view === 'picker' || !s.project) {
     return e(React.Fragment, null,
       e(Picker, null),
       e(Tweaks, null));
@@ -73,11 +89,11 @@ export function Root() {
   }
 
   // Shell view — all navigable screens
-  const crumbs = CRUMBS[view] ?? [];
+  const crumbs = [s.project.name, ...(CRUMBS[view] || [view])];
 
   return e(React.Fragment, null,
     e(Shell, { crumbs },
-      e(ScreenContent, { view })),
-    pendingPermission ? e(PermissionOverlay, null) : null,
+      e(ScreenContent, { view }),
+      e(PermissionOverlay, null)),
     e(Tweaks, null));
 }

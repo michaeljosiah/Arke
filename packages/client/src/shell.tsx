@@ -35,6 +35,7 @@ const NAV = [
   { group: 'Delivery', items: [
     { id: 'board', name: 'board', label: 'Delivery board' },
     { id: 'projections', name: 'link', label: 'Record sync' },
+    { id: 'integrations', name: 'package', label: 'Integrations' },
   ] },
   { group: 'Governance', items: [
     { id: 'audit', name: 'history', label: 'Audit & activity' },
