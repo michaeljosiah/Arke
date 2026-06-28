@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpecOne · Foundation Delivery Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#FFFFFF; --fg:#0A0A0A; --muted:#737373; --line:#E5E5E5; --line-soft:#F5F5F5;
+    --card:#FFFFFF; --recessed:#FAFAFA; --primary:#171717; --on-primary:#FAFAFA;
+    --ok:#16A34A; --ok-bg:#F0FDF4; --warn:#D97706; --warn-bg:#FFFBEB; --danger:#E7000B; --danger-bg:#FEF2F2;
+    --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --maxw:1040px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+  a{color:var(--fg);text-decoration:underline;text-underline-offset:2px;text-decoration-color:var(--line)}
+  a:hover{text-decoration-color:var(--fg)}
+  code,.mono{font-family:var(--mono);font-size:.86em}
+  code{background:var(--line-soft);padding:1.5px 6px;border-radius:5px}
+  header.mast{padding:64px 0 28px;border-bottom:1px solid var(--line)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+  h1{font-weight:600;font-size:clamp(30px,5vw,46px);letter-spacing:-.03em;line-height:1.05;margin:14px 0 10px}
+  .sub{font-size:18px;color:var(--muted);max-width:64ch;margin:0}
+  .meta{margin-top:22px;display:flex;flex-wrap:wrap;gap:8px}
+  .pill{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.02em;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .pill.ok{color:var(--ok);border-color:#BBF7D0;background:var(--ok-bg)}
+  section{padding:40px 0;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .eyebrow::before{content:"";width:22px;height:1.5px;background:var(--fg)}
+  h2{font-weight:600;font-size:26px;letter-spacing:-.02em;margin:2px 0 14px}
+  h3{font-weight:600;font-size:17px;margin:24px 0 8px}
+  p{max-width:74ch}
+  ul{max-width:74ch;padding-left:20px}
+  li{margin:0 0 7px}
+  strong{font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:14px;background:var(--card);padding:16px 18px}
+  .card h4{margin:0 0 6px;font-size:14px;font-weight:600}
+  .card p{margin:0;font-size:13.5px;color:var(--muted)}
+  .tbl{overflow-x:auto;margin:14px 0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:560px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);font-weight:500;border-bottom:1.5px solid var(--fg)}
+  td.s{white-space:nowrap}
+  .tag{font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 8px;border-radius:999px;display:inline-block}
+  .t-done{color:var(--ok);background:var(--ok-bg)}
+  .t-part{color:var(--warn);background:var(--warn-bg)}
+  .t-todo{color:var(--muted);background:var(--line-soft)}
+  .callout{border:1px solid var(--line);border-left:3px solid var(--fg);border-radius:0 12px 12px 0;background:var(--recessed);padding:14px 18px;margin:18px 0;max-width:74ch}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+  .callout p{margin:0;font-size:14px}
+  pre{background:var(--primary);color:#E5E5E5;border-radius:12px;padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;max-width:none}
+  .toc{margin:26px 0 0;padding:18px 20px;border:1px solid var(--line);border-radius:12px;background:var(--recessed)}
+  .toc ol{margin:0;padding-left:18px;columns:2;column-gap:36px;font-size:14px}
+  .toc a{text-decoration:none;color:var(--fg)}
+  .endnote{padding:34px 0 80px;color:var(--muted);font-size:13px}
+  ::selection{background:var(--line);color:var(--fg)}
+</style>
+</head>
+<body>
+<header class="mast">
+  <div class="wrap">
+    <div class="kicker">// Delivery report</div>
+    <h1>SpecOne — Foundation</h1>
+    <p class="sub">What was built in the first pass: a method-ready monorepo, schema-first contracts, a working local coordinator, an OpenCode adapter grounded in the live docs, and a React client that reproduces the approved design baseline.</p>
+    <div class="meta">
+      <span class="pill">repo · github.com/michaeljosiah/SpecOne</span>
+      <span class="pill">date · 2026-06-28</span>
+      <span class="pill ok">build ✓</span>
+      <span class="pill ok">typecheck ✓</span>
+      <span class="pill ok">coordinator runs ✓</span>
+      <span class="pill ok">client serves ✓</span>
+    </div>
+    <nav class="toc">
+      <ol>
+        <li><a href="#summary">Executive summary</a></li>
+        <li><a href="#delivered">What was delivered</a></li>
+        <li><a href="#verify">Verification</a></li>
+        <li><a href="#architecture">Architecture as built</a></li>
+        <li><a href="#frcov">PRD requirement coverage</a></li>
+        <li><a href="#opencode">OpenCode integration</a></li>
+        <li><a href="#t3">T3 Code learnings applied</a></li>
+        <li><a href="#gaps">Identified gaps</a></li>
+        <li><a href="#next">Suggested next steps</a></li>
+        <li><a href="#run">How to run</a></li>
+      </ol>
+    </nav>
+  </div>
+</header>
+<div class="wrap">
+
+  <section id="summary">
+    <div class="eyebrow">01 / Executive summary</div>
+    <h2>The loop's scaffolding is real and runs</h2>
+    <p>SpecOne is a brand-new public project that turns the specification-centric engineering method into a product (per the PRD). This first pass stands up the whole foundation and proves the moving parts in isolation: the <strong>contracts</strong> are schema-first and validated at the boundary; the <strong>coordinator</strong> ingests, normalizes, sequences, persists and pushes events over WebSocket; the <strong>OpenCode adapter</strong> is implemented against the real, documented HTTP/SSE surface (researched live); and the <strong>React client</strong> faithfully reproduces the approved design baseline with every v1 screen reachable.</p>
+    <p>It is deliberately <em>not</em> a live end-to-end loop yet — the client still renders against the prototype's in-memory simulation, and the adapter has not been exercised against a running <code>opencode serve</code>. Those two wires are the immediate next step and are scoped below.</p>
+    <div class="callout">
+      <div class="lbl">Direction of truth</div>
+      <p>Every architectural choice holds the PRD's core invariant: the specification is the source of truth, the harness owns execution and credentials, and nothing is acted on without a human decision in between (propose · decide · execute).</p>
+    </div>
+  </section>
+
+  <section id="delivered">
+    <div class="eyebrow">02 / What was delivered</div>
+    <h2>A method-ready monorepo</h2>
+    <div class="grid2">
+      <div class="card"><h4>Monorepo &amp; tooling</h4><p>npm workspaces, shared <code>tsconfig.base.json</code>, <code>.gitignore</code>, <code>.editorconfig</code>, MIT licence, a public README, and a <code>.claude/launch.json</code> so the client and coordinator preview in one command.</p></div>
+      <div class="card"><h4>@specone/contracts</h4><p>zod schemas: spec lifecycle &amp; frontmatter, the spec anatomy, the normalized <code>DomainEvent</code> union with a per-connection envelope, computed board columns, and the backend-agnostic <code>HarnessAdapter</code> interface + capability flags.</p></div>
+      <div class="card"><h4>@specone/coordinator</h4><p>A thin local WebSocket coordinator: ingest → validate → normalize → fold a read model → persist an append-only NDJSON trace → push ordered, sequenced events. Ships a <code>MockAdapter</code> so the loop runs with no live harness.</p></div>
+      <div class="card"><h4>@specone/adapter-opencode</h4><p>A real <code>fetch</code>-based adapter mapped to OpenCode's server: sessions (parent/child), sync + async prompting, todos, diff, permission reply, commands, Basic-auth, and SSE → <code>DomainEvent</code> normalization. Tier → gateway model resolution built in.</p></div>
+      <div class="card"><h4>@specone/client</h4><p>Vite + React 19 + TypeScript reproducing the design baseline: app shell + sidebar nav, project picker/init, spec library, authoring cockpit, review panel, generation workspace, live board, session detail, diff review, permission overlay, audit, projections, agent roster, harness/model config, settings, notifications — plus the live event-simulation engine and shadcn "neutral" theme (light/dark, Geist).</p></div>
+      <div class="card"><h4>apps/desktop</h4><p>An Electron shell skeleton documenting the embed-the-coordinator packaging plan (Electron recommended, Tauri the lighter alternative).</p></div>
+      <div class="card"><h4>Method scaffolding</h4><p>The agent roster under <code>.opencode/agents</code> (product-owner, technical-architect, engineering, implementation, reviewer) in OpenCode's real frontmatter format; the canonical <code>specification.template.md</code>; the inaugural <code>SPEC-001</code>; <code>AGENTS.md</code> grounding (mirrored by <code>CLAUDE.md</code>); and ADR-0001.</p></div>
+      <div class="card"><h4>Research, vendored</h4><p>The PRD and the design prototype are vendored into <code>docs/</code>. Two source-grounded guides sit in <code>docs/analysis</code>: the OpenCode integration guide and the T3 Code learnings.</p></div>
+    </div>
+  </section>
+
+  <section id="verify">
+    <div class="eyebrow">03 / Verification</div>
+    <h2>What was actually run, and the result</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Check</th><th>Command</th><th class="s">Result</th></tr></thead>
+      <tbody>
+        <tr><td>Workspace install</td><td><code>npm install</code></td><td class="s"><span class="tag t-done">88 pkgs, 0 vuln</span></td></tr>
+        <tr><td>Workspace build</td><td><code>npm run build</code></td><td class="s"><span class="tag t-done">all green</span></td></tr>
+        <tr><td>Workspace typecheck</td><td><code>npm run typecheck</code></td><td class="s"><span class="tag t-done">exit 0</span></td></tr>
+        <tr><td>Client production build</td><td><code>vite build</code></td><td class="s"><span class="tag t-done">36 modules · 305 kB</span></td></tr>
+        <tr><td>Client dev server</td><td><code>vite --port 5188</code></td><td class="s"><span class="tag t-done">HTTP 200</span></td></tr>
+        <tr><td>Coordinator boot + WS</td><td><code>tsx coordinator/src/server.ts</code></td><td class="s"><span class="tag t-done">snapshot + events</span></td></tr>
+        <tr><td>Audit trace persisted</td><td><code>.specone/trace.ndjson</code></td><td class="s"><span class="tag t-done">sequenced lines</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>The coordinator smoke test connected a WebSocket client which received a <code>snapshot</code> frame from the read model, while the trace file recorded normalized events with monotonic <code>seq</code> numbers — the NFR-8 ordering/sequencing and NFR-7 audit-as-truth behaviours in miniature.</p>
+  </section>
+
+  <section id="architecture">
+    <div class="eyebrow">04 / Architecture as built</div>
+    <h2>Thin client · thin local coordinator · harness owns execution</h2>
+<pre>  React client  ──(WebSocket: snapshot + ordered events)──▶  Local coordinator
+   @specone/client                                            @specone/coordinator
+   • cockpit · board · review                                 • ingest → validate (zod)
+   • generation · diff · audit                                • normalize → read model
+   • holds NO authoritative state                             • append-only NDJSON trace
+                                                              • push ordered, sequenced
+                                                                      │
+                                          (HTTP + SSE, Basic-auth, inside trust boundary)
+                                                                      ▼
+                                                         OpenCode harness host
+                                                         @specone/adapter-opencode
+                                                         • opencode serve (4096)
+                                                         • sessions · prompt_async
+                                                         • todo · diff · permission
+                                                         • agents · plugins · gateway
+                                                                      │
+                                                       repo (docs/specifications = truth)
+                                                       git worktrees · gh/az · Jira/ADO MCP</pre>
+    <p>Shared <code>@specone/contracts</code> sit between the client and the coordinator; the adapter interface — not any one harness — is what the system is built against. The <code>MockAdapter</code> lets the coordinator run today; swapping in <code>OpenCodeAdapter</code> is a one-line change once a host is available.</p>
+  </section>
+
+  <section id="frcov">
+    <div class="eyebrow">05 / PRD requirement coverage</div>
+    <h2>Where each functional requirement stands</h2>
+    <p>This pass is foundation + UI baseline, so most requirements are <em>scaffolded</em> (the surface and the contracts exist) rather than wired to a live harness. Honest status:</p>
+    <div class="tbl"><table>
+      <thead><tr><th class="s">FR</th><th>Requirement</th><th class="s">Status</th></tr></thead>
+      <tbody>
+        <tr><td class="s">FR-1</td><td>Specification authoring workspace (anatomy)</td><td class="s"><span class="tag t-part">UI + schema</span></td></tr>
+        <tr><td class="s">FR-2</td><td>Agent-role orchestration</td><td class="s"><span class="tag t-part">roster + UI</span></td></tr>
+        <tr><td class="s">FR-3</td><td>Codebase grounding (AGENTS.md)</td><td class="s"><span class="tag t-part">grounding shipped</span></td></tr>
+        <tr><td class="s">FR-4</td><td>Model tiering (capable / mid)</td><td class="s"><span class="tag t-part">resolver in adapter</span></td></tr>
+        <tr><td class="s">FR-5</td><td>Spec lifecycle &amp; governance</td><td class="s"><span class="tag t-part">schema + UI</span></td></tr>
+        <tr><td class="s">FR-6/7</td><td>Artifact projections &amp; deterministic record writes</td><td class="s"><span class="tag t-todo">event + plugin TODO</span></td></tr>
+        <tr><td class="s">FR-8</td><td>Parallel task execution (child sessions)</td><td class="s"><span class="tag t-part">adapter dispatchAsync</span></td></tr>
+        <tr><td class="s">FR-9</td><td>Delivery board as a projection</td><td class="s"><span class="tag t-part">read model + board UI</span></td></tr>
+        <tr><td class="s">FR-10</td><td>Human-in-the-loop permissions</td><td class="s"><span class="tag t-part">overlay + adapter reply</span></td></tr>
+        <tr><td class="s">FR-11/12</td><td>Diff review &amp; rescue · reviewer approval</td><td class="s"><span class="tag t-part">diff UI · revert TODO</span></td></tr>
+        <tr><td class="s">FR-14/15</td><td>Cockpit chat + live preview · approve &amp; persist</td><td class="s"><span class="tag t-part">UI (simulated)</span></td></tr>
+        <tr><td class="s">FR-16</td><td>Multi-model review panel</td><td class="s"><span class="tag t-part">UI baseline</span></td></tr>
+        <tr><td class="s">FR-17</td><td>Generation: propose · decide · execute</td><td class="s"><span class="tag t-part">UI baseline</span></td></tr>
+        <tr><td class="s">FR-18</td><td>Method-ready scaffolding</td><td class="s"><span class="tag t-done">shipped</span></td></tr>
+        <tr><td class="s">FR-19</td><td>Multi-harness routing</td><td class="s"><span class="tag t-todo">interface ready</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="mono" style="font-size:12px;color:var(--muted)">done = working · UI/schema/part = surface or contract exists, not wired to a live harness · TODO = designed, not built.</p>
+  </section>
+
+  <section id="opencode">
+    <div class="eyebrow">06 / OpenCode integration</div>
+    <h2>Grounded in the live documentation</h2>
+    <p>The adapter was written against a researched, source-cited integration guide (<a href="opencode-integration-guide.md">opencode-integration-guide.md</a>). Confirmed primitives now mapped in <code>adapter-opencode</code>: <code>POST /session</code> (with <code>parentID</code> for tasks), <code>POST /session/:id/message</code> and <code>/prompt_async</code>, <code>GET /session/:id/todo</code> and <code>/diff</code>, <code>POST /permission/:id/reply</code>, <code>POST /session/:id/command</code>, and the <code>GET /global/event</code> SSE stream normalized into <code>DomainEvent</code>s. Auth is HTTP Basic via <code>OPENCODE_SERVER_PASSWORD</code>, held at the host.</p>
+    <h3>Caveats baked into the plan</h3>
+    <ul>
+      <li>No <code>Last-Event-ID</code> on the SSE stream — the adapter must re-fetch state via REST on reconnect (handled by design; reconnect logic is a next step).</li>
+      <li>The permission reply returns <code>200</code> even for stale IDs; don't treat it as proof.</li>
+      <li>Upstream <code>opencode-ai/opencode</code> was archived; an active fork carries the current docs. Always validate shapes against the live <code>GET /doc</code> OpenAPI spec on the target version.</li>
+      <li>Agents resolve a logical tier to a <code>gateway</code> provider (OpenAI-compatible <code>baseURL</code>), keeping models on controlled infrastructure (NFR-5).</li>
+    </ul>
+  </section>
+
+  <section id="t3">
+    <div class="eyebrow">07 / T3 Code learnings applied</div>
+    <h2>Patterns adopted from the reference</h2>
+    <p>The PRD cites T3 Code as the architectural reference. Learnings captured in <a href="t3code-learnings.md">t3code-learnings.md</a>; the ones this foundation already reflects: a thin local coordinator with no cloud backend on the hot path, schema-first contracts validated at the boundary, normalized provider events folded by a read model, and ordered/sequenced push with snapshot-on-connect. Patterns queued for the live phase: the reconnecting five-state WS transport with queued-outbound-drain, typed runtime-signal receipts over polling, a virtualized streaming transcript for the cockpit, and the approval/elicitation composer panels. Where we deliberately differ is intact: spec-as-first-class-aggregate, propose-decide-execute, deterministic projection as the product, required human reviewer, and audit-as-product.</p>
+  </section>
+
+  <section id="gaps">
+    <div class="eyebrow">08 / Identified gaps</div>
+    <h2>What is missing or provisional</h2>
+    <ul>
+      <li><strong>Client uses simulated data.</strong> The cockpit/board render against the prototype's in-memory engine, not the coordinator. No WebSocket transport in the client yet.</li>
+      <li><strong>Adapter unexercised against a live server.</strong> Endpoint shapes follow the docs but have not been validated against a running <code>opencode serve</code>; event property casing (dot vs underscore) is handled defensively but needs confirming on <code>/doc</code>.</li>
+      <li><strong>Message/transcript events not modelled.</strong> <code>DomainEvent</code> covers spec/session/todo/diff/permission/projection but not streaming chat messages — needed for a real cockpit transcript.</li>
+      <li><strong>Projections are UI-only.</strong> The deterministic spec→record projection plugin (FR-7) and the policy/direction-of-truth hook are documented but not implemented.</li>
+      <li><strong>No persistence beyond the NDJSON trace.</strong> No SQLite for sessions/snapshots/audit query (T3 uses SQLite); the read model is in-memory.</li>
+      <li><strong>Client is a faithful port, not idiomatic shadcn.</strong> Screens use the prototype's <code>createElement</code> + inline-style approach; Tailwind/shadcn copy-in components are not yet introduced. Client <code>tsconfig</code> is lenient by design.</li>
+      <li><strong>No tests yet.</strong> Contracts round-trip tests, read-model column-derivation tests and a client smoke render are specified in SPEC-001 but not written.</li>
+      <li><strong>Electron is a skeleton.</strong> No packaging, signing, or coordinator embedding.</li>
+      <li><strong>CLAUDE.md is a pointer, not a symlink</strong> (portable on Windows); convert to a symlink where supported.</li>
+      <li><strong>Reconnect/resilience (NFR-8) and OpenTelemetry export (NFR-7)</strong> are designed but not implemented; only the local NDJSON trace exists.</li>
+    </ul>
+  </section>
+
+  <section id="next">
+    <div class="eyebrow">09 / Suggested next steps</div>
+    <h2>Prioritised path to a live loop</h2>
+    <ol class="body-ol" style="max-width:74ch;padding-left:20px">
+      <li><strong>Wire the client transport (SPEC-001 T-7).</strong> Add a reconnecting WebSocket client to <code>@specone/client</code> that consumes the coordinator's <code>snapshot</code> + <code>event</code> frames and drives the board from real state. Adopt T3's five-state transport with queued-outbound-drain.</li>
+      <li><strong>Stand up a live OpenCode host and exercise the adapter (T-8).</strong> Run <code>opencode serve</code>, point the coordinator's adapter at it, validate every endpoint/event against <code>GET /doc</code>, and implement REST re-fetch on SSE reconnect.</li>
+      <li><strong>Extend the domain model for messages.</strong> Add streaming message/part events to <code>@specone/contracts</code> and a virtualized transcript to the cockpit and session detail.</li>
+      <li><strong>Implement deterministic projection (FR-7).</strong> Ship an OpenCode plugin under <code>.opencode/plugins</code> that reacts to <code>session.idle</code>/status changes and writes Jira/Azure DevOps via MCP, logging every write with its trigger; add the <code>tool.execute.before</code> policy hook.</li>
+      <li><strong>Add persistence.</strong> Introduce SQLite in the coordinator for sessions, spec snapshots and a queryable audit log alongside the trace.</li>
+      <li><strong>Author a real spec through the loop.</strong> Use the cockpit + review panel end-to-end on a throwaway feature to prove "the card moves because the work moved" (the Phase-1 goal).</li>
+      <li><strong>Harden the client.</strong> Introduce Tailwind/shadcn copy-in components incrementally, tighten the client tsconfig, and add the test suite from SPEC-001 §3.2.</li>
+      <li><strong>Observability (NFR-7).</strong> Add OpenTelemetry spans at every coordinator boundary and OTLP export, keeping the NDJSON trace as the local source of truth.</li>
+    </ol>
+  </section>
+
+  <section id="run">
+    <div class="eyebrow">10 / How to run</div>
+    <h2>From a clean clone</h2>
+<pre>git clone https://github.com/michaeljosiah/SpecOne
+cd SpecOne
+npm install
+
+# the React client (design baseline)
+npm run dev                 # → http://localhost:5173
+
+# the local coordinator (mock adapter, scripted event stream)
+npm run dev:coordinator     # → ws://127.0.0.1:4319
+
+# quality gates
+npm run build
+npm run typecheck</pre>
+    <p>Key reading: <a href="../../README.md">README</a> · <a href="../PRD-Specification-Orchestrator.html">PRD</a> · <a href="../specifications/001.foundation-and-scaffold.md">SPEC-001</a> · <a href="../../AGENTS.md">AGENTS.md</a> · <a href="opencode-integration-guide.md">OpenCode guide</a> · <a href="t3code-learnings.md">T3 Code learnings</a>.</p>
+  </section>
+
+  <div class="endnote">
+    <p class="mono">SpecOne · foundation delivery report · 2026-06-28 · build ✓ typecheck ✓ · source of truth: git/docs/specifications</p>
+    <p>Written as a delivery artifact for an away reviewer. Status labels are deliberately honest: "scaffolded" means the surface and contracts exist; a live harness loop is the next milestone.</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "@specone/coordinator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin local coordinator: fronts the harness over WebSocket, normalizes provider events into one schema-validated domain model, persists an append-only trace as the audit source of truth, and survives reconnects (PRD §8.5, NFR-7, NFR-8).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@specone/contracts": "*",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

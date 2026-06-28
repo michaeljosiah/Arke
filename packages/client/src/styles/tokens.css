@@ -1,0 +1,303 @@
+/* ============================================================
+   SpecOne · Color tokens — shadcn/ui "neutral" theme
+   Deliberately unbranded monochrome: white surfaces, near-black
+   primary, neutral grays, one red for destructive. Built on the
+   shadcn variable contract so the system re-skins cleanly.
+   ============================================================ */
+:root {
+  /* ---- shadcn core tokens (light) -------------------------- */
+  --background:            #FFFFFF;
+  --foreground:            #0A0A0A;   /* neutral-950 */
+  --card:                  #FFFFFF;
+  --card-foreground:       #0A0A0A;
+  --popover:               #FFFFFF;
+  --popover-foreground:    #0A0A0A;
+  --primary:               #171717;   /* neutral-900 */
+  --primary-foreground:    #FAFAFA;   /* neutral-50 */
+  --secondary:             #F5F5F5;   /* neutral-100 */
+  --secondary-foreground:  #171717;
+  --muted:                 #F5F5F5;
+  --muted-foreground:      #737373;   /* neutral-500 */
+  --accent:                #F5F5F5;
+  --accent-foreground:     #171717;
+  --destructive:           #E7000B;   /* red-600 */
+  --destructive-foreground:#FAFAFA;
+  --border:                #E5E5E5;   /* neutral-200 */
+  --input:                 #E5E5E5;
+  --ring:                  #A1A1A1;   /* neutral-400 focus ring */
+
+  /* ---- Restrained status palette (use sparingly) ---------- */
+  --success:        #16A34A;  /* green-600 — passing / agreement */
+  --success-bg:     #F0FDF4;
+  --warning:        #D97706;  /* amber-600 — waiting / caution */
+  --warning-bg:     #FFFBEB;
+  --info:           #0A0A0A;  /* monochrome — uses foreground */
+  --danger:         var(--destructive);
+  --danger-bg:      #FEF2F2;
+
+  /* ---- Neutral ramp (for fine control) -------------------- */
+  --neutral-50:  #FAFAFA;
+  --neutral-100: #F5F5F5;
+  --neutral-200: #E5E5E5;
+  --neutral-300: #D4D4D4;
+  --neutral-400: #A1A1A1;
+  --neutral-500: #737373;
+  --neutral-600: #525252;
+  --neutral-700: #404040;
+  --neutral-800: #262626;
+  --neutral-900: #171717;
+  --neutral-950: #0A0A0A;
+
+  /* ============================================================
+     Semantic aliases — prefer shadcn tokens above; these map the
+     system's older names onto the monochrome theme so everything
+     resolves neutral with no legacy accent leaking through.
+     ============================================================ */
+  --bg-app:        var(--background);
+  --bg-surface:    var(--card);
+  --bg-recessed:   var(--muted);
+
+  --surface:       var(--card);
+  --surface-2:     var(--muted);
+  --paper:         var(--background);
+
+  --text-primary:   var(--foreground);
+  --text-secondary: var(--neutral-700);
+  --text-muted:     var(--muted-foreground);
+  --text-placeholder: var(--neutral-400);
+
+  --ink:        var(--foreground);
+  --ink-soft:   var(--neutral-700);
+  --muted-c:    var(--muted-foreground);
+  --faint:      var(--neutral-400);
+
+  --line:       var(--border);
+  --line-soft:  var(--neutral-100);
+  --line-strong:var(--foreground);
+
+  --focus-ring:  var(--ring);
+  --selection-bg: var(--neutral-200);
+  --selection-fg: var(--foreground);
+
+  /* Legacy brand names → monochrome, so nothing renders teal/orange */
+  --teal:        var(--primary);
+  --teal-700:    #000000;
+  --bright:      var(--muted-foreground);
+  --bright-2:    var(--neutral-400);
+  --signal:      var(--destructive);
+  --signal-700:  #B91C1C;
+  --teal-tint:   var(--muted);
+  --teal-tint-2: var(--muted);
+  --signal-tint: var(--danger-bg);
+  --ok:          var(--success);
+  --ok-tint:     var(--success-bg);
+  --warn:        var(--warning);
+  --warn-tint:   var(--warning-bg);
+  --dark:        var(--primary);
+  --on-dark:     var(--primary-foreground);
+  --on-dark-soft:var(--neutral-400);
+  --on-dark-mute:var(--neutral-500);
+}
+
+/* ============================================================
+   Dark theme — apply `class="dark"` on a root element.
+   ============================================================ */
+.dark {
+  --background:            #0A0A0A;
+  --foreground:            #FAFAFA;
+  --card:                  #171717;
+  --card-foreground:       #FAFAFA;
+  --popover:               #171717;
+  --popover-foreground:    #FAFAFA;
+  --primary:               #FAFAFA;
+  --primary-foreground:    #171717;
+  --secondary:             #262626;
+  --secondary-foreground:  #FAFAFA;
+  --muted:                 #262626;
+  --muted-foreground:      #A1A1A1;
+  --accent:                #262626;
+  --accent-foreground:     #FAFAFA;
+  --destructive:           #EF4444;
+  --destructive-foreground:#FAFAFA;
+  --border:                #2A2A2A;
+  --input:                 #2A2A2A;
+  --ring:                  #707070;
+
+  --success-bg: #0B1F12;
+  --warning-bg: #241803;
+  --danger-bg:  #2A0E0E;
+
+  --ink-soft:   var(--neutral-300);
+  --line-soft:  #1F1F1F;
+}
+
+::selection { background: var(--selection-bg); color: var(--selection-fg); }
+
+/* ============================================================
+   SpecOne · Typography tokens — shadcn / Geist
+   One sans family (Geist) for everything; Geist Mono for code,
+   IDs and technical values. No display/mono-label split — the
+   shadcn look is quiet, sans, with small medium-weight labels.
+   ============================================================ */
+:root {
+  /* ---- Families ------------------------------------------- */
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Back-compat aliases (display/body both map to sans) */
+  --font-display: var(--font-sans);
+  --font-body:    var(--font-sans);
+
+  /* ---- Weights -------------------------------------------- */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* ---- Type scale (px) — shadcn uses a tight, small scale -- */
+  --text-xs:   12px;
+  --text-sm:   13px;   /* default UI text (text-sm) */
+  --text-base: 14px;   /* body */
+  --text-md:   15px;
+  --text-lg:   18px;   /* card titles */
+  --text-xl:   20px;
+  --text-2xl:  24px;   /* page heading */
+  --text-3xl:  30px;
+  --text-4xl:  36px;
+  --text-5xl:  48px;
+
+  /* ---- Line heights --------------------------------------- */
+  --leading-none:   1;
+  --leading-tight:  1.15;
+  --leading-snug:   1.3;
+  --leading-normal: 1.5;
+  --leading-body:   1.6;
+
+  /* ---- Letter spacing ------------------------------------- */
+  --tracking-tighter: -0.02em;  /* large headings */
+  --tracking-tight:   -0.01em;
+  --tracking-normal:  0;
+  --tracking-wide:    0.025em;
+  --tracking-label:   0.05em;    /* small uppercase labels (sans) */
+
+  /* ============================================================
+     Semantic roles (shadcn-flavoured)
+     ============================================================ */
+  --type-title:   var(--weight-semibold) var(--text-2xl)/var(--leading-tight) var(--font-sans);
+  --type-h2:      var(--weight-semibold) var(--text-xl)/var(--leading-snug)   var(--font-sans);
+  --type-h3:      var(--weight-semibold) var(--text-lg)/var(--leading-snug)   var(--font-sans);
+  --type-lead:    var(--weight-regular)  var(--text-lg)/var(--leading-normal) var(--font-sans);
+  --type-body:    var(--weight-regular)  var(--text-base)/var(--leading-body) var(--font-sans);
+  --type-ui:      var(--weight-medium)   var(--text-sm)/1.4                   var(--font-sans);
+  --type-label:   var(--weight-medium)   var(--text-xs)/1.2                   var(--font-sans);
+  --type-mono:    var(--weight-regular)  var(--text-sm)/1.5                   var(--font-mono);
+}
+
+/* ============================================================
+   SpecOne · Spacing & layout tokens
+   A 4px base grid. Generous reading measure for prose,
+   tighter rhythm for dense tool surfaces (board, cockpit).
+   ============================================================ */
+:root {
+  --space-0:   0;
+  --space-1:   4px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-7:   28px;
+  --space-8:   32px;
+  --space-10:  40px;
+  --space-12:  48px;
+  --space-16:  64px;
+  --space-20:  80px;
+
+  /* ---- Layout widths -------------------------------------- */
+  --width-max:   1080px;   /* page container */
+  --width-text:  780px;    /* prose measure */
+  --width-prose: 68ch;     /* lead measure */
+
+  /* ---- Semantic spacing ----------------------------------- */
+  --gutter:        var(--space-7);   /* page side padding */
+  --stack-tight:   var(--space-2);
+  --stack:         var(--space-4);
+  --stack-loose:   var(--space-6);
+  --section-gap:   var(--space-12);
+  --control-pad-x: var(--space-4);
+  --control-pad-y: var(--space-2);
+}
+
+/* ============================================================
+   SpecOne · Effects — radius, borders, shadows, motion
+   shadcn/ui contract: a single --radius (0.625rem) with derived
+   steps, and the shadcn shadow scale (shadow-xs to shadow-lg).
+   ============================================================ */
+:root {
+  /* ---- Radius (shadcn: --radius drives the rest) ----------- */
+  --radius:      0.625rem;                      /* 10px base */
+  --radius-sm:   calc(var(--radius) - 4px);     /* 6px  */
+  --radius-md:   calc(var(--radius) - 2px);     /* 8px  */
+  --radius-lg:   var(--radius);                 /* 10px */
+  --radius-xl:   calc(var(--radius) + 4px);     /* 14px */
+  --radius-2xl:  calc(var(--radius) + 8px);     /* 18px */
+  --radius-pill: 999px;
+
+  /* control / card aliases */
+  --radius-control: var(--radius-md);  /* buttons, inputs */
+  --radius-card:    var(--radius-xl);  /* cards */
+  --radius-panel:   var(--radius-xl);
+  --radius-xs:      var(--radius-sm);
+
+  /* ---- Border widths -------------------------------------- */
+  --border-hair:   1px;
+  --border-1:      1px;
+  --border-2:      2px;
+  --border-accent: 4px;
+  --boundary-dash: 6px 4px;
+
+  /* ---- Shadows — shadcn scale (neutral, low) -------------- */
+  --shadow-2xs: 0 1px rgba(0,0,0,0.05);
+  --shadow-xs:  0 1px 2px 0 rgba(0,0,0,0.05);
+  --shadow-sm:  0 1px 3px 0 rgba(0,0,0,0.10), 0 1px 2px -1px rgba(0,0,0,0.10);
+  --shadow-md:  0 4px 6px -1px rgba(0,0,0,0.10), 0 2px 4px -2px rgba(0,0,0,0.10);
+  --shadow-lg:  0 10px 15px -3px rgba(0,0,0,0.10), 0 4px 6px -4px rgba(0,0,0,0.10);
+  --shadow-xl:  0 20px 25px -5px rgba(0,0,0,0.10), 0 8px 10px -6px rgba(0,0,0,0.10);
+  --shadow-focus: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent);
+
+  /* aliases */
+  --shadow-none: none;
+  --shadow-card: var(--shadow-xs);
+  --shadow-pop:  var(--shadow-md);
+
+  /* ---- Motion (shadcn: quick, ease-out) ------------------- */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out:      cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast:   150ms;
+  --dur-base:   200ms;
+  --dur-slow:   300ms;
+  --transition-control: color var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+/* ============================================================
+   Global base styles
+   ============================================================ */
+:root { --page-pad: 24px; --nav-pad: 8px 10px; }
+[data-density="compact"] { --page-pad: 16px; --nav-pad: 6px 9px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--background); color: var(--foreground); }
+#app { width: 100vw; height: 100vh; overflow: hidden; font-family: var(--font-sans); }
+button { font-family: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+  outline: none; box-shadow: var(--shadow-focus);
+}
+/* live entrance — transform only, never opacity, so content is ALWAYS visible
+   even if the animation is throttled/paused at frame 0 (background iframe, print) */
+@keyframes soEnter { from { transform: translateY(6px); } to { transform: none; } }
+.so-enter { animation: soEnter 260ms var(--ease-out, ease-out) both; }
+/* subtle scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted-foreground) 28%, transparent); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted-foreground) 45%, transparent); background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+@media (prefers-reduced-motion: reduce) { .so-enter { animation: none; } }

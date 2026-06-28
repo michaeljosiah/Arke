@@ -1,0 +1,26 @@
+{
+  "name": "specone",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Specification Orchestrator — a React + local-coordinator orchestration layer over coding-agent harnesses that makes the specification the unit of work, from authoring through delivery.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michaeljosiah/SpecOne.git"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace @specone/client",
+    "dev:coordinator": "npm run dev --workspace @specone/coordinator",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRD: Specification Orchestrator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F4F7F6; --surface:#FFFFFF; --ink:#0B2A2F; --ink-soft:#244246;
+    --teal:#0E4F56; --bright:#2BA1A8; --bright-2:#56C2C7; --signal:#DB5430;
+    --muted:#5E706F; --line:#D7E2E0; --line-soft:#E6EEEC;
+    --chip:#0E4F56; --ok:#2F7D62; --warn:#B5641E;
+    --display:"Space Grotesk",system-ui,sans-serif;
+    --body:"Inter",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --maxw:1080px; --textw:780px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--paper);color:var(--ink);
+    font-family:var(--body);font-size:16px;line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+  a{color:var(--teal);text-decoration:none;border-bottom:1px solid var(--line)}
+  a:hover{color:var(--bright)}
+
+  /* ---- Masthead ---- */
+  .mast{padding:64px 0 30px;border-bottom:2px solid var(--ink)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--bright);font-weight:600}
+  .mast h1{font-family:var(--display);font-weight:700;font-size:clamp(34px,5.4vw,58px);line-height:1.02;letter-spacing:-.02em;margin:14px 0 10px;max-width:16ch}
+  .mast .sub{font-size:18px;color:var(--ink-soft);max-width:60ch;margin:0}
+
+  /* ---- Frontmatter ---- */
+  .fm{margin:26px 0 0;background:var(--ink);color:#DCEDEC;border-radius:10px;overflow:hidden}
+  .fm-top{display:flex;align-items:center;gap:10px;padding:11px 18px;background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.08);font-family:var(--mono);font-size:12px;letter-spacing:.04em;color:#9FC4C2}
+  .fm-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:0}
+  .fm-grid div{padding:12px 18px;border-top:1px solid rgba(255,255,255,.06);font-family:var(--mono);font-size:13px}
+  .fm-grid div:nth-child(odd){border-right:1px solid rgba(255,255,255,.06)}
+  .fm-grid .k{color:#7FB0AE}
+  .fm-grid .v{color:#EAF5F4}
+  @media(max-width:640px){.fm-grid{grid-template-columns:1fr}.fm-grid div:nth-child(odd){border-right:none}}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:3px 9px;border-radius:999px;border:1px solid currentColor}
+  .pill.draft{color:var(--signal)}
+  .pill.ok{color:var(--bright-2)}
+
+  /* ---- TOC ---- */
+  .toc{margin:40px 0 8px;padding:22px 24px;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+  .toc h4{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 14px;font-weight:600}
+  .toc ol{margin:0;padding:0;list-style:none;columns:2;column-gap:40px}
+  .toc li{break-inside:avoid;margin:0 0 7px;font-size:14.5px;display:flex;gap:10px}
+  .toc li span{font-family:var(--mono);color:var(--bright);font-size:12.5px;min-width:24px}
+  .toc a{border:none;color:var(--ink-soft)}
+  .toc a:hover{color:var(--teal)}
+  @media(max-width:640px){.toc ol{columns:1}}
+
+  /* ---- Sections ---- */
+  section{padding:46px 0;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--bright);font-weight:600;display:flex;align-items:center;gap:12px;margin-bottom:8px}
+  .eyebrow::before{content:"";width:26px;height:2px;background:var(--bright)}
+  h2{font-family:var(--display);font-weight:600;font-size:clamp(24px,3.4vw,34px);letter-spacing:-.015em;line-height:1.12;margin:4px 0 18px;max-width:24ch}
+  h3{font-family:var(--display);font-weight:600;font-size:20px;letter-spacing:-.01em;margin:30px 0 10px}
+  h4{font-family:var(--display);font-weight:600;font-size:16px;margin:22px 0 8px;color:var(--ink)}
+  p{max-width:var(--textw);margin:0 0 15px}
+  .lead{font-size:18.5px;line-height:1.6;color:var(--ink-soft);max-width:68ch}
+  ul,ol.body-ol{max-width:var(--textw);margin:0 0 16px;padding-left:22px}
+  li{margin:0 0 8px}
+  strong{font-weight:600;color:var(--ink)}
+  code{font-family:var(--mono);font-size:.86em;background:#E8F0EE;color:var(--teal);padding:1.5px 6px;border-radius:5px}
+  .mono{font-family:var(--mono)}
+
+  /* ---- Callout ---- */
+  .callout{max-width:var(--textw);margin:20px 0;border-left:3px solid var(--signal);background:#FCEEE8;padding:14px 18px;border-radius:0 8px 8px 0}
+  .callout.truth{border-color:var(--bright);background:#E5F4F3}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;color:var(--signal);margin-bottom:4px}
+  .callout.truth .lbl{color:var(--teal)}
+  .callout p{margin:0;max-width:none;font-size:15px}
+
+  /* ---- Requirement blocks ---- */
+  .req{max-width:var(--textw);border:1px solid var(--line);border-radius:9px;background:var(--surface);padding:16px 18px;margin:0 0 14px}
+  .req .id{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--bright);letter-spacing:.04em}
+  .req .ttl{font-family:var(--display);font-weight:600;font-size:16.5px;margin:3px 0 7px}
+  .req p{margin:0;font-size:15px;max-width:none}
+  .req .pri{float:right;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+
+  /* ---- Tables ---- */
+  .tbl{max-width:100%;overflow-x:auto;margin:18px 0}
+  table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
+  th,td{text-align:left;padding:10px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;border-bottom:1.5px solid var(--ink)}
+  td code{font-size:.84em}
+  tbody tr:hover{background:#F0F5F4}
+
+  /* ---- Figures ---- */
+  figure{margin:26px 0;max-width:100%}
+  .fig-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:22px 20px 8px}
+  figure svg{width:100%;height:auto;display:block}
+  figcaption{font-size:13.5px;color:var(--muted);margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft);font-family:var(--body)}
+  figcaption b{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--bright);font-weight:600;display:block;margin-bottom:3px}
+
+  /* ---- Two col on goals ---- */
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:26px;max-width:var(--textw)}
+  @media(max-width:640px){.split{grid-template-columns:1fr}}
+  .split h4{margin-top:0}
+
+  .endnote{padding:40px 0 90px;color:var(--muted);font-size:13.5px}
+  .endnote .mono{color:var(--ink-soft)}
+
+  ::selection{background:var(--bright);color:#fff}
+  @media print{
+    body{background:#fff}
+    section{break-inside:avoid-page}
+    .fig-card,.req,.toc{break-inside:avoid}
+    a{color:var(--ink)}
+  }
+</style>
+</head>
+<body>
+
+<header class="mast">
+  <div class="wrap">
+    <div class="kicker">Product Requirements Document</div>
+    <h1>Specification Orchestrator</h1>
+    <p class="sub">A React orchestration layer over coding-agent harnesses that makes the specification the unit of work, from authoring through delivery.</p>
+
+    <div class="fm">
+      <div class="fm-top">// frontmatter &nbsp;·&nbsp; this PRD is written as an instance of the methodology it describes</div>
+      <div class="fm-grid">
+        <div><span class="k">doc_id:</span> <span class="v">PRD-2026-06-27-spec-orchestrator</span></div>
+        <div><span class="k">status:</span> <span class="v"><span class="pill draft">draft</span></span></div>
+        <div><span class="k">owner:</span> <span class="v">Open-source project · core maintainers</span></div>
+        <div><span class="k">version:</span> <span class="v">0.8</span></div>
+        <div><span class="k">source_of_truth:</span> <span class="v">git · docs/specifications</span></div>
+        <div><span class="k">first_harness:</span> <span class="v">OpenCode</span></div>
+        <div><span class="k">related:</span> <span class="v">AI Engineering methodology deck</span></div>
+        <div><span class="k">date:</span> <span class="v">2026-06-27</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <nav class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><span>01</span><a href="#overview">Overview</a></li>
+      <li><span>02</span><a href="#background">Background &amp; context</a></li>
+      <li><span>03</span><a href="#problem">Problem statement</a></li>
+      <li><span>04</span><a href="#vision">Vision &amp; thesis</a></li>
+      <li><span>05</span><a href="#goals">Goals &amp; non-goals</a></li>
+      <li><span>06</span><a href="#users">Users &amp; personas</a></li>
+      <li><span>07</span><a href="#approach">Solution approach</a></li>
+      <li><span>08</span><a href="#architecture">Architecture</a></li>
+      <li><span>09</span><a href="#integration">Integration model</a></li>
+      <li><span>10</span><a href="#surfaces">Client surfaces &amp; workflows</a></li>
+      <li><span>11</span><a href="#functional">Functional requirements</a></li>
+      <li><span>12</span><a href="#adapter">Adapter, scaffolding &amp; harnesses</a></li>
+      <li><span>13</span><a href="#nfr">Non-functional requirements</a></li>
+      <li><span>14</span><a href="#security">Security, governance &amp; audit</a></li>
+      <li><span>15</span><a href="#opencode">OpenCode integration spec</a></li>
+      <li><span>16</span><a href="#roadmap">Phasing &amp; roadmap</a></li>
+      <li><span>17</span><a href="#risks">Risks &amp; mitigations</a></li>
+      <li><span>18</span><a href="#scope">Out of scope</a></li>
+      <li><span>19</span><a href="#questions">Open questions</a></li>
+      <li><span>20</span><a href="#decisions">Decision log</a></li>
+      <li><span>21</span><a href="#priorart">Prior art &amp; grounding</a></li>
+      <li><span>22</span><a href="#appendix">Appendix &amp; references</a></li>
+    </ol>
+  </nav>
+
+  <!-- 01 -->
+  <section id="overview">
+    <div class="eyebrow">01 / Overview</div>
+    <h2>One specification, authored once, drives the whole delivery</h2>
+    <p class="lead">The Specification Orchestrator is a React web application that sits on top of an existing coding-agent harness and turns the specification-centric engineering method into a working product. The specification is co-authored by a human and AI, grounded in the codebase, and becomes the single source of truth. Everything downstream, the tasks, the code, the tickets, the tests, the tracking, is generated from it and kept in step with it.</p>
+    <p>The application does not replace the coding agent and it does not become a system of record. It is the cockpit a Product Engineer works in to orchestrate three things: the creation of a specification, the agents that work against that specification, and a kanban view of the specification moving across delivery. The harness owns execution. The orchestrator owns realisation, visualisation, and coordination of what the harness is doing.</p>
+    <p>The first harness is OpenCode, chosen because it runs a headless server with a typed API, exposes a granular event stream, maintains per-session task lists, and is open source and self-hostable. A backend-agnostic adapter keeps the orchestration logic independent of any single harness so that GitHub Copilot, Claude Code, or others can be added later without reworking the product.</p>
+    <p>Asset management is the first use case, because that is where the method was proven, but the product is general. It is open source for any team practising spec-centric engineering, and its governance and audit features serve anyone who must show how a change was decided and who approved it, not finance alone.</p>
+  </section>
+
+  <!-- 02 -->
+  <section id="background">
+    <div class="eyebrow">02 / Background &amp; context</div>
+    <h2>From a framework to a single specification</h2>
+    <p>AI code generation is fast but unreliable without structure. The team has moved up a maturity ladder to address this: from vibe coding, to context engineering that grounds the AI in <code>agents.md</code>, guides and prompts, to specification-driven development that adds process on top.</p>
+    <p>The heavy form of that approach split work across three files: <code>requirements.md</code>, <code>specifications.md</code> and <code>tasks.md</code>, each owned by a different agent role. That framework taught the discipline, but splitting the work across three documents added overhead without adding rigour. The current method collapses them into a single specification that holds the business intent, the technical design, the constraints and the task breakdown in one place.</p>
+    <p>That single specification is the centre of gravity. It lives in the codebase, typically under <code>docs/specifications</code>, is versioned and reviewed through pull request like any other code, and is co-authored by the human and the AI grounded in the repository. A mature, context-engineered codebase makes the specification richer and more accurate. The most capable model drives its creation so that a mid-tier model can implement it with high accuracy.</p>
+    <p>As the specification becomes the unit of work, the engineer moves from writing code to deciding what is built and owning that it is correct: closer to a Product Engineer than a coder. This PRD specifies the tool that makes that way of working real.</p>
+  </section>
+
+  <!-- 03 -->
+  <section id="problem">
+    <div class="eyebrow">03 / Problem statement</div>
+    <h2>The method works on paper but has no home</h2>
+    <p>The specification-centric method is currently a practice, not a product. It depends on engineers manually driving agents, hand-maintaining the link between a specification and its downstream artifacts, and tracking delivery in tools that were built for human-authored tickets. This creates four problems.</p>
+    <ol class="body-ol">
+      <li><strong>The specification and its artifacts drift.</strong> Jira stories, tests and tracking are maintained by hand alongside the specification, so they fall out of step with it and with the code.</li>
+      <li><strong>Tracking tools assume human decomposition.</strong> A board where people drag cards is a parallel record of work that someone has to keep true. It does not reflect what agents are actually doing in the repository.</li>
+      <li><strong>Agent work is invisible and serial.</strong> There is no shared surface that shows agents authoring a specification or implementing tasks, what they are waiting on, or where a human needs to step in.</li>
+      <li><strong>Governance is implicit.</strong> Approvals, the direction of truth between a specification and its projections, and the audit trail all live in people's heads or in disconnected tools.</li>
+    </ol>
+    <p>The orchestrator addresses these by making the specification authoritative, generating the artifacts from it, and projecting real delivery state, rather than a hand-maintained one, onto a single surface.</p>
+  </section>
+
+  <!-- 04 -->
+  <section id="vision">
+    <div class="eyebrow">04 / Vision &amp; thesis</div>
+    <h2>A Product Engineer owns a feature end to end</h2>
+    <p class="lead">The future this product is built for is one where a single engineer owns a feature across its whole lifecycle, from specification through to delivery, because the agent collapses work that used to need a chain of people.</p>
+    <p>The strong, defensible claim is the end-to-end ownership of the lifecycle, not that the work becomes solitary. A human reviewer remains in the loop for what ships, for the same reason code goes through pull request today: someone other than the author confirms what is released. The reviewer's job changes shape. They review a specification and a generated change rather than hand-written code.</p>
+    <p>The product thesis follows from that. The orchestrator is the place a Product Engineer authors the specification, governs it, dispatches the agents, watches delivery happen, and steps in at the decision points. It is what a human-oriented tracking tool will become once the specification, not the ticket, is the unit of work.</p>
+    <div class="callout truth">
+      <div class="lbl">Direction of truth</div>
+      <p>The specification is authoritative. Tickets, tests, tracking and docs are generated projections of it. When the specification changes, the projections are regenerated from it. Nothing downstream overrides the specification.</p>
+    </div>
+  </section>
+
+  <!-- 05 -->
+  <section id="goals">
+    <div class="eyebrow">05 / Goals &amp; non-goals</div>
+    <h2>What this release is, and is not</h2>
+    <div class="split">
+      <div>
+        <h4>Goals</h4>
+        <ul>
+          <li>Make the specification the authoritative artifact, authored and governed in one place and persisted in the repository.</li>
+          <li>Orchestrate agent roles to co-author the specification and to implement its tasks.</li>
+          <li>Generate downstream artifacts from the specification and keep them in step with it.</li>
+          <li>Project real delivery state onto a kanban board driven by harness events, not manual updates.</li>
+          <li>Keep a human in control at the permission and approval points.</li>
+          <li>Stay harness-agnostic through a single adapter interface.</li>
+        </ul>
+      </div>
+      <div>
+        <h4>Non-goals</h4>
+        <ul>
+          <li>Becoming a system of record. The repository and the integrated tools hold the truth.</li>
+          <li>Reimplementing a coding agent. The harness does execution.</li>
+          <li>Replacing Jira, GitHub or Azure DevOps. The orchestrator drives them through their own interfaces.</li>
+          <li>A team-wide, multi-user collaboration surface in this release. Scope is single-engineer ownership.</li>
+          <li>Holding credentials in the browser, or making system-of-record calls from the client.</li>
+          <li>An autonomous, no-human pipeline. Approval stays human.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 -->
+  <section id="users">
+    <div class="eyebrow">06 / Users &amp; personas</div>
+    <h2>The Product Engineer is the primary user</h2>
+    <h3>Primary · The Product Engineer</h3>
+    <p>Owns a feature end to end. Authors and governs the specification with the AI, dispatches implementation agents, reviews diffs, answers permission requests, and shepherds the work to merge. Wants the specification to be the thing they think in, and wants delivery state to be true without maintaining it by hand.</p>
+    <h3>Secondary · The Reviewer</h3>
+    <p>A second engineer or lead who reviews the specification and the generated change before it ships. Needs to see intent, the diff, and the decision log in one place. Does not need to author.</p>
+    <h3>Context · Risk &amp; governance</h3>
+    <p>Not a daily user, but a stakeholder whose requirements shape the product: auditability of who approved what, where credentials live, and evidence that a human reviewed what was released. These are first-class constraints rather than later additions for any team that must answer for what it ships, regulated industries among them.</p>
+  </section>
+
+  <!-- 07 -->
+  <section id="approach">
+    <div class="eyebrow">07 / Solution approach</div>
+    <h2>The orchestrator realises a loop the harness executes</h2>
+    <p>The product is the loop, not a screen. Ground the AI in the codebase, co-author the specification, review and approve it, fan it out into downstream artifacts, and keep it in sync as the code moves. The React application is the surface a Product Engineer drives that loop from.</p>
+
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 250" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs>
+            <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0E4F56"/></marker>
+          </defs>
+          <!-- stages -->
+          <g>
+            <!-- helper positions -->
+            <!-- 6 stages -->
+            <g>
+              <rect x="20" y="86" width="135" height="70" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+              <text x="87" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Ground</text>
+              <text x="87" y="134" text-anchor="middle" font-size="10.5" fill="#5E706F">codebase + agents.md</text>
+            </g>
+            <g>
+              <rect x="180" y="86" width="135" height="70" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+              <text x="247" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Author</text>
+              <text x="247" y="134" text-anchor="middle" font-size="10.5" fill="#5E706F">human + AI</text>
+            </g>
+            <g>
+              <rect x="340" y="86" width="135" height="70" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+              <text x="407" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Review</text>
+              <text x="407" y="134" text-anchor="middle" font-size="10.5" fill="#5E706F">human reviewer</text>
+            </g>
+            <g>
+              <rect x="500" y="86" width="135" height="70" rx="9" fill="#0E4F56" stroke="#0E4F56"/>
+              <text x="567" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#fff">Approve</text>
+              <text x="567" y="134" text-anchor="middle" font-size="10.5" fill="#9FC4C2">status: approved</text>
+            </g>
+            <g>
+              <rect x="660" y="86" width="135" height="70" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+              <text x="727" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Fan out</text>
+              <text x="727" y="134" text-anchor="middle" font-size="10.5" fill="#5E706F">tasks · tickets · tests</text>
+            </g>
+            <g>
+              <rect x="820" y="86" width="135" height="70" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+              <text x="887" y="116" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Sync</text>
+              <text x="887" y="134" text-anchor="middle" font-size="10.5" fill="#5E706F">projections track spec</text>
+            </g>
+          </g>
+          <!-- arrows -->
+          <line x1="156" y1="121" x2="178" y2="121" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#ar)"/>
+          <line x1="316" y1="121" x2="338" y2="121" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#ar)"/>
+          <line x1="476" y1="121" x2="498" y2="121" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#ar)"/>
+          <line x1="636" y1="121" x2="658" y2="121" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#ar)"/>
+          <line x1="796" y1="121" x2="818" y2="121" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#ar)"/>
+          <!-- feedback -->
+          <path d="M887,156 L887,196 L247,196 L247,158" fill="none" stroke="#DB5430" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+          <text x="567" y="212" text-anchor="middle" font-size="11" fill="#DB5430">change to the spec re-runs the loop and regenerates the projections</text>
+        </svg>
+      </div>
+      <figcaption><b>Figure 1 · The specification loop</b>The orchestrator presents and coordinates these stages; the harness performs the work inside each one. A change to the approved specification re-enters the loop and regenerates everything downstream.</figcaption>
+    </figure>
+
+    <p>Three principles shape every decision in this document.</p>
+    <ol class="body-ol">
+      <li><strong>The harness owns execution.</strong> All interaction with the repository, the coding agent, the registered CLIs and the registered MCP servers happens inside the harness. The orchestrator dispatches and observes; it does not execute.</li>
+      <li><strong>The specification stays in the codebase.</strong> Its canonical copy is a file in the repository, versioned and reviewed. The orchestrator never holds the authoritative copy.</li>
+      <li><strong>Projections are governed, not hoped for.</strong> The link from a specification to a system of record is deterministic code, not a behaviour an agent is trusted to remember.</li>
+    </ol>
+  </section>
+
+  <!-- 08 -->
+  <section id="architecture">
+    <div class="eyebrow">08 / Architecture</div>
+    <h2>A thin client over a harness that owns everything beneath it</h2>
+    <p>The React client talks directly to the harness over its HTTP API and event stream, through a capability-flagged adapter. There is no separate backend on the agent hot path. The harness host is a trust and credential boundary: it holds the repository working tree, the agent runtime, the orchestration plugins, and the authorised CLIs and MCP servers that reach external systems. The client sees only the realisation of what happens inside it.</p>
+
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 540" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs>
+            <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0E4F56"/></marker>
+            <marker id="a2o" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#DB5430"/></marker>
+            <marker id="a2b" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2BA1A8"/></marker>
+          </defs>
+
+          <!-- CLIENT -->
+          <rect x="40" y="28" width="920" height="118" rx="12" fill="#FFFFFF" stroke="#0E4F56" stroke-width="1.4"/>
+          <text x="60" y="52" font-size="12" font-weight="600" fill="#2BA1A8">REACT ORCHESTRATOR · browser</text>
+          <g font-size="12" fill="#0B2A2F">
+            <rect x="60" y="64" width="180" height="40" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="150" y="89" text-anchor="middle">Spec cockpit</text>
+            <rect x="252" y="64" width="180" height="40" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="342" y="89" text-anchor="middle">Kanban board</text>
+            <rect x="444" y="64" width="180" height="40" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="534" y="89" text-anchor="middle">Diff &amp; review</text>
+            <rect x="636" y="64" width="264" height="40" rx="7" fill="#FCEEE8" stroke="#DB5430"/><text x="768" y="89" text-anchor="middle" fill="#0B2A2F">Permission prompts</text>
+          </g>
+          <rect x="60" y="112" width="840" height="26" rx="6" fill="#0E4F56"/>
+          <text x="480" y="129" text-anchor="middle" font-size="11.5" fill="#DCEDEC">backend-agnostic adapter · capability-flagged (OpenCode today · Copilot / Claude Code later)</text>
+
+          <!-- link client-harness -->
+          <line x1="480" y1="146" x2="480" y2="186" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#a2)"/>
+          <line x1="520" y1="186" x2="520" y2="146" stroke="#2BA1A8" stroke-width="1.6" marker-end="url(#a2b)"/>
+          <text x="500" y="172" text-anchor="middle" font-size="10.5" fill="#5E706F">HTTP request  ·  SSE events</text>
+
+          <!-- HARNESS BOUNDARY -->
+          <rect x="40" y="190" width="920" height="250" rx="12" fill="#F0F7F6" stroke="#0E4F56" stroke-width="1.6" stroke-dasharray="7 5"/>
+          <text x="60" y="214" font-size="12" font-weight="600" fill="#0E4F56">HARNESS HOST · OpenCode `opencode serve`  ·  trust + credential boundary</text>
+
+          <rect x="60" y="226" width="250" height="86" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="185" y="248" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Agent runtime</text>
+          <text x="185" y="268" text-anchor="middle" font-size="10.5" fill="#5E706F">Product Owner · Architect</text>
+          <text x="185" y="283" text-anchor="middle" font-size="10.5" fill="#5E706F">Engineering · Implementation</text>
+          <text x="185" y="301" text-anchor="middle" font-size="10.5" fill="#5E706F">model tiering per role</text>
+
+          <rect x="322" y="226" width="250" height="86" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="447" y="248" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Sessions</text>
+          <text x="447" y="268" text-anchor="middle" font-size="10.5" fill="#5E706F">parent: the spec</text>
+          <text x="447" y="283" text-anchor="middle" font-size="10.5" fill="#5E706F">children: tasks (async)</text>
+          <text x="447" y="301" text-anchor="middle" font-size="10.5" fill="#5E706F">one git worktree each</text>
+
+          <rect x="584" y="226" width="316" height="86" rx="8" fill="#FFFFFF" stroke="#DB5430"/>
+          <text x="742" y="248" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Plugins</text>
+          <text x="742" y="268" text-anchor="middle" font-size="10.5" fill="#5E706F">policy hooks (direction of truth)</text>
+          <text x="742" y="283" text-anchor="middle" font-size="10.5" fill="#5E706F">deterministic spec → record projection</text>
+          <text x="742" y="301" text-anchor="middle" font-size="10.5" fill="#5E706F">event taps</text>
+
+          <!-- repo -->
+          <rect x="60" y="326" width="512" height="92" rx="8" fill="#0E4F56"/>
+          <text x="316" y="350" text-anchor="middle" font-size="12.5" font-weight="600" fill="#fff">Repository working tree  ·  source of truth</text>
+          <text x="316" y="372" text-anchor="middle" font-size="11" fill="#9FC4C2" font-weight="600">docs/specifications/&lt;spec&gt;.md</text>
+          <text x="316" y="392" text-anchor="middle" font-size="10.5" fill="#9FC4C2">versioned · reviewed via pull request · agents read &amp; write in place</text>
+
+          <!-- integrations gateways -->
+          <rect x="584" y="326" width="316" height="92" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="742" y="348" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Registered CLIs &amp; MCP servers</text>
+          <text x="742" y="368" text-anchor="middle" font-size="10.5" fill="#5E706F">gh · az · Jira MCP · Azure DevOps MCP</text>
+          <text x="742" y="386" text-anchor="middle" font-size="10.5" fill="#DB5430" font-weight="600">authorised once at the host · tokens never leave it</text>
+
+          <!-- external -->
+          <g font-size="11.5" fill="#0B2A2F">
+            <rect x="40" y="470" width="270" height="44" rx="8" fill="#FFFFFF" stroke="#5E706F"/><text x="175" y="497" text-anchor="middle">GitHub (repo · PR)</text>
+            <rect x="365" y="470" width="270" height="44" rx="8" fill="#FFFFFF" stroke="#5E706F"/><text x="500" y="497" text-anchor="middle">Jira (stories · status)</text>
+            <rect x="690" y="470" width="270" height="44" rx="8" fill="#FFFFFF" stroke="#5E706F"/><text x="825" y="497" text-anchor="middle">Azure DevOps (work items)</text>
+          </g>
+          <line x1="742" y1="418" x2="742" y2="448" stroke="#DB5430" stroke-width="1.5"/>
+          <path d="M742,448 L175,448 L175,468" fill="none" stroke="#DB5430" stroke-width="1.5" marker-end="url(#a2o)"/>
+          <path d="M742,448 L500,448 L500,468" fill="none" stroke="#DB5430" stroke-width="1.5" marker-end="url(#a2o)"/>
+          <path d="M742,448 L825,448 L825,468" fill="none" stroke="#DB5430" stroke-width="1.5" marker-end="url(#a2o)"/>
+        </svg>
+      </div>
+      <figcaption><b>Figure 2 · System architecture</b>The client communicates directly with the harness; the dashed boundary holds all execution and every credential. External writes leave from the host's CLIs and MCP servers, in orange, not from the browser. No backend sits on the hot path.</figcaption>
+    </figure>
+
+    <h3>8.1 The harness host</h3>
+    <p>OpenCode runs as a headless server against a checkout of the repository. It owns the agent runtime, the sessions, the working tree, the orchestration plugins, and the registered CLIs and MCP servers. Because it is open source and self-hostable, it can run on infrastructure the firm controls and point at an internal model gateway rather than public endpoints. Authorisation for every external tool is established once at the host.</p>
+
+    <h3>8.2 The React client and the adapter</h3>
+    <p>The client renders the cockpit, the board, the diff and review surfaces, and the permission prompts. Beneath them sits a backend-agnostic adapter that exposes a small interface and is implemented per harness. Today there is one implementation, for OpenCode. The interface, not any one harness, is what the product is built against.</p>
+
+    <h3>8.3 Communication and events</h3>
+    <p>Requests go from the client to the harness over HTTP. State comes back as a server-sent event stream. The UI is event-driven rather than polled: work is dispatched asynchronously and the board, the diffs and the prompts update as events arrive. This is what lets many agents run at once and still present a single coherent picture.</p>
+
+    <h3>8.4 Where state lives</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>State</th><th>Home</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>The specification</td><td><code>docs/specifications</code> in the repo</td><td>Source of truth; versioned and reviewed as code</td></tr>
+          <tr><td>Code changes</td><td>Git branches / worktrees</td><td>Produced by implementation agents in the harness</td></tr>
+          <tr><td>Tickets, work items</td><td>Jira / Azure DevOps</td><td>Projections written by the host's CLIs / MCPs</td></tr>
+          <tr><td>Delivery state</td><td>Derived from harness events + VCS</td><td>Computed, never hand-maintained</td></tr>
+          <tr><td>Session &amp; run history</td><td>Harness</td><td>The harness is the execution record</td></tr>
+          <tr><td>Client view state</td><td>React, in memory</td><td>Realisation only; nothing authoritative</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>8.5 A thin local coordinator</h3>
+    <p>A working reference implementation in the wild (see section 21) clarifies one point we framed too strongly. "No backend on the hot path" should mean no cloud backend, not no process at all. In practice the client talks over a WebSocket to a thin coordinator that runs locally on the harness host, because a browser cannot speak some agents’ native transports and you need one place to normalise heterogeneous provider events, gate startup, order the event stream, and survive reconnects. This stays inside our boundary: the coordinator, the agents and the credentials all run on the host, and the browser only renders.</p>
+    <p>The coordinator normalises each provider’s native events into one canonical domain-event model. It ingests provider events, persists them, exposes a read model, and pushes ordered, sequenced, schema-validated events to the client. The board reads from that normalised model rather than from raw provider output, which is what lets capability differences between harnesses be absorbed cleanly. For OpenCode, whose server already speaks HTTP and SSE, the coordinator is thin; for an agent that speaks stdio or a bespoke protocol, it does more. Either way the client sees one model.</p>
+    <p>Several mechanisms from the reference are worth adopting directly: typed runtime receipts for async milestones such as turn quiescence and diff finalisation, so the board reacts to signals rather than polling; automatic git checkpoints captured around agent turns for rescue and audit; and a global runtime mode governing approval posture and sandboxing, a supervised mode that asks for approval and writes only within the workspace, and a full-access mode for trusted flows.</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 482" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs>
+            <marker id="n9" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#0E4F56"/></marker>
+            <marker id="n9b" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#2BA1A8"/></marker>
+          </defs>
+          <rect x="320" y="16" width="360" height="52" rx="9" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="500" y="40" text-anchor="middle" font-size="13" font-weight="600" fill="#0B2A2F">Browser · React</text>
+          <text x="500" y="58" text-anchor="middle" font-size="9.5" fill="#5E706F">reconnecting WS transport · decode at boundary</text>
+          <line x1="482" y1="68" x2="482" y2="98" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#n9)"/>
+          <line x1="518" y1="98" x2="518" y2="68" stroke="#2BA1A8" stroke-width="1.5" marker-end="url(#n9b)"/>
+          <text x="556" y="86" font-size="9" fill="#5E706F">WebSocket</text>
+          <rect x="60" y="100" width="880" height="150" rx="12" fill="#F0F7F6" stroke="#0E4F56" stroke-dasharray="7 5"/>
+          <text x="80" y="122" font-size="12" font-weight="600" fill="#0E4F56">Local coordinator · on the harness host</text>
+          <rect x="90" y="138" width="240" height="64" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="210" y="164" text-anchor="middle" font-size="12" font-weight="600" fill="#0B2A2F">Provider ingestion</text>
+          <text x="210" y="182" text-anchor="middle" font-size="9.5" fill="#5E706F">normalise native events</text>
+          <rect x="380" y="138" width="240" height="64" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="500" y="164" text-anchor="middle" font-size="12" font-weight="600" fill="#0B2A2F">Orchestration engine</text>
+          <text x="500" y="182" text-anchor="middle" font-size="9.5" fill="#5E706F">persist · read model</text>
+          <rect x="670" y="138" width="250" height="64" rx="8" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="795" y="164" text-anchor="middle" font-size="12" font-weight="600" fill="#0B2A2F">Ordered push bus</text>
+          <text x="795" y="182" text-anchor="middle" font-size="9.5" fill="#5E706F">sequenced · validated</text>
+          <line x1="330" y1="170" x2="378" y2="170" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#n9)"/>
+          <line x1="620" y1="170" x2="668" y2="170" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#n9)"/>
+          <text x="500" y="228" text-anchor="middle" font-size="9.5" fill="#5E706F">typed runtime receipts · git checkpoints · runtime modes (supervised / full access)</text>
+          <rect x="60" y="296" width="545" height="168" rx="12" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="80" y="318" font-size="11" font-weight="600" fill="#0E4F56">Providers (on host)</text>
+          <text x="80" y="337" font-size="9.5" fill="#2BA1A8">adapters · ACP / stdio / HTTP</text>
+          <rect x="80" y="346" width="150" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="155" y="367" text-anchor="middle" font-size="10.5" fill="#0B2A2F">OpenCode</text>
+          <rect x="240" y="346" width="150" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="315" y="367" text-anchor="middle" font-size="10.5" fill="#0B2A2F">Claude Code</text>
+          <rect x="400" y="346" width="150" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="475" y="367" text-anchor="middle" font-size="10.5" fill="#0B2A2F">Codex</text>
+          <rect x="80" y="394" width="240" height="34" rx="7" fill="#F4F7F6" stroke="#0E4F56"/><text x="200" y="415" text-anchor="middle" font-size="9.5" fill="#0B2A2F">git · worktrees · checkpoints</text>
+          <rect x="330" y="394" width="220" height="34" rx="7" fill="#F4F7F6" stroke="#0E4F56"/><text x="440" y="415" text-anchor="middle" font-size="9.5" fill="#0B2A2F">gh · az · Jira / Azure MCP</text>
+          <line x1="300" y1="250" x2="300" y2="294" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#n9)"/>
+          <line x1="336" y1="294" x2="336" y2="250" stroke="#2BA1A8" stroke-width="1.5" marker-end="url(#n9b)"/>
+          <rect x="625" y="296" width="315" height="168" rx="12" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="645" y="318" font-size="11" font-weight="600" fill="#0E4F56">Observability</text>
+          <text x="645" y="337" font-size="9.5" fill="#2BA1A8">spans at every boundary</text>
+          <rect x="645" y="346" width="275" height="46" rx="7" fill="#0E4F56"/>
+          <text x="782" y="367" text-anchor="middle" font-size="10.5" font-weight="600" fill="#fff">Local trace (NDJSON)</text>
+          <text x="782" y="383" text-anchor="middle" font-size="9" fill="#9FC4C2">audit source of truth</text>
+          <rect x="645" y="402" width="275" height="40" rx="7" fill="#E5F4F3" stroke="#0E4F56"/>
+          <text x="782" y="427" text-anchor="middle" font-size="9.5" fill="#0B2A2F">OTLP &#8594; Grafana / Tempo / Prometheus</text>
+          <line x1="782" y1="250" x2="782" y2="294" stroke="#0E4F56" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#n9)"/>
+          <text x="800" y="276" font-size="8.5" fill="#5E706F">spans</text>
+        </svg>
+      </div>
+      <figcaption><b>Figure 9 · The runtime, refined</b>A thin local coordinator fronts the harness over WebSocket, normalises provider-native events into one schema-validated domain model, and survives reconnects. Observability spans are persisted to a local trace that serves as the audit record. No cloud backend sits on the hot path.</figcaption>
+    </figure>
+
+    <h3>8.6 Delivery surfaces and tooling</h3>
+    <p>The client is a React application. In the browser it talks to the coordinator over WebSocket. As a desktop application it ships the same React interface with the coordinator embedded, so there is nothing separate to install and the engineer runs one signed app.</p>
+    <p>The coordinator is a Node process, which makes a Node-embedding desktop shell the natural packaging. The recommended shell is Electron: because the coordinator is already Node it runs in Electron's main process with no extra runtime, and Electron is well understood for enterprise code-signing and managed distribution. The lighter alternative is Tauri, a Rust shell that runs the Node coordinator as a sidecar; it yields smaller binaries at the cost of a Rust dependency. The choice is Node-native maturity against footprint, and it does not affect the architecture, since either shell embeds the same coordinator and serves the same React client.</p>
+    <p>For v1 the delivery surfaces are the desktop application and the browser; a mobile client is out of scope. In an enterprise setting the desktop build also gives IT a signed artifact to distribute and control, which the browser surface alone does not.</p>
+    <p>On the client stack, the React interface is built on Radix primitives through the shadcn/ui pattern, where components are copied into the repository rather than pulled in as a dependency. That suits an open-source tool: contributors own and extend the components directly, there is no library lock-in, and the Radix primitives carry keyboard, focus and screen-reader behaviour by default, which is most of NFR-6 for free. The default theme is a neutral monochrome, deliberately unbranded, so any team can re-skin it to their own identity. The product ships looking like infrastructure, not like one company’s app.</p>
+  </section>
+
+  <!-- 09 -->
+  <section id="integration">
+    <div class="eyebrow">09 / Integration model</div>
+    <h2>The harness owns the integrations, the client owns the picture</h2>
+    <p>Integrations into third-party systems happen at the harness, through CLIs and MCP servers that are registered and authorised at the host. The agent invokes them as tools inside its session, gated by the permission protocol. The browser is never in the credential path and never makes a call to a system of record. This is the same execution boundary that already applies to the repository, extended evenly to external systems.</p>
+
+    <h3>9.1 Two places an integration can fire</h3>
+    <p>A useful distinction governs how each integration is wired.</p>
+    <ul>
+      <li><strong>Agent-side, as part of the work.</strong> Creating a branch and opening a pull request is legitimately the agent's own work. It does this through the GitHub CLI or MCP in-session, gated by a permission prompt.</li>
+      <li><strong>Projection-side, as a governed record.</strong> Writing to a system of record, the Jira story status or the tracking entry, is driven deterministically from a specification or status change by a plugin, not by free-form agent behaviour. Its only job is to be a reliable, audited record, so it is code.</li>
+    </ul>
+
+    <div class="callout">
+      <div class="lbl">Why projection is deterministic</div>
+      <p>An audit trail is only as trustworthy as the thing that writes it. A non-deterministic agent should not be the author of a system-of-record entry. The agent may propose the update; a plugin reacting to a <code>spec-status</code> or <code>todo.updated</code> event performs it the same way every time, and logs it.</p>
+    </div>
+
+    <h3>9.2 Integration points (initial)</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>System</th><th>Mechanism at host</th><th>Wiring</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td>GitHub</td><td><code>gh</code> CLI / GitHub MCP</td><td>Agent-side</td><td>Branch, commit, open PR</td></tr>
+          <tr><td>Jira</td><td>Jira MCP</td><td>Projection-side</td><td>Create / move story from spec state</td></tr>
+          <tr><td>Azure DevOps</td><td><code>az</code> CLI / Azure DevOps MCP</td><td>Both</td><td>Repos (agent-side) · work items (projection)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="surfaces">
+    <div class="eyebrow">10 / Client surfaces &amp; workflows</div>
+    <h2>Three workflows, one control pattern</h2>
+    <p class="lead">The client is organised around the three things a Product Engineer does with a specification: draft it, review it, and generate its artifacts. Each has its own surface, and all three obey one rule: the agent proposes, the human decides, the harness executes.</p>
+    <div class="callout truth"><div class="lbl">Propose · decide · execute</div><p>No agent output reaches the repository, a system of record, or a teammate without a human decision in between. The agent drafts, the Product Engineer approves or edits, and only then does the harness perform the write.</p></div>
+
+    <h3>10.1 Authoring cockpit · draft the specification</h3>
+    <p>Drafting happens in a split surface. On one side, a conversation with the authoring agents, the Product Owner, Technical Architect and Engineering roles, where the Product Engineer directs the work in natural language and each turn names the agent and the model in play. On the other, a live preview of the specification as it takes shape, rendered section by section against the anatomy: frontmatter, then requirements, design and tasks.</p>
+    <p>The preview is a view of the working file the agent is editing in the repository, not a second copy held by the client. A status bar carries the frontmatter and the current state. When the Product Engineer approves, the specification is committed to <code>docs/specifications</code> and its status advances. Until then it lives on a branch, visible and reviewable but not yet authoritative. At any point the Product Engineer can convene a review panel on the working draft without leaving the cockpit (see 10.2).</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 478" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <rect x="18" y="18" width="964" height="444" rx="14" fill="#FFFFFF" stroke="#0E4F56" stroke-width="1.3"/>
+          <rect x="18" y="18" width="964" height="46" rx="14" fill="#0E4F56"/>
+          <text x="40" y="47" font-size="13" fill="#DCEDEC">specification.md</text>
+          <rect x="172" y="30" width="60" height="22" rx="11" fill="none" stroke="#E58463"/><text x="202" y="45" text-anchor="middle" font-size="10" fill="#F0B49E">draft</text>
+          <rect x="648" y="27" width="312" height="28" rx="6" fill="#2BA1A8"/><text x="804" y="45" text-anchor="middle" font-size="11" fill="#FFFFFF">Approve &amp; persist to docs/specifications</text>
+          <!-- chat -->
+          <rect x="36" y="80" width="436" height="366" rx="10" fill="#F4F7F6" stroke="#D7E2E0"/>
+          <text x="52" y="104" font-size="11" fill="#5E706F">authoring · chat</text>
+          <rect x="52" y="116" width="320" height="64" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+          <text x="66" y="135" font-size="9.5" fill="#2BA1A8">Architect agent · Opus</text>
+          <text x="66" y="153" font-size="10.5" fill="#0B2A2F">Drafting the data model and</text>
+          <text x="66" y="168" font-size="10.5" fill="#0B2A2F">API contracts from the codebase.</text>
+          <rect x="150" y="194" width="306" height="46" rx="9" fill="#FFFFFF" stroke="#D7E2E0"/>
+          <text x="164" y="213" font-size="10.5" fill="#0B2A2F">Tighten scope. Move evaluation</text>
+          <text x="164" y="228" font-size="10.5" fill="#0B2A2F">rules out of scope for v1.</text>
+          <rect x="52" y="254" width="340" height="62" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+          <text x="66" y="273" font-size="9.5" fill="#2BA1A8">Engineering agent · mid-tier</text>
+          <text x="66" y="291" font-size="10.5" fill="#0B2A2F">Updated tasks and acceptance</text>
+          <text x="66" y="306" font-size="10.5" fill="#0B2A2F">criteria. Preview on the right.</text>
+          <rect x="52" y="398" width="404" height="34" rx="8" fill="#FFFFFF" stroke="#D7E2E0"/>
+          <text x="68" y="419" font-size="10.5" fill="#9AA9A8">Direct the agents...</text>
+          <!-- preview -->
+          <rect x="488" y="80" width="458" height="366" rx="10" fill="#FFFFFF" stroke="#D7E2E0"/>
+          <text x="504" y="104" font-size="11" fill="#5E706F">specification.md · live preview</text>
+          <rect x="504" y="114" width="426" height="26" rx="5" fill="#0E4F56"/>
+          <text x="517" y="131" font-size="9.5" fill="#9FC4C2">status: draft · owner · spec_id · source_of_truth: git</text>
+          <text x="504" y="170" font-family="'Space Grotesk',sans-serif" font-size="13" font-weight="600" fill="#0B2A2F">Requirements</text>
+          <text x="504" y="188" font-size="10.5" fill="#5E706F">summary · scope · acceptance criteria · open questions</text>
+          <text x="504" y="222" font-family="'Space Grotesk',sans-serif" font-size="13" font-weight="600" fill="#0B2A2F">Design</text>
+          <text x="504" y="240" font-size="10.5" fill="#5E706F">architecture · data model · API contracts · security</text>
+          <rect x="504" y="250" width="240" height="2" fill="#2BA1A8"/><rect x="744" y="244" width="2" height="12" fill="#DB5430"/>
+          <text x="504" y="278" font-family="'Space Grotesk',sans-serif" font-size="13" font-weight="600" fill="#0B2A2F">Tasks</text>
+          <text x="504" y="296" font-size="10.5" fill="#5E706F">implementation plan · testing · definition of done</text>
+          <text x="504" y="330" font-size="9.5" fill="#9AA9A8">a view of the working file in the repo · not a separate copy</text>
+        </svg>
+      </div>
+      <figcaption><b>Figure 5 · Authoring cockpit</b>Chat with the authoring agents on the left, a live preview of the specification on the right. The preview renders the working file in the repository. Approving commits it to docs/specifications.</figcaption>
+    </figure>
+
+    <h3>10.2 Review panel · critique before finalising</h3>
+    <p>Review can be convened on demand at any point during authoring, not only as a final check before approval. When the Product Engineer is unsure about a section, they call a panel there and then rather than waiting for the end. A panel runs more than one agent, each on a different model, for example one on Opus and one on GPT-5.5, and each grounded in the source code. They critique the same specification independently. Different models have different blind spots, so a cross-model review grounded in the codebase catches more than a single reviewer would, and it stops the authoring model's own blind spots from passing unchallenged.</p>
+    <p>The panel presents each reviewer's critique side by side, marks where they agree and where they diverge, and attaches issues to the specification sections they concern. The Product Engineer adjudicates: accept a point, which feeds straight back into the live draft, dismiss it, or send a section back for revision. The reviewers propose; the human decides. A panel is expected at least once before approval, and may be run as often as the work needs it. The number of reviewers and the models they run are configurable.</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 430" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs><marker id="r6" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#0E4F56"/></marker>
+          <marker id="r6o" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#DB5430"/></marker></defs>
+          <rect x="395" y="20" width="210" height="54" rx="9" fill="#0E4F56"/>
+          <text x="500" y="44" text-anchor="middle" font-size="12.5" font-weight="600" fill="#fff">specification.md</text>
+          <text x="500" y="62" text-anchor="middle" font-size="9.5" fill="#9FC4C2">review panel convened</text>
+          <!-- reviewers -->
+          <g>
+            <rect x="40" y="120" width="285" height="158" rx="10" fill="#FFFFFF" stroke="#0E4F56"/>
+            <text x="58" y="146" font-size="12" font-weight="600" fill="#0B2A2F">Reviewer A · Opus</text>
+            <text x="58" y="163" font-size="9.5" fill="#2BA1A8">grounded in source</text>
+            <circle cx="62" cy="186" r="3.5" fill="#2F7D62"/><text x="74" y="190" font-size="10" fill="#0B2A2F">data model agrees with schema</text>
+            <circle cx="62" cy="212" r="3.5" fill="#DB5430"/><text x="74" y="216" font-size="10" fill="#0B2A2F">acceptance criteria too vague</text>
+            <circle cx="62" cy="238" r="3.5" fill="#DB5430"/><text x="74" y="242" font-size="10" fill="#0B2A2F">missing error path in API</text>
+          </g>
+          <g>
+            <rect x="357" y="120" width="285" height="158" rx="10" fill="#FFFFFF" stroke="#0E4F56"/>
+            <text x="375" y="146" font-size="12" font-weight="600" fill="#0B2A2F">Reviewer B · GPT-5.5</text>
+            <text x="375" y="163" font-size="9.5" fill="#2BA1A8">grounded in source</text>
+            <circle cx="379" cy="186" r="3.5" fill="#DB5430"/><text x="391" y="190" font-size="10" fill="#0B2A2F">acceptance criteria too vague</text>
+            <circle cx="379" cy="212" r="3.5" fill="#2F7D62"/><text x="391" y="216" font-size="10" fill="#0B2A2F">scope boundary is clear</text>
+            <circle cx="379" cy="238" r="3.5" fill="#DB5430"/><text x="391" y="242" font-size="10" fill="#0B2A2F">naming clashes with module X</text>
+          </g>
+          <g>
+            <rect x="674" y="120" width="285" height="158" rx="10" fill="#FFFFFF" stroke="#0E4F56"/>
+            <text x="692" y="146" font-size="12" font-weight="600" fill="#0B2A2F">Reviewer C · Sonnet</text>
+            <text x="692" y="163" font-size="9.5" fill="#2BA1A8">grounded in source</text>
+            <circle cx="696" cy="186" r="3.5" fill="#2F7D62"/><text x="708" y="190" font-size="10" fill="#0B2A2F">tasks are atomic enough</text>
+            <circle cx="696" cy="212" r="3.5" fill="#DB5430"/><text x="708" y="216" font-size="10" fill="#0B2A2F">missing error path in API</text>
+            <circle cx="696" cy="238" r="3.5" fill="#0B2A2F"/><text x="708" y="242" font-size="10" fill="#5E706F">n reviewers configurable</text>
+          </g>
+          <line x1="450" y1="74" x2="182" y2="118" stroke="#0E4F56" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#r6)"/>
+          <line x1="500" y1="74" x2="500" y2="118" stroke="#0E4F56" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#r6)"/>
+          <line x1="550" y1="74" x2="817" y2="118" stroke="#0E4F56" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#r6)"/>
+          <text x="500" y="104" text-anchor="middle" font-size="9.5" fill="#5E706F">each reads the spec and the source independently</text>
+          <!-- adjudicate -->
+          <rect x="40" y="322" width="919" height="50" rx="9" fill="#FCEEE8" stroke="#DB5430"/>
+          <text x="500" y="352" text-anchor="middle" font-size="12" font-weight="600" fill="#0B2A2F">Human adjudicates  ·  accept (feeds back to authoring)  ·  dismiss  ·  send back for revision</text>
+          <line x1="182" y1="278" x2="182" y2="320" stroke="#DB5430" stroke-width="1.2" marker-end="url(#r6o)"/>
+          <line x1="500" y1="278" x2="500" y2="320" stroke="#DB5430" stroke-width="1.2" marker-end="url(#r6o)"/>
+          <line x1="817" y1="278" x2="817" y2="320" stroke="#DB5430" stroke-width="1.2" marker-end="url(#r6o)"/>
+        </svg>
+      </div>
+      <figcaption><b>Figure 6 · Multi-model review panel</b>A panel can be convened on demand at any point in authoring, and at least once before approval. The same specification is critiqued independently by agents on different models, each grounded in the source. Agreement and divergence are surfaced, accepted points feed back into the draft, and the Product Engineer adjudicates.</figcaption>
+    </figure>
+
+    <h3>10.3 Generation workspace · produce the artifacts</h3>
+    <p>Once the specification is agreed, a generation workflow produces the downstream artifacts: documentation, Jira tickets, tests and tracking. The agent proposes them, drafting the tickets and the docs from the specification. The Product Engineer reviews the proposal and decides, approving, editing or rejecting. Only then does the system execute the write, through the harness's registered CLIs and MCP servers, and deterministically for systems of record. Nothing is written to Jira or to the docs until the human has approved the preview.</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 250" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs><marker id="g7" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0E4F56"/></marker>
+          <marker id="g7o" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#DB5430"/></marker></defs>
+          <rect x="40" y="58" width="270" height="92" rx="10" fill="#E5F4F3" stroke="#0E4F56"/>
+          <text x="175" y="92" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Agent proposes</text>
+          <text x="175" y="113" text-anchor="middle" font-size="10.5" fill="#5E706F">drafts docs, tickets, tests</text>
+          <text x="175" y="129" text-anchor="middle" font-size="10.5" fill="#5E706F">from the agreed spec</text>
+          <rect x="365" y="58" width="270" height="92" rx="10" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="500" y="92" text-anchor="middle" font-size="14" font-weight="600" fill="#0B2A2F">Human decides</text>
+          <text x="500" y="113" text-anchor="middle" font-size="10.5" fill="#5E706F">approve · edit · reject</text>
+          <text x="500" y="129" text-anchor="middle" font-size="10.5" fill="#5E706F">on a preview, before any write</text>
+          <rect x="690" y="58" width="270" height="92" rx="10" fill="#0E4F56"/>
+          <text x="825" y="92" text-anchor="middle" font-size="14" font-weight="600" fill="#fff">System executes</text>
+          <text x="825" y="113" text-anchor="middle" font-size="10.5" fill="#9FC4C2">writes via CLIs / MCPs</text>
+          <text x="825" y="129" text-anchor="middle" font-size="10.5" fill="#9FC4C2">deterministic for records</text>
+          <line x1="310" y1="104" x2="363" y2="104" stroke="#0E4F56" stroke-width="1.6" marker-end="url(#g7)"/>
+          <line x1="635" y1="104" x2="688" y2="104" stroke="#DB5430" stroke-width="1.6" marker-end="url(#g7o)"/>
+          <g font-size="10.5" fill="#0B2A2F">
+            <rect x="40" y="172" width="120" height="30" rx="15" fill="#F4F7F6" stroke="#0E4F56"/><text x="100" y="191" text-anchor="middle">Docs</text>
+            <rect x="172" y="172" width="140" height="30" rx="15" fill="#F4F7F6" stroke="#0E4F56"/><text x="242" y="191" text-anchor="middle">Jira tickets</text>
+            <rect x="324" y="172" width="110" height="30" rx="15" fill="#F4F7F6" stroke="#0E4F56"/><text x="379" y="191" text-anchor="middle">Tests</text>
+            <rect x="446" y="172" width="120" height="30" rx="15" fill="#F4F7F6" stroke="#0E4F56"/><text x="506" y="191" text-anchor="middle">Tracking</text>
+          </g>
+          <text x="650" y="192" font-size="10" fill="#DB5430">preview before any external write</text>
+        </svg>
+      </div>
+      <figcaption><b>Figure 7 · Generation workflow</b>Once the specification is agreed, artifacts are generated through one control pattern: the agent proposes, the human decides on a preview, and only then does the system execute the write.</figcaption>
+    </figure>
+
+    <h3>10.4 The full screen inventory</h3>
+    <p>The three surfaces above are the heart of the product, but a usable application needs more than its heart. The complete set of screens, grouped by where each sits in the flow, is below. Most are in v1; the team-oriented views are deferred with the team tier. Permission and elicitation prompts are overlays that surface on the board and in session detail rather than destinations of their own.</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 560" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace"><defs><marker id="sm" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#0E4F56"/></marker></defs><rect x="20" y="20" width="960" height="104" rx="12" fill="#F4F7F6" stroke="#0E4F56" stroke-dasharray="7 5"/><text x="40" y="46" font-size="12" font-weight="600" fill="#0E4F56">1 · Setup</text><rect x="20" y="144" width="960" height="104" rx="12" fill="#F4F7F6" stroke="#0E4F56" stroke-dasharray="7 5"/><text x="40" y="170" font-size="12" font-weight="600" fill="#0E4F56">2 · Specification</text><rect x="20" y="268" width="960" height="128" rx="12" fill="#F4F7F6" stroke="#0E4F56" stroke-dasharray="7 5"/><text x="40" y="294" font-size="12" font-weight="600" fill="#0E4F56">3 · Orchestration</text><rect x="20" y="416" width="960" height="128" rx="12" fill="#F4F7F6" stroke="#0E4F56" stroke-dasharray="7 5"/><text x="40" y="442" font-size="12" font-weight="600" fill="#0E4F56">4 · Governance & configuration</text><rect x="40" y="62" width="286" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="183" y="90" text-anchor="middle" font-size="11" fill="#0B2A2F">Project picker</text><rect x="346" y="62" width="286" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="489" y="90" text-anchor="middle" font-size="11" fill="#0B2A2F">Project initialisation</text><rect x="652" y="62" width="288" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="796" y="90" text-anchor="middle" font-size="11" fill="#0B2A2F">Harness &amp; model config</text><rect x="40" y="186" width="214" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="147" y="214" text-anchor="middle" font-size="11" fill="#0B2A2F">Spec library</text><rect x="268" y="186" width="214" height="46" rx="8" fill="#E5F4F3" stroke="#0E4F56"/><text x="375" y="214" text-anchor="middle" font-size="11" fill="#0B2A2F">Authoring cockpit</text><rect x="496" y="186" width="214" height="46" rx="8" fill="#E5F4F3" stroke="#0E4F56"/><text x="603" y="214" text-anchor="middle" font-size="11" fill="#0B2A2F">Review panel</text><rect x="724" y="186" width="214" height="46" rx="8" fill="#E5F4F3" stroke="#0E4F56"/><text x="831" y="214" text-anchor="middle" font-size="11" fill="#0B2A2F">Generation workspace</text><rect x="40" y="310" width="290" height="46" rx="8" fill="#E5F4F3" stroke="#0E4F56"/><text x="185" y="338" text-anchor="middle" font-size="11" fill="#0B2A2F">Board</text><rect x="344" y="310" width="290" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="489" y="338" text-anchor="middle" font-size="11" fill="#0B2A2F">Session detail</text><rect x="648" y="310" width="290" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="793" y="338" text-anchor="middle" font-size="11" fill="#0B2A2F">Diff review</text><text x="40" y="382" font-size="10" fill="#5E706F">Permission &amp; elicitation prompts surface as overlays here, not as separate destinations</text><rect x="40" y="458" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="125" y="486" text-anchor="middle" font-size="11" fill="#0B2A2F">Audit &amp; trace</text><rect x="222" y="458" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="307" y="486" text-anchor="middle" font-size="11" fill="#0B2A2F">Projections status</text><rect x="404" y="458" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="489" y="486" text-anchor="middle" font-size="11" fill="#0B2A2F">Agent roster</text><rect x="586" y="458" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="671" y="486" text-anchor="middle" font-size="11" fill="#0B2A2F">Settings</text><rect x="768" y="458" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#0E4F56"/><text x="853" y="486" text-anchor="middle" font-size="11" fill="#0B2A2F">Notifications</text><text x="40" y="530" font-size="10" fill="#5E706F">Deferred to the team tier: read-only delivery view and multi-human spec review</text><line x1="500" y1="124" x2="500" y2="142" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#sm)"/><line x1="500" y1="248" x2="500" y2="266" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#sm)"/><line x1="500" y1="396" x2="500" y2="414" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#sm)"/></svg>
+      </div>
+      <figcaption><b>Figure 10 · Screen map</b>The full set of screens grouped by where each sits in the flow. Tinted screens are the three surfaces and the board already specified in this section; the rest are what complete the application. Permission and elicitation prompts are overlays, not destinations.</figcaption>
+    </figure>
+    <div class="tbl"><table>
+      <thead><tr><th>Screen</th><th>Purpose</th><th>Phase</th></tr></thead>
+      <tbody>
+        <tr><td>Project picker</td><td>Connect to a host and open or create a project</td><td>v1</td></tr>
+        <tr><td>Project initialisation</td><td>Scaffold a repo method-ready: agents, specifications, grounding, plugins</td><td>v1</td></tr>
+        <tr><td>Harness &amp; model configuration</td><td>Register instances and the tier-to-model mapping</td><td>v1</td></tr>
+        <tr><td>Specification library</td><td>Every spec in the project, with status and search</td><td>v1</td></tr>
+        <tr><td>Authoring cockpit</td><td>Chat with authoring agents beside the live spec preview (10.1)</td><td>v1</td></tr>
+        <tr><td>Review panel</td><td>Multi-model critique before finalisation (10.2)</td><td>v1</td></tr>
+        <tr><td>Generation workspace</td><td>Propose, approve and execute downstream artifacts (10.3)</td><td>v1</td></tr>
+        <tr><td>Board</td><td>The specification moving across delivery, cards across harnesses</td><td>v1</td></tr>
+        <tr><td>Session detail</td><td>The live agent transcript, todos, diff and controls for one task</td><td>v1</td></tr>
+        <tr><td>Diff review</td><td>Review and accept the changes a session produced</td><td>v1</td></tr>
+        <tr><td>Permission &amp; elicitation prompts</td><td>The approval and question gates, as overlays</td><td>v1</td></tr>
+        <tr><td>Audit &amp; activity trace</td><td>What every agent did, with approvals and projections</td><td>v1</td></tr>
+        <tr><td>Projections status</td><td>Health of system-of-record writes (Jira, Azure DevOps)</td><td>v1</td></tr>
+        <tr><td>Agent roster</td><td>View and edit the agents shipped into the repo</td><td>v1</td></tr>
+        <tr><td>Settings</td><td>Theme, default runtime mode, connections, telemetry</td><td>v1</td></tr>
+        <tr><td>Notifications</td><td>What needs attention: approvals waiting, reviews due, errors</td><td>v1</td></tr>
+        <tr><td>Read-only delivery view</td><td>A team view of delivery, underwritten by git</td><td>Team</td></tr>
+        <tr><td>Multi-human spec review</td><td>Peer review of a spec via a review-only PR</td><td>Team</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <!-- 11 -->
+  <section id="functional">
+    <div class="eyebrow">11 / Functional requirements</div>
+    <h2>What the orchestrator must do</h2>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-1</div><div class="ttl">Specification authoring workspace</div><p>Provide a sectioned authoring surface reflecting the specification anatomy: frontmatter; requirements (summary, scope, acceptance criteria, open questions); design (architectural decision, target architecture, data model, API contracts, application services, security, performance); and tasks (implementation plan, testing, definition of done, decision log). The specification is co-authored by the human and AI and persisted as a markdown file in <code>docs/specifications</code> via the harness. The client never holds the canonical copy.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-2</div><div class="ttl">Agent-role orchestration</div><p>Route authoring to named agent roles, a Product Owner agent for requirements, a Technical Architect agent for design, an Engineering agent for tasks, and dispatch implementation agents for execution. Each message specifies the agent and the model. The orchestrator coordinates the roles; it does not run them.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-3</div><div class="ttl">Codebase grounding</div><p>Use the harness to analyse the repository and produce or update an <code>AGENTS.md</code> baseline, and surface <code>agents.md</code>, guides and relevant existing code so authoring is grounded. The richer the context-engineered codebase, the richer the specification.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-4</div><div class="ttl">Model tiering</div><p>Drive specification authoring with the most capable model and implementation with a mid-tier model. Model selection is per message or session, with sensible defaults per agent role, and is configurable.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-5</div><div class="ttl">Specification lifecycle &amp; governance</div><p>Carry specification status through <code>draft → in-review → approved</code>, stored in frontmatter and reflected in the UI. Tie transitions to pull-request state. The specification is versioned in git and reviewed through pull request.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-6</div><div class="ttl">Artifact projections (fan-out)</div><p>From an approved specification, generate downstream artifacts: tasks, tickets, test scaffolds, tracking entries and docs. Projections are regenerated from the specification when it changes. The specification always wins; downstream edits do not flow back into it.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-7</div><div class="ttl">Deterministic projection to systems of record</div><p>Drive the system-of-record update from a specification or status change deterministically, via a harness plugin reacting to events, not via free-form agent behaviour. Every projection write is logged with the triggering change.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-8</div><div class="ttl">Parallel task execution</div><p>Fan an approved specification into tasks dispatched as asynchronous child sessions, each in its own git worktree or branch, executed concurrently by implementation agents. The orchestrator must not block while they run.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-9</div><div class="ttl">Delivery board as a projection</div><p>Present a kanban board where a card is a specification or a task and its column is computed from frontmatter status, session status and pull-request / CI state. The board updates from the harness event stream. A card moves because the work moved, not because a person dragged it.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-10</div><div class="ttl">Human-in-the-loop permissions</div><p>Surface agent permission requests in the client, let the Product Engineer approve or deny, send the response back to the harness, and log every decision.</p></div>
+
+    <div class="req"><span class="pri">should</span><div class="id">FR-11</div><div class="ttl">Diff review &amp; rescue</div><p>Retrieve and display the per-session diff for review before a pull request is opened, and support reverting and restoring a run so a human can rescue an agent that has gone wrong.</p></div>
+
+    <div class="req"><span class="pri">should</span><div class="id">FR-12</div><div class="ttl">Reviewer approval</div><p>Allow a second human to review the specification and the generated change and approve before merge, mirroring pull-request review. Approval gates the merge.</p></div>
+
+    <div class="req"><span class="pri">could</span><div class="id">FR-13</div><div class="ttl">Command palette</div><p>Expose harness commands (for example author-spec, generate-tasks) as first-class actions the Product Engineer can invoke against a session.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-14</div><div class="ttl">Authoring cockpit: chat &amp; live preview</div><p>Provide a split surface pairing a conversation with the authoring agents (each turn naming the agent role and model) with a live preview of the specification rendered section by section. The preview is a view of the working file in the repository, never a separate copy.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-15</div><div class="ttl">Approve &amp; persist</div><p>On human approval, commit the specification to <code>docs/specifications</code> and advance its status. Before approval the specification lives on a branch, visible and reviewable but not authoritative.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-16</div><div class="ttl">Multi-model review of the specification</div><p>Let the Product Engineer convene a multi-model review on demand at any point in authoring, and at least once before finalisation. A panel runs two or more agents on different models, each grounded in the source code, critiquing the specification independently. Present the critiques side by side with agreement and divergence marked and issues attached to the relevant sections; accepted points feed back into the draft. The number of reviewers and their models are configurable.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-17</div><div class="ttl">Generation workflow: propose, decide, execute</div><p>After the specification is agreed, let an agent propose the downstream artifacts (docs, tickets, tests, tracking), present them as a preview for the human to approve, edit or reject, and only then execute the write through the harness. Nothing is written to a system of record before human approval.</p></div>
+
+    <div class="req"><span class="pri">must</span><div class="id">FR-18</div><div class="ttl">Method-ready project scaffolding</div><p>Initialise a repository with the agent roster (committed in the harness's convention, for example <code>.opencode/agents</code>), the <code>docs/specifications</code> structure, the grounding baseline and the policy and projection plugins. Agents reference logical model tiers resolved to the internal gateway, and the canonical roster is harness-agnostic, materialised per adapter.</p></div>
+
+    <div class="req"><span class="pri">should</span><div class="id">FR-19</div><div class="ttl">Multi-harness routing</div><p>Maintain a registry of connected harnesses with their capabilities and available models, and route a role or session to a harness by the model it needs rather than by an explicit harness mode. Aggregate sessions across harnesses on one board, labelled by harness and model. Continuity lives on the feature branch in git, so sessions are harness-local and disposable.</p></div>
+  </section>
+
+  <!-- 11 -->
+  <section id="adapter">
+    <div class="eyebrow">12 / Adapter, scaffolding &amp; harnesses</div>
+    <h2>One interface, many harnesses, honest about differences</h2>
+    <p>The orchestration logic targets a backend-agnostic interface so that no harness is load-bearing. The OpenCode adapter is the first and, for a while, the richest implementation. Other harnesses expose different surfaces and will not all provide per-session task lists or permission events in the same shape, so the interface carries capability flags. The board and the cockpit degrade against a backend's real capabilities rather than assuming the full contract. The interface is schema-first and validated at the boundary, so a malformed event from any backend is caught rather than silently corrupting the board. Where a backend speaks the Agent Client Protocol (ACP), the emerging standard that OpenCode supports, the adapter normalises through ACP rather than a bespoke integration, and bespoke adapters become the exception used only where a harness exposes no standard protocol.</p>
+
+    <h4>Interface (illustrative)</h4>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Method</th><th>Purpose</th><th>Capability</th></tr></thead>
+        <tbody>
+          <tr><td><code>createSession({parent?})</code></td><td>Start a spec or task session</td><td>core</td></tr>
+          <tr><td><code>sendMessage({agent,model,parts})</code></td><td>Drive an agent role at a model tier</td><td>core</td></tr>
+          <tr><td><code>dispatchAsync(...)</code></td><td>Fire-and-watch task execution</td><td>core</td></tr>
+          <tr><td><code>streamEvents()</code></td><td>Subscribe to delivery state</td><td>events</td></tr>
+          <tr><td><code>getTodos(session)</code></td><td>Read the per-session task list</td><td>todos</td></tr>
+          <tr><td><code>getDiff(session)</code></td><td>Read changes for review</td><td>diff</td></tr>
+          <tr><td><code>respondToPermission(...)</code></td><td>Answer a gated action</td><td>permissions</td></tr>
+          <tr><td><code>runCommand(...)</code></td><td>Invoke a harness command</td><td>commands</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="mono" style="font-size:13px;color:var(--muted)">Capability flags: events · todos · diff · permissions · commands. The OpenCode adapter satisfies all of them at the start; later adapters declare what they support.</p>
+
+    <h3>12.2 Method-ready project scaffolding</h3>
+    <p>Setting up a repository for this method is a first-class action, not a manual checklist. Initialising a project scaffolds the agent roster, the <code>docs/specifications</code> structure, the grounding baseline (<code>AGENTS.md</code> and the guides), and the policy and projection plugins, so a new repository is method-ready from the first commit.</p>
+    <p>Among what it scaffolds is the canonical specification template. Every project ships one <code>specification.template.md</code> that fixes the format: a single file per feature, authored on the branch, with requirements written as normative SHALL statements that each carry at least one WHEN/THEN scenario, and changes marked by in-place delta tags that flatten into plain contract on merge. The template carries its own lifecycle rules, so an engineer or an agent starting a spec inherits the method’s rigor without having to remember it. This single file is the unit the cockpit previews, the review panel critiques, and the board projects.</p>
+    <p>The agents ship into the repository, not onto a machine. In OpenCode they are committed under <code>.opencode/agents</code> as markdown files with frontmatter, so they version with the code and are reviewed through pull request like the specification. This turns the authoring and reviewing roles, and the permissions that constrain them, into governed artifacts rather than per-engineer configuration.</p>
+    <p>Two rules keep the scaffold portable. Agents reference logical model tiers, a capable tier and a mid tier, resolved per project to the internal model gateway, rather than hardcoded vendor model IDs that go stale and bypass the gateway. And the canonical roster is harness-agnostic: the method owns the role definitions and each adapter materialises them into its harness's format. For v1 the scaffold is written once and the project owns it; a managed sync that offers updates as a reviewable diff is a later addition, alongside the team tier.</p>
+    <p>The scaffold also seeds grounding for the agents. Authoritative reference implementations are vendored into the repository as read-only material under a <code>.repos</code> convention, and the grounding file instructs the agents to prefer patterns from that vendored source over guesses or web search. A single canonical <code>AGENTS.md</code>, symlinked to <code>CLAUDE.md</code> so both conventions resolve to one file, encodes the completion gates (typecheck and checks must pass), the priorities, and the reference repositories. This is how the coding agent is grounded not only in our method but in proven systems built in the wild.</p>
+
+    <h3>12.3 Working across more than one harness</h3>
+    <p>An engineer may use more than one harness, for example Claude Code for the Claude models and OpenCode for others, and move between them. The design keeps this simple by refusing to make the harness a mode the engineer lives in. The engineer chooses a role and a model; a routing layer chooses the harness.</p>
+    <p>This works because continuity lives in the repository, not the harness. The specification and the code are on the feature branch in git; a harness session is ephemeral and disposable, so switching harnesses loses nothing durable. You start a fresh session on the other harness against the same branch. The model resolution already in use, tier to concrete model, simply extends to tier to model to harness, so the router and the model-tier map are one mechanism. The agent asks for a tier and never needs to know which harness served it.</p>
+    <p>The board aggregates sessions across harnesses into one view, labelling each card with the harness and model executing it, so the picture stays unified rather than split into per-harness silos. Capability flags absorb the differences: a card on a harness that reports fewer signals simply shows fewer. The multi-model review panel benefits directly, since one reviewer can run a Claude model through Claude Code and another a different model through OpenCode.</p>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 346" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs><marker id="h8" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0E4F56"/></marker></defs>
+          <rect x="375" y="18" width="250" height="44" rx="9" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="500" y="45" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Orchestrator · cockpit + board</text>
+          <rect x="345" y="94" width="310" height="58" rx="9" fill="#E5F4F3" stroke="#0E4F56"/>
+          <text x="500" y="118" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0B2A2F">Model resolution &amp; routing</text>
+          <text x="500" y="137" text-anchor="middle" font-size="10.5" fill="#5E706F">tier &#8594; model &#8594; harness</text>
+          <text x="672" y="127" font-size="10" fill="#5E706F">you pick a model;</text>
+          <text x="672" y="141" font-size="10" fill="#5E706F">the router picks the harness</text>
+          <!-- harnesses -->
+          <rect x="90" y="190" width="360" height="84" rx="9" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="110" y="214" font-size="13" font-weight="600" fill="#0B2A2F">Claude Code</text>
+          <text x="110" y="232" font-size="10.5" fill="#2BA1A8">Claude models</text>
+          <text x="110" y="256" font-size="10" fill="#5E706F">capabilities: sessions · diff</text>
+          <rect x="550" y="190" width="360" height="84" rx="9" fill="#FFFFFF" stroke="#0E4F56"/>
+          <text x="570" y="214" font-size="13" font-weight="600" fill="#0B2A2F">OpenCode</text>
+          <text x="570" y="232" font-size="10.5" fill="#2BA1A8">other models</text>
+          <text x="570" y="256" font-size="10" fill="#5E706F">capabilities: sessions · todos · diff · permissions · events</text>
+          <!-- shared branch -->
+          <rect x="90" y="300" width="820" height="38" rx="8" fill="#0E4F56"/>
+          <text x="500" y="324" text-anchor="middle" font-size="12" font-weight="600" fill="#fff">Same feature branch · git  (spec + code)</text>
+          <!-- arrows -->
+          <line x1="500" y1="62" x2="500" y2="92" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#h8)"/>
+          <path d="M390,152 L270,152 L270,188" fill="none" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#h8)"/>
+          <path d="M610,152 L730,152 L730,188" fill="none" stroke="#0E4F56" stroke-width="1.5" marker-end="url(#h8)"/>
+          <text x="270" y="178" text-anchor="middle" font-size="9.5" fill="#5E706F">capable tier</text>
+          <text x="730" y="178" text-anchor="middle" font-size="9.5" fill="#5E706F">mid tier</text>
+          <line x1="270" y1="274" x2="270" y2="298" stroke="#0E4F56" stroke-width="1.3" marker-end="url(#h8)"/>
+          <line x1="730" y1="274" x2="730" y2="298" stroke="#0E4F56" stroke-width="1.3" marker-end="url(#h8)"/>
+        </svg>
+      </div>
+      <figcaption><b>Figure 8 · Routing across harnesses</b>The engineer chooses a role and model; the router places the work on whichever harness serves that model. Both harnesses operate on the same feature branch, so continuity lives in git, not in any harness. The board aggregates sessions across both.</figcaption>
+    </figure>
+    <p>Three things to hold deliberately. Concurrent work by two harnesses against one working tree can collide, so parallel sessions run in their own worktrees off the feature branch. Credentials and integrations are registered per harness host, so each host carries its own authorised CLIs and MCP servers. And Claude Code's headless surface differs from OpenCode's and should be verified before that adapter is built.</p>
+  </section>
+
+  <!-- 12 -->
+  <section id="nfr">
+    <div class="eyebrow">13 / Non-functional requirements</div>
+    <h2>Constraints that traceability and control make mandatory</h2>
+    <div class="req"><div class="id">NFR-1 · Security</div><div class="ttl">No credentials in the client</div><p>Service tokens and app credentials are never shipped to the browser or placed in URLs. All credentials are held at the harness host where the CLIs and MCP servers are authorised. System-of-record calls originate from the host, not the client.</p></div>
+    <div class="req"><div class="id">NFR-2 · Auditability</div><div class="ttl">Every governed action is recorded</div><p>Specification history lives in git. Permission decisions and deterministic projections are logged with their trigger. The result is a traceable line from business intent to released change.</p></div>
+    <div class="req"><div class="id">NFR-3 · Performance</div><div class="ttl">Event-driven, never polled</div><p>Work is dispatched asynchronously and the UI reacts to the event stream. Multiple sessions run concurrently without freezing the picture.</p></div>
+    <div class="req"><div class="id">NFR-4 · Reliability</div><div class="ttl">Agent failure is a first-class state</div><p>Runs that fail or loop surface as a board state needing a human, with revert and restore available for rescue. Failure is handled in the interface, not hidden.</p></div>
+    <div class="req"><div class="id">NFR-5 · Portability &amp; sovereignty</div><div class="ttl">Self-hosted, internal models</div><p>The harness is self-hosted and configured against an internal model gateway, so code and prompts stay on controlled infrastructure.</p></div>
+    <div class="req"><div class="id">NFR-6 · Quality floor</div><div class="ttl">Accessible, resilient client</div><p>Keyboard-navigable, visible focus, reduced-motion respected, responsive. The orchestrator is a tool used daily and is built to that standard.</p></div>
+    <div class="req"><div class="id">NFR-7 · Observability &amp; audit</div><div class="ttl">The trace is the audit trail</div><p>The coordinator emits OpenTelemetry spans at every boundary: RPC, orchestration command, provider call, external process, persistence and queue handoff. IDs and paths go on span attributes; metric labels stay low-cardinality. Completed spans are written to a local append-only trace as the persisted source of truth, exportable over OTLP to a standard backend. Where teams must keep an audit trail, this structured record of what every agent did, including approvals and projections, is it.</p></div>
+    <div class="req"><div class="id">NFR-8 · Resilient streaming</div><div class="ttl">Survive reconnects and partial streams</div><p>Push events are ordered, monotonically sequenced per connection, and schema-validated at the boundary. The client transport is a reconnecting state machine that queues outbound requests while disconnected and replays the latest state on resubscribe. Async milestones are modelled as typed receipts rather than polling, and git checkpoints are captured around agent turns for rescue.</p></div>
+  </section>
+
+  <!-- 13 -->
+  <section id="security">
+    <div class="eyebrow">14 / Security, governance &amp; audit</div>
+    <h2>Truth, credentials and accountability each have one home</h2>
+    <p>Three boundaries keep the design safe where governance matters, and they reinforce each other.</p>
+    <h3>14.1 The credential boundary</h3>
+    <p>Because the harness owns execution, it owns authorisation. CLIs are authenticated once on the host and MCP servers are registered in the harness configuration. The agent invokes them as tools. The token never touches client-side code because the client was never in the credential path.</p>
+    <h3>14.2 The truth boundary</h3>
+    <p>The specification is authoritative and lives in the repository. Projections into Jira, tests and tracking are generated from it and never override it. This prevents the drift that a parallel system of record would create, and it is the same principle applied to delivery tooling that is applied to the specification itself.</p>
+    <h3>14.3 The accountability boundary</h3>
+    <p>Holding the credential is not the same as being accountable for the write. The deterministic projection plugin is the accountable author of every system-of-record entry, so each entry is reliable and logged. A human reviewer remains accountable for what ships. Owning a feature alone does not remove the second pair of eyes on a release. And the structured trace the coordinator emits, with spans for every provider turn, approval and projection, is the durable record that makes all of this accountable after the fact (see NFR-7).</p>
+    <div class="callout truth">
+      <div class="lbl">Hub and source of truth</div>
+      <p>The figure below shows the specification at the centre, with artifacts as outward projections. The arrows only point one way.</p>
+    </div>
+
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 360" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs><marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#DB5430"/></marker></defs>
+          <!-- centre -->
+          <rect x="395" y="138" width="210" height="84" rx="10" fill="#0E4F56"/>
+          <text x="500" y="172" text-anchor="middle" font-size="14" font-weight="600" fill="#fff">specification.md</text>
+          <text x="500" y="194" text-anchor="middle" font-size="10.5" fill="#9FC4C2">source of truth · in repo</text>
+          <!-- four projections -->
+          <g font-size="12.5" fill="#0B2A2F">
+            <rect x="395" y="24" width="210" height="56" rx="9" fill="#E5F4F3" stroke="#0E4F56"/><text x="500" y="57" text-anchor="middle">Tests</text>
+            <rect x="395" y="280" width="210" height="56" rx="9" fill="#E5F4F3" stroke="#0E4F56"/><text x="500" y="313" text-anchor="middle">Tracking &amp; reporting</text>
+            <rect x="70" y="152" width="230" height="56" rx="9" fill="#E5F4F3" stroke="#0E4F56"/><text x="185" y="185" text-anchor="middle">Jira stories &amp; tickets</text>
+            <rect x="700" y="152" width="230" height="56" rx="9" fill="#E5F4F3" stroke="#0E4F56"/><text x="815" y="185" text-anchor="middle">Docs</text>
+          </g>
+          <!-- arrows outward -->
+          <line x1="500" y1="138" x2="500" y2="82" stroke="#DB5430" stroke-width="1.6" marker-end="url(#a3)"/>
+          <line x1="500" y1="222" x2="500" y2="278" stroke="#DB5430" stroke-width="1.6" marker-end="url(#a3)"/>
+          <line x1="395" y1="180" x2="302" y2="180" stroke="#DB5430" stroke-width="1.6" marker-end="url(#a3)"/>
+          <line x1="605" y1="180" x2="698" y2="180" stroke="#DB5430" stroke-width="1.6" marker-end="url(#a3)"/>
+          <text x="500" y="120" text-anchor="middle" font-size="10" fill="#DB5430">generated projection</text>
+        </svg>
+      </div>
+      <figcaption><b>Figure 3 · Source of truth</b>Artifacts are generated from the specification and regenerated when it changes. The direction-of-truth rule is enforced in code: nothing flows back into the specification automatically.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 14 -->
+  <section id="opencode">
+    <div class="eyebrow">15 / OpenCode integration spec</div>
+    <h2>How the harness primitives realise the product</h2>
+    <p>OpenCode is run with its headless server. The product is built against the server's API and event stream, and its methodology is enforced through plugins that run inside the harness process. The mapping below is the basis of the first adapter.</p>
+
+    <h3>15.1 Capability to primitive</h3>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Product capability</th><th>OpenCode primitive</th></tr></thead>
+        <tbody>
+          <tr><td>Spec &amp; task as units of work</td><td>Sessions, with parent (spec) and child (task) relationships</td></tr>
+          <tr><td>Agent roles</td><td>Named agents, selected per message</td></tr>
+          <tr><td>Model tiering</td><td>Model selected per message / session</td></tr>
+          <tr><td>Parallel, non-blocking execution</td><td>Asynchronous prompt endpoint that returns without waiting</td></tr>
+          <tr><td>Live delivery state</td><td>Server-sent events stream</td></tr>
+          <tr><td>The board's task signal</td><td>Per-session todo list and the <code>todo.updated</code> event</td></tr>
+          <tr><td>Column transitions</td><td><code>session.status</code>, <code>session.idle</code>, <code>session.error</code>, <code>session.diff</code></td></tr>
+          <tr><td>Human-in-the-loop</td><td>Permission requests and <code>permission.asked</code> / <code>permission.replied</code></td></tr>
+          <tr><td>Review</td><td>Per-session diff endpoint; revert / restore</td></tr>
+          <tr><td>Grounding baseline</td><td>Session init that generates <code>AGENTS.md</code>; file read endpoints</td></tr>
+          <tr><td>Policy &amp; projection</td><td>Plugin hooks (<code>tool.execute.before</code>), custom tools, event taps</td></tr>
+          <tr><td>Context across long runs</td><td>Compaction hook (experimental)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>15.2 Event to board</h3>
+    <figure>
+      <div class="fig-card">
+        <svg viewBox="0 0 1000 330" xmlns="http://www.w3.org/2000/svg" font-family="'IBM Plex Mono',monospace">
+          <defs><marker id="a4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#2BA1A8"/></marker></defs>
+          <text x="150" y="28" text-anchor="middle" font-size="11" font-weight="600" fill="#2BA1A8">HARNESS EVENTS</text>
+          <g font-size="11.5" fill="#0B2A2F">
+            <rect x="30" y="44" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="65" font-size="11">spec status: draft</text>
+            <rect x="30" y="88" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="109" font-size="11">pull request opened</text>
+            <rect x="30" y="132" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="153" font-size="11">spec status: approved</text>
+            <rect x="30" y="176" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="197" font-size="11">session.status: running</text>
+            <rect x="30" y="220" width="240" height="34" rx="7" fill="#FCEEE8" stroke="#DB5430"/><text x="46" y="241" font-size="11">permission.asked / error</text>
+            <rect x="30" y="264" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="285" font-size="11">session.idle + PR merged</text>
+          </g>
+          <text x="720" y="28" text-anchor="middle" font-size="11" font-weight="600" fill="#2BA1A8">BOARD COLUMNS</text>
+          <g font-size="12" fill="#0B2A2F">
+            <rect x="560" y="44" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="65">Draft</text>
+            <rect x="560" y="88" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="109">In review</text>
+            <rect x="560" y="132" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="153">Approved</text>
+            <rect x="560" y="176" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="197">In progress</text>
+            <rect x="560" y="220" width="320" height="34" rx="7" fill="#FCEEE8" stroke="#DB5430"/><text x="576" y="241">Needs a human</text>
+            <rect x="560" y="264" width="320" height="34" rx="7" fill="#0E4F56"/><text x="576" y="285" fill="#fff">Done</text>
+          </g>
+          <g stroke="#2BA1A8" stroke-width="1.5">
+            <line x1="270" y1="61" x2="558" y2="61" marker-end="url(#a4)"/>
+            <line x1="270" y1="105" x2="558" y2="105" marker-end="url(#a4)"/>
+            <line x1="270" y1="149" x2="558" y2="149" marker-end="url(#a4)"/>
+            <line x1="270" y1="193" x2="558" y2="193" marker-end="url(#a4)"/>
+            <line x1="270" y1="237" x2="558" y2="237" stroke="#DB5430" marker-end="url(#a4)"/>
+            <line x1="270" y1="281" x2="558" y2="281" marker-end="url(#a4)"/>
+          </g>
+        </svg>
+      </div>
+      <figcaption><b>Figure 4 · Event-to-board projection</b>Each column is computed from real signals out of the harness and the version-control system. The board is a window onto delivery, not a record someone maintains.</figcaption>
+    </figure>
+
+    <h3>15.3 Notes &amp; cautions</h3>
+    <ul>
+      <li>The server protects with HTTP basic auth via an environment password and allows specific browser origins through a CORS setting. This shapes how the client connects and is revisited when identity moves above the harness.</li>
+      <li>The tools endpoints and the compaction hook are marked experimental and should be treated as moving.</li>
+      <li>Provider configuration must point at an internal model gateway; confirm the exact mechanism before relying on it.</li>
+    </ul>
+  </section>
+
+  <!-- 15 -->
+  <section id="roadmap">
+    <div class="eyebrow">16 / Phasing &amp; roadmap</div>
+    <h2>Prove the loop on one repo, then widen</h2>
+    <h3>Phase 1 · Prove the loop <span class="pill draft" style="vertical-align:middle">now</span></h3>
+    <p>One harness (OpenCode), engineer-local execution, a single repository, single-engineer ownership. The specification authoring loop end to end; the board driven by real pull-request, run and event state; GitHub for branches and PRs and Jira for the deterministic projection; permission gates and diff review. The goal is to prove the claim that the card moves because the work moved.</p>
+    <h3>Phase 2 · Widen integrations &amp; review</h3>
+    <p>Add Azure DevOps for repositories and work items; richer fan-out into tests, docs and tracking; the reviewer approval workflow; and a second, capability-flagged harness adapter that also exercises multi-harness routing, so a role can run on whichever harness serves the model it needs.</p>
+    <h3>Phase 3 · Scale &amp; team</h3>
+    <p>Optional central runners or cloud sandboxes for execution at scale; a read-only team view aggregating delivery, underwritten by git; per-user identity and role-based approval above the harness; enterprise audit export; and a managed sync that updates scaffolded agents against the canonical set as a reviewable diff.</p>
+  </section>
+
+  <!-- 16 -->
+  <section id="risks">
+    <div class="eyebrow">17 / Risks &amp; mitigations</div>
+    <h2>What could undermine this, and the answer</h2>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>The app drifts into becoming a system of record</td><td>Hard rule: the canonical spec is a repo file; the client holds no authoritative state</td></tr>
+          <tr><td>Agent writes to Jira make the audit trail unreliable</td><td>Projection is deterministic plugin code, logged; agents may propose, not author the record</td></tr>
+          <tr><td>The adapter leaks OpenCode-specific assumptions</td><td>Capability flags; the board degrades to a backend's real surface</td></tr>
+          <tr><td>Browser-to-host connectivity and CORS in a locked-down corporate network</td><td>Resolve execution topology early; revisit identity when a team view arrives</td></tr>
+          <tr><td>Agent runs fail, loop, or need rescue</td><td>Failure is a board state with revert / restore; a human can step in</td></tr>
+          <tr><td>Reliance on experimental harness surfaces</td><td>Treat experimental endpoints as moving; isolate them behind the adapter</td></tr>
+          <tr><td>Solitary ownership weakens release control</td><td>Keep a human reviewer for the spec and the generated change</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 17 -->
+  <section id="scope">
+    <div class="eyebrow">18 / Out of scope</div>
+    <h2>Deliberately not in this release</h2>
+    <ul>
+      <li>A multi-user, team-wide collaboration surface. A read-only team view is deferred and git underwrites it when it arrives.</li>
+      <li>Per-user identity and SSO above the harness. Added with the team view.</li>
+      <li>Central cloud execution. Phase 1 is engineer-local; runners come later.</li>
+      <li>Replacing the integrated tools. The orchestrator drives them; it does not supersede them.</li>
+      <li>Fully autonomous delivery with no human approval.</li>
+    </ul>
+  </section>
+
+  <!-- 18 -->
+  <section id="questions">
+    <div class="eyebrow">19 / Open questions</div>
+    <h2>Decisions still to make</h2>
+    <ul>
+      <li><strong>Execution topology.</strong> Engineer-local host versus central runners, and how the client reaches the host across a locked-down corporate network.</li>
+      <li><strong>Identity above the harness.</strong> When the team view arrives, how per-user identity, roles and approval are modelled, given the harness uses a single shared server password.</li>
+      <li><strong>Direction-of-truth enforcement.</strong> How strictly downstream edits are prevented or reconciled when a projection is changed by hand in Jira.</li>
+      <li><strong>Internal model gateway.</strong> The exact provider configuration to route models through controlled infrastructure.</li>
+      <li><strong>Experimental surfaces.</strong> How much to lean on the tools endpoints and the compaction hook before they stabilise.</li>
+      <li><strong>Reviewer model for solo ownership.</strong> Who reviews when one engineer owns the feature, and how that is assigned.</li>
+      <li><strong>Remote access pattern.</strong> Reaching a harness host across a restricted corporate network: a reference implementation proves SSH, a mesh VPN and a relay as options to evaluate.</li>
+      <li><strong>ACP maturity.</strong> How complete Agent Client Protocol support is across the harnesses we target before we rely on it as the primary normalisation path.</li>
+      <li><strong>Desktop shell.</strong> Electron versus Tauri: Node-native maturity and distribution familiarity against a smaller footprint.</li>
+      <li><strong>Concurrent harness execution.</strong> Worktree isolation when more than one harness works a branch at once, and verifying Claude Code's headless surface before the second adapter.</li>
+      <li><strong>Managed agent sync.</strong> Whether and how to update scaffolded agents against a canonical set as a reviewable diff, given it implies a central authority.</li>
+    </ul>
+  </section>
+
+  <!-- 19 -->
+  <section id="decisions">
+    <div class="eyebrow">20 / Decision log</div>
+    <h2>Decisions taken, and why</h2>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>#</th><th>Decision</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>D1</td><td>The harness owns execution and credentials; CLIs and MCPs are registered at the host</td><td>One execution boundary; the token never reaches the browser</td></tr>
+          <tr><td>D2</td><td>No separate backend on the agent hot path; the client talks directly to the harness via a capability-flagged adapter</td><td>Keeps the client simple and harness-agnostic</td></tr>
+          <tr><td>D3</td><td>The specification is the source of truth, in <code>docs/specifications</code>, versioned and reviewed</td><td>Avoids the drift of a parallel record</td></tr>
+          <tr><td>D4</td><td>Spec-to-record projection is deterministic plugin code, not agent behaviour</td><td>The audit trail must be reliable</td></tr>
+          <tr><td>D5</td><td>Start with OpenCode as the sole harness; others via the same adapter later</td><td>Richest surface; avoids a vendor bet</td></tr>
+          <tr><td>D6</td><td>Scope is single-engineer ownership for this release; team view deferred</td><td>Sharper thesis; git underwrites sharing later</td></tr>
+          <tr><td>D7</td><td>A human reviewer stays in the loop for what ships</td><td>Release control, and credibility with reviewers and auditors</td></tr>
+          <tr><td>D8</td><td>Specification review is multi-model and adversarial, convened on demand at any point as well as before finalisation</td><td>Reduces single-model blind spots; accepted points feed back into the draft; the human adjudicates</td></tr>
+          <tr><td>D9</td><td>Propose, decide, execute is the control pattern across all three client workflows</td><td>No agent output is acted on without a human decision in between</td></tr>
+          <tr><td>D10</td><td>Ship the agent roster into the repository (harness convention, e.g. <code>.opencode/agents</code>); model references by logical tier; canonical roster harness-agnostic; template-once for v1</td><td>Agents become governed, versioned artifacts like the spec; tiers avoid stale vendor IDs and honour the gateway</td></tr>
+          <tr><td>D11</td><td>The harness is a routing target chosen by model, not a mode the engineer manages; continuity lives in git and sessions are harness-local</td><td>Keeps multi-harness simple and lossless; the spec, not the harness, is the persistent state</td></tr>
+          <tr><td>D12</td><td>A thin local coordinator (not a cloud backend) fronts the harness over WebSocket, normalising provider events into one schema-validated domain model</td><td>Browsers cannot speak every agent transport; one normalised model keeps the client simple and harness differences absorbed</td></tr>
+          <tr><td>D13</td><td>Observability is the audit trail: OpenTelemetry spans at every boundary, a local trace as persisted source of truth, OTLP export</td><td>Teams that must answer for changes need a durable, queryable record of what every agent did</td></tr>
+          <tr><td>D14</td><td>Normalise agents through the Agent Client Protocol where supported; bespoke adapters are the exception</td><td>Leans on an emerging standard rather than many bespoke integrations</td></tr>
+          <tr><td>D15</td><td>Vendor reference implementations read-only into the repo and point the agents at them for grounding</td><td>Grounds the coding agent in our method and in proven real-world systems</td></tr>
+          <tr><td>D16</td><td>React client and a Node coordinator, packaged for desktop with an embedded shell (Electron recommended, Tauri the lighter alternative); the browser stays a first-class surface</td><td>The coordinator is already Node so it embeds with no extra runtime; a signed desktop artifact suits managed distribution</td></tr>
+          <tr><td>D17</td><td>The client is built on Radix primitives via the shadcn/ui copy-in pattern, with a neutral monochrome default theme</td><td>Accessible primitives, no dependency lock-in, contributor-ownable components, and a brandable default that suits an open-source tool used by any team</td></tr>
+          <tr><td>D18</td><td>One specification file per feature is the unit, carrying requirement-and-scenario rigor and in-place delta tags that flatten on merge; a per-capability current-truth view, if wanted, is generated read-only rather than authored</td><td>Keeps the single-pane cockpit and one approval while gaining testable rigor and an evolution history; avoids fragmenting where people author</td></tr>
+          <tr><td>D19</td><td>v1 ships the full single-engineer screen set across setup, specification, orchestration, and governance and configuration; team-oriented views are deferred</td><td>Completes the application beyond the three core surfaces while holding v1 scope to single-engineer ownership</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 20 -->
+<section id="priorart">
+    <div class="eyebrow">21 / Prior art &amp; grounding</div>
+    <h2>Grounded in our method and in a system proven in the wild</h2>
+    <p>This product is not the first web layer over coding agents, and that is useful. A mature open-source reference, T3 Code, is a minimal multi-provider GUI over Codex, Claude Code and OpenCode. It deliberately omits everything that is our reason to exist, the specification as source of truth, governance, audit, and the controls a governed environment needs, which makes it an ideal architectural reference rather than a competitor for the same ground. We build and open-source our own for the tighter control that governed delivery demands, and we ground the build in that reference so the coding agent works from proven patterns rather than guesses.</p>
+    <h3>21.1 What we adopt</h3>
+    <div class="tbl"><table>
+      <thead><tr><th>Pattern</th><th>What we take from it</th></tr></thead>
+      <tbody>
+        <tr><td>Thin local coordinator</td><td>A local WebSocket coordinator wraps the agents and normalises their events; no cloud backend on the hot path (8.5)</td></tr>
+        <tr><td>Schema-first contracts</td><td>The adapter interface is a validated schema shared by client and coordinator, with no runtime logic</td></tr>
+        <tr><td>Normalised domain events</td><td>Provider-native events are ingested, persisted and exposed as one canonical model the board reads from</td></tr>
+        <tr><td>ACP for normalisation</td><td>Speak the Agent Client Protocol where a harness supports it; bespoke adapters are the exception</td></tr>
+        <tr><td>Resilient streaming</td><td>Ordered, sequenced, validated pushes; a reconnecting transport with replay; typed receipts over polling (NFR-8)</td></tr>
+        <tr><td>Git checkpoints</td><td>Automatic checkpoints around agent turns for rescue and audit</td></tr>
+        <tr><td>Runtime modes</td><td>A supervised mode (approval on request, workspace-write sandbox) as the default posture where changes must be governed</td></tr>
+        <tr><td>Observability as audit</td><td>OpenTelemetry spans at every boundary, a local trace as persisted source of truth, OTLP export (NFR-7)</td></tr>
+        <tr><td>Vendored grounding</td><td>Reference repositories vendored read-only into the repo, with the grounding file pointing agents at them (12.2)</td></tr>
+      </tbody>
+    </table></div>
+    <h3>21.2 Where we differ</h3>
+    <p>The reference is method-agnostic, single-user and local, with no system of record beyond the chat session. Ours is built around the specification as source of truth, the propose-decide-execute control pattern, deterministic projection into governed systems, a human reviewer for what ships, and an audit trail fit for governed delivery. Those are the layer the reference omits, and they are the product.</p>
+    <h3>21.3 Vendored for grounding</h3>
+    <p>When the build begins, the reference implementation and a small set of supporting repositories are vendored into our repository as read-only material, and the grounding file directs the coding agent to prefer their patterns. The agent is therefore grounded in two things at once: our method, and a system that already works in the wild.</p>
+  </section>
+
+  <!-- 22 -->
+  <section id="appendix">
+    <div class="eyebrow">22 / Appendix &amp; references</div>
+    <h2>Glossary &amp; sources</h2>
+    <h4>Glossary</h4>
+    <ul>
+      <li><strong>Harness.</strong> The coding-agent runtime that executes against the repository and the integrated tools. OpenCode for this release.</li>
+      <li><strong>Orchestrator.</strong> This product: the React client that realises, visualises and coordinates the harness.</li>
+      <li><strong>Specification.</strong> The single authoritative document holding intent, design, constraints and tasks, stored in the repository.</li>
+      <li><strong>Projection.</strong> An artifact generated from the specification (ticket, test, tracking, doc). Never authoritative.</li>
+      <li><strong>Adapter.</strong> The harness-specific implementation of the backend-agnostic interface.</li>
+      <li><strong>Product Engineer.</strong> The human who owns a feature end to end and owns its specification.</li>
+    </ul>
+    <h4>References</h4>
+    <ul>
+      <li>OpenCode server documentation, opencode.ai/docs/server</li>
+      <li>OpenCode plugins documentation, opencode.ai/docs/plugins</li>
+      <li>OpenCode agents documentation, opencode.ai/docs/agents</li>
+      <li>T3 Code, a multi-provider GUI over coding agents, github.com/pingdotgg/t3code</li>
+      <li>Agent Client Protocol (ACP), the agent-client standard</li>
+      <li>OpenTelemetry, tracing and metrics standard</li>
+      <li>Specification template (specification.template.md), shipped by project scaffolding</li>
+      <li>AI Engineering methodology deck (internal), the specification-centric model</li>
+    </ul>
+  </section>
+
+  <div class="endnote">
+    <p class="mono">PRD-2026-06-27-spec-orchestrator · v0.8 · status: draft · source of truth: git/docs/specifications</p>
+    <p>This document is a draft for discussion. It is written as an instance of the method it specifies: it has a frontmatter, a decision log and open questions, and it expects to be versioned and reviewed.</p>
+  </div>
+
+</div>
+</body>
+</html>

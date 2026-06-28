@@ -1,0 +1,170 @@
+import React from 'react';
+import { Icon } from '../icons';
+import { Button, Input, Card, SpecCard, StatusDot, Tabs } from '../ds';
+import { Wordmark } from '../shell';
+import { Page, SectionHead } from '../utils';
+import { store, useStore } from '../store';
+
+const e = React.createElement;
+
+export function Picker() {
+  const [host, setHost] = React.useState('localhost:4096');
+  const [connecting, setConnecting] = React.useState(false);
+  const projects = [
+    { name: 'asset-platform', specs: 14, status: 'connected', meta: 'github.com/acme/asset-platform' },
+    { name: 'billing-core', specs: 6, status: 'connected', meta: 'github.com/acme/billing-core' },
+    { name: 'identity', specs: 9, status: 'connected', meta: 'github.com/acme/identity' },
+  ];
+  const open = (p) => store.set({ project: p, view: 'cockpit', activeSpec: 'SPEC-014' });
+  return e('div', { style: { height: '100%', width: '100%', background: 'var(--muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto' } },
+    e('div', { style: { width: 460, padding: 32 } },
+      e('div', { style: { display: 'flex', justifyContent: 'center', marginBottom: 16 } },
+        e('div', { style: { background: 'var(--primary)', borderRadius: 'var(--radius-xl)', padding: '14px 22px' } }, e(Wordmark, { size: 26, onDark: true }))),
+      e('p', { style: { textAlign: 'center', margin: '0 0 24px', fontFamily: 'var(--font-sans)', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Specification Orchestrator'),
+      e(Card, { padding: 22 },
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)', marginBottom: 8 } }, 'Harness host'),
+        e('div', { style: { display: 'flex', gap: 8, marginBottom: 22 } },
+          e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'opencode://', value: host, onChange: (ev) => setHost(ev.target.value) })),
+          e(Button, { variant: 'secondary', style: { flex: 'none' }, onClick: () => { setConnecting(true); setTimeout(() => setConnecting(false), 700); } }, connecting ? 'Connecting…' : 'Connect')),
+        e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 } },
+          e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' } }, 'Projects'),
+          e('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, e(StatusDot, { status: 'agree' }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, 'connected'))),
+        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9 } },
+          projects.map((p) => e('button', { key: p.name, onClick: () => open(p), style: { appearance: 'none', textAlign: 'left', cursor: 'pointer', background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, transition: 'var(--transition-control)' },
+            onMouseEnter: (ev) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev) => ev.currentTarget.style.background = 'var(--background)' },
+            e('span', { style: { color: 'var(--muted-foreground)', display: 'flex' } }, e(Icon, { name: 'folder', size: 18 })),
+            e('div', { style: { flex: 1, minWidth: 0 } },
+              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, p.name),
+              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, p.specs + ' specifications · ' + p.meta)),
+            e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 })))),
+        ),
+        e('button', { onClick: () => store.set({ project: { name: 'new-service', specs: 0 }, view: 'init' }), style: { marginTop: 12, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--muted-foreground)' } },
+          e(Icon, { name: 'plus', size: 15 }), 'Initialise a new project'),
+      ),
+      e('p', { style: { textAlign: 'center', margin: '18px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
+    ),
+  );
+}
+
+const SCAFFOLD = [
+  { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — Product Owner, Technical Architect, Engineering, Implementation, Reviewer', lines: ['+ .opencode/agents/product-owner.md', '+ .opencode/agents/technical-architect.md', '+ .opencode/agents/engineering.md', '+ .opencode/agents/implementation.md'] },
+  { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
+  { id: 'ground', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md symlinked to CLAUDE.md — completion gates, priorities, reference repos under .repos', lines: ['+ AGENTS.md', '~ CLAUDE.md -> AGENTS.md', '+ .repos/ (read-only references)'] },
+  { id: 'plugins', icon: 'shield', title: 'Policy & projection plugins', detail: 'Direction-of-truth hooks and deterministic spec → record projection', lines: ['+ .opencode/plugins/direction-of-truth.ts', '+ .opencode/plugins/projection.ts'] },
+];
+
+export function Initialisation() {
+  const project = useStore((s) => s.project);
+  const tiers = useStore((s) => s.tiers);
+  const [repo, setRepo] = React.useState('github.com/acme/new-service');
+  const [running, setRunning] = React.useState(false);
+  const [done, setDone] = React.useState({});
+  const [log, setLog] = React.useState([]);
+  const [finished, setFinished] = React.useState(false);
+
+  const run = () => {
+    setRunning(true); setDone({}); setLog([]); setFinished(false);
+    let i = 0;
+    const stepAll = () => {
+      if (i >= SCAFFOLD.length) {
+        setLog((l) => [...l, { t: 'ok', m: 'project is method-ready — 0 errors, typecheck passes' }]);
+        setFinished(true); setRunning(false); return;
+      }
+      const s = SCAFFOLD[i];
+      setLog((l) => [...l, { t: 'run', m: 'scaffolding ' + s.title.toLowerCase() + '…' }]);
+      setTimeout(() => {
+        setLog((l) => [...l, ...s.lines.map((m) => ({ t: 'file', m }))]);
+        setDone((d) => ({ ...d, [s.id]: true }));
+        i++; setTimeout(stepAll, 350);
+      }, 650);
+    };
+    stepAll();
+  };
+
+  return e(Page, { max: 1000 },
+    e(SectionHead, { eyebrow: 'Setup', title: 'Initialise a method-ready project', sub: 'Scaffolding a repository is a first-class action, not a manual checklist. This writes the agent roster, the specification structure, the grounding baseline and the governance plugins so the repo is method-ready from the first commit.' }),
+    e('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, alignItems: 'start' } },
+      e('div', null,
+        e(Card, { padding: 18, style: { marginBottom: 16 } },
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, marginBottom: 8 } }, 'Repository'),
+          e(Input, { mono: true, prefix: 'https://', value: repo, onChange: (ev) => setRepo(ev.target.value) }),
+          e('div', { style: { display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap' } },
+            tiers.map((t) => e('div', { key: t.tier, style: { flex: '1 1 120px', minWidth: 0 } },
+              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 6 } }, t.label),
+              e(Input, { mono: true, size: 'sm', value: t.model, onChange: () => {} })))),
+          e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'agents reference logical tiers, resolved per project to the internal gateway')),
+        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          SCAFFOLD.map((s) => e('div', { key: s.id, style: { display: 'flex', gap: 12, padding: '13px 15px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--card)' } },
+            e('span', { style: { flex: 'none', width: 32, height: 32, borderRadius: 'var(--radius-md)', background: done[s.id] ? 'var(--success-bg)' : 'var(--secondary)', color: done[s.id] ? 'var(--success)' : 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: done[s.id] ? 'check' : s.icon, size: 17 })),
+            e('div', { style: { flex: 1 } },
+              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600, color: 'var(--foreground)' } }, s.title),
+              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)', lineHeight: 1.45, marginTop: 2 } }, s.detail)),
+            done[s.id] ? e(StatusDot, { status: 'done' }) : running ? e(StatusDot, { status: 'running', pulse: true }) : e(StatusDot, { status: 'idle' }),
+          )),
+        ),
+      ),
+      e('div', { style: { position: 'sticky', top: 0 } },
+        e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-xl)', border: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column', height: 420 } },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)' } },
+            e('span', { style: { display: 'flex', color: '#A1A1A1' } }, e(Icon, { name: 'terminal', size: 15 })),
+            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#A1A1A1' } }, 'specone init · ' + (project ? project.name : 'new-service'))),
+          e('div', { style: { flex: 1, overflowY: 'auto', padding: '14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.7 } },
+            log.length === 0 ? e('div', { style: { color: '#737373' } }, '$ awaiting init…') : null,
+            log.map((l, i) => e('div', { key: i, style: { color: l.t === 'ok' ? '#4ADE80' : l.t === 'file' ? '#A1A1A1' : '#E5E5E5' } }, (l.t === 'file' ? '  ' : '$ ') + l.m)),
+          ),
+        ),
+        e('div', { style: { display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end' } },
+          e(Button, { variant: 'outline', onClick: () => store.set({ project: null, view: 'picker' }) }, 'Cancel'),
+          finished
+            ? e(Button, { iconLeft: e(Icon, { name: 'arrowRight', size: 15 }), onClick: () => store.set({ view: 'cockpit' }) }, 'Open authoring cockpit')
+            : e(Button, { disabled: running, iconLeft: e(Icon, { name: running ? 'refresh' : 'play', size: 15 }), onClick: run }, running ? 'Scaffolding…' : 'Run scaffold')),
+      ),
+    ),
+  );
+}
+
+export function Library() {
+  const specs = useStore((s) => s.specs);
+  const [q, setQ] = React.useState('');
+  const [filter, setFilter] = React.useState('all');
+  const counts = specs.reduce((a, s) => { a[s.status] = (a[s.status] || 0) + 1; return a; }, {} as any);
+  const tabs = [
+    { id: 'all', label: 'All', count: specs.length },
+    { id: 'draft', label: 'Draft', count: counts.draft || 0 },
+    { id: 'in-review', label: 'In review', count: counts['in-review'] || 0 },
+    { id: 'approved', label: 'Approved', count: counts.approved || 0 },
+    { id: 'merged', label: 'Merged', count: counts.merged || 0 },
+  ];
+  const filtered = specs.filter((s) => (filter === 'all' || s.status === filter) && (s.title.toLowerCase().includes(q.toLowerCase()) || s.specId.toLowerCase().includes(q.toLowerCase())));
+  const open = (s) => store.set({ activeSpec: s.specId, view: s.status === 'draft' || s.status === 'in-review' ? 'cockpit' : 'board' });
+
+  if (specs.length === 0) {
+    return e('div', { style: { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 } },
+      e('div', { style: { maxWidth: 420, textAlign: 'center' } },
+        e('div', { style: { width: 56, height: 56, margin: '0 auto 18px', borderRadius: 'var(--radius-xl)', background: 'var(--secondary)', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: 'fileText', size: 26 })),
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 18, fontWeight: 600, color: 'var(--foreground)', letterSpacing: '-0.01em' } }, 'No specifications yet'),
+        e('p', { style: { margin: '8px 0 20px', fontFamily: 'var(--font-sans)', fontSize: 13.5, lineHeight: 1.6, color: 'var(--muted-foreground)' } }, 'The specification is the unit of work. Author the first one with the agents — it is co-authored, grounded in the codebase, and persisted to docs/specifications.'),
+        e('div', { style: { display: 'flex', gap: 10, justifyContent: 'center' } },
+          e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => store.set({ view: 'cockpit', activeSpec: 'SPEC-016' }) }, 'Author a specification'),
+          e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'folderPlus', size: 15 }), onClick: () => store.set({ view: 'init' }) }, 'Scaffold project')),
+        e('div', { style: { marginTop: 22, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)' } }, 'docs/specifications/ · empty')),
+    );
+  }
+
+  return e(Page, { max: 1100 },
+    e(SectionHead, { eyebrow: 'Specification', title: 'Specifications',
+      sub: 'Every specification in this project. The specification is the unit of work — versioned in docs/specifications and reviewed through pull request like any other code.',
+      action: e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => store.set({ view: 'cockpit', activeSpec: 'SPEC-016' }) }, 'New specification') }),
+    e('div', { style: { display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 } },
+      e('div', { style: { width: 300 } }, e(Input, { placeholder: 'Search specifications…', value: q, onChange: (ev) => setQ(ev.target.value) })),
+      e('div', { style: { flex: 1 } }),
+      e(Tabs, { tabs, value: filter, onChange: setFilter })),
+    filtered.length === 0
+      ? e('div', { style: { padding: 56, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 'var(--radius-xl)' } },
+          e('div', { style: { display: 'flex', justifyContent: 'center', marginBottom: 10, color: 'var(--neutral-400)' } }, e(Icon, { name: 'search', size: 22 })),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 500, color: 'var(--foreground)' } }, 'No specifications match'),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 4 } }, q ? 'Try a different search.' : 'No specifications in this state.'))
+      : e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))', gap: 14 } },
+          filtered.map((s) => e(SpecCard, { key: s.specId, specId: s.specId, title: s.title, status: s.status, meta: 'docs/specifications/' + s.slug + '.' + (s.fmt || 'md') + ' · ' + (s.tasks ? s.tasks + ' tasks' : s.updated), onClick: () => open(s) }))),
+  );
+}

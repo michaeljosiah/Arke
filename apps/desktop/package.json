@@ -1,0 +1,12 @@
+{
+  "name": "@specone/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron desktop shell that embeds the coordinator and serves the React client as one signed app (PRD §8.6, D16). Skeleton — Electron dependency and packaging are added when the desktop phase begins.",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "echo \"(skeleton) install electron first: npm i -D electron -w @specone/desktop, then: electron .\"",
+    "build": "echo \"(skeleton) electron packaging not yet configured\""
+  }
+}
