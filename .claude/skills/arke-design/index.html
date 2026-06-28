@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arke · Specification Orchestrator</title>
+
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/tokens/colors.css">
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/tokens/typography.css">
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/tokens/effects.css">
+<link rel="stylesheet" href="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/styles.css">
+
+<style>
+  :root { --page-pad: 24px; --nav-pad: 8px 10px; }
+  [data-density="compact"] { --page-pad: 16px; --nav-pad: 6px 9px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--background); color: var(--foreground); }
+  #app { width: 100vw; height: 100vh; overflow: hidden; font-family: var(--font-sans); }
+  button { font-family: inherit; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+    outline: none; box-shadow: var(--shadow-focus);
+  }
+  /* live entrance — transform only, never opacity, so content is ALWAYS visible
+     even if the animation is throttled/paused at frame 0 (background iframe, print) */
+  @keyframes soEnter { from { transform: translateY(6px); } to { transform: none; } }
+  .so-enter { animation: soEnter 260ms var(--ease-out, ease-out) both; }
+  /* subtle scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted-foreground) 28%, transparent); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted-foreground) 45%, transparent); background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @media (prefers-reduced-motion: reduce) { .so-enter { animation: none; } }
+</style>
+
+<template id="__bundler_thumbnail" data-bg-color="#0A0A0A">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+    <rect width="100" height="100" fill="#0A0A0A"/>
+    <text x="50" y="44" text-anchor="middle" font-family="monospace" font-size="15" fill="#A1A1A1">//</text>
+    <text x="50" y="64" text-anchor="middle" font-family="sans-serif" font-weight="700" font-size="15" fill="#FAFAFA">Arke</text>
+  </svg>
+</template>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<!-- design-system component bundle (plain compiled JS) -->
+<script src="_ds/specone-design-system-b87656f3-7e74-4657-8cc8-d1409352969e/_ds_bundle.js"></script>
+
+<!-- app (transpiled in dependency order after load) -->
+<script type="text/babel" src="app/store.jsx"></script>
+<script type="text/babel" src="app/icons.jsx"></script>
+<script type="text/babel" src="app/util.jsx"></script>
+<script type="text/babel" src="app/shell.jsx"></script>
+<script type="text/babel" src="app/screens_spec.jsx"></script>
+<script type="text/babel" src="app/screens_cockpit.jsx"></script>
+<script type="text/babel" src="app/screens_review.jsx"></script>
+<script type="text/babel" src="app/screens_board.jsx"></script>
+<script type="text/babel" src="app/screens_gov.jsx"></script>
+<script type="text/babel" src="app/screens_config.jsx"></script>
+<script type="text/babel" src="app/tweaks-panel.jsx"></script>
+<script type="text/babel" src="app/tweaks.jsx"></script>
+<script type="text/babel" src="app/app.jsx"></script>
+<script type="text/babel" data-presets="react">
+  ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(window.SO_Root));
+</script>
+</body>
+</html>

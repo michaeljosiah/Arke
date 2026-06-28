@@ -105,7 +105,7 @@ Arke/
 │  └─ client/           the React orchestrator UI (cockpit, board, review, …)
 ├─ apps/
 │  └─ desktop/          Electron shell skeleton (embeds the coordinator)
-├─ .opencode/agents/    versioned agent roster (PO, architect, engineering, impl, reviewer)
+├─ .opencode/agents/    versioned agent roster (spec-author, architect, reviewer-a/-b, implementer, researcher)
 ├─ docs/
 │  ├─ specifications/   the specs + specification.template.md
 │  ├─ decisions/        ADRs

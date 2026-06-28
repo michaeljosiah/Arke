@@ -40,9 +40,17 @@ Read `docs/PRD-Arke.html` for the full product definition.
 - `packages/adapter-opencode` — the first harness adapter (OpenCode headless server + SSE).
 - `packages/client` — the React orchestrator UI (cockpit, board, review, generation, …).
 - `apps/desktop` — Electron shell that embeds the coordinator (one signed app).
-- `.opencode/agents` — the versioned agent roster (product-owner, technical-architect,
-  engineering, implementation, reviewer).
+- `.opencode/agents` — the versioned agent roster (spec-author, architect, reviewer-a,
+  reviewer-b, implementer, researcher); roles reference a logical `tier`, resolved to a
+  concrete model/instance by the coordinator registry. See
+  [`docs/agent-roster-and-model-resolution.md`](docs/agent-roster-and-model-resolution.md).
 - `docs/specifications` — the specifications themselves + `specification.template.md`.
+- `.claude/skills/arke-design` — the **canonical design template** for Arke (the `arke-design`
+  skill): the shadcn/ui neutral monochrome token contract (`_ds/.../tokens/`), Geist
+  typography, Lucide icons, the brand voice, the prototype screens (`app/*.jsx`), and the
+  launch-screen designs (`Arke Launch Screen Light.html`). All UI work — and every spec that
+  touches a UI — follows it rather than re-deriving styling. See its
+  [`SKILL.md`](.claude/skills/arke-design/SKILL.md).
 
 ## Completion gates
 
