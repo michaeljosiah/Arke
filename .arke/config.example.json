@@ -1,0 +1,61 @@
+{
+  "$comment": "Arke single project config. Copy to .arke/config.json and fill in. ARKE_* env vars override individual keys. Vendor model ids live ONLY here, behind the internal gateway — replace the <...> placeholders. `credentialsRef` points to credentials resolved on the host; it is never the secret itself and never reaches the client. The config model is defined in docs/specifications/005.harness-and-model-registry.md.",
+
+  "registry": {
+    "instances": [
+      {
+        "id": "claude-local",
+        "driver": "claude-code",
+        "host": "localhost",
+        "cwd": ".",
+        "credentialsRef": "claude-code/default",
+        "serves": [{ "tier": "capable", "model": "<claude-capable-model>" }]
+      },
+      {
+        "id": "opencode-local",
+        "driver": "opencode",
+        "host": "localhost",
+        "cwd": ".",
+        "credentialsRef": "opencode/gateway",
+        "serves": [
+          { "tier": "capable", "model": "<other-capable-model>" },
+          { "tier": "mid", "model": "<mid-model>" }
+        ]
+      }
+    ],
+    "roster": {
+      "spec-author": { "tier": "capable" },
+      "architect": { "tier": "capable" },
+      "reviewer-a": { "tier": "capable", "instance": "claude-local" },
+      "reviewer-b": { "tier": "capable", "instance": "opencode-local" },
+      "implementer": { "tier": "mid" },
+      "researcher": { "tier": "mid" }
+    }
+  },
+
+  "settings": {
+    "coordinatorPort": 4319,
+    "tracePath": ".arke/trace.ndjson",
+    "sessionStorePath": ".arke/sessions.ndjson",
+    "maxConcurrentTasks": 10,
+    "permissionTimeoutMs": 120000,
+    "generationTimeoutMs": 300000,
+    "integrationRecheckMs": 300000,
+    "projectionQueryLimit": 200,
+    "auditQueryLimit": 500,
+    "otlpEndpoint": null
+  },
+
+  "integrations": {
+    "blockedDomains": [
+      "github.com",
+      "api.github.com",
+      "*.atlassian.net",
+      "dev.azure.com",
+      "app.vssps.visualstudio.com"
+    ],
+    "github": { "enabled": false },
+    "jira": { "enabled": false },
+    "azureDevOps": { "enabled": false, "scope": "work-items" }
+  }
+}

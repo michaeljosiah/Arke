@@ -16,9 +16,11 @@ out/
 release/
 app/dist/
 
-# Coordinator runtime
+# Coordinator runtime & local state — but track the project config file
 *.ndjson
-.arke/
+.arke/*
+!.arke/config.json
+!.arke/config.example.json
 data/
 
 # Env & secrets

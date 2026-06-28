@@ -51,6 +51,12 @@ Read `docs/PRD-Arke.html` for the full product definition.
   launch-screen designs (`Arke Launch Screen Light.html`). All UI work — and every spec that
   touches a UI — follows it rather than re-deriving styling. See its
   [`SKILL.md`](.claude/skills/arke-design/SKILL.md).
+- `.arke/config.json` — the **single project configuration file**: the harness/model registry
+  (instances + roster bindings), coordinator settings (port, concurrency, timeouts, query limits,
+  OTLP endpoint), and integrations config. `ARKE_*` env vars override individual keys. It is the
+  one tracked file under `.arke/`; everything else there (`trace.ndjson`, `sessions.ndjson`,
+  `scaffold-manifest.json`, `projection-fallback.ndjson`) is runtime **state**, git-ignored. The
+  config model is defined in SPEC-005.
 
 ## Completion gates
 

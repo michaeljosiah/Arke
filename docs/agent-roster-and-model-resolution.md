@@ -67,7 +67,7 @@ directory. It declares which tiers it can serve. A role asks for a tier; the rou
 instance that serves it and returns a concrete selection. The role never names a harness.
 
 ```yaml
-# coordinator registry (per project or per org)
+# coordinator registry — the `registry` section of .arke/config.json (per project or per org)
 instances:
   - id: claude-local
     driver: claude-code
@@ -115,6 +115,9 @@ same act. The engineer picks a role; the router places it.
 - **Shipped by scaffolding (template-once):** the roster above, materialised into the harness
   convention, with `tier:` references and scoped permissions.
 - **Configured per project or org:** the `instances` registry (drivers, credentials, models per
-  tier). This is the one place vendor model ids live, behind the internal gateway.
+  tier) — the `registry` section of the single project config file `.arke/config.json`, which also
+  holds coordinator settings and integrations config. This is the one place vendor model ids live,
+  behind the internal gateway; they never reach the client. (`ARKE_*` env vars override individual
+  keys.)
 - **Deferred:** managed sync that updates a scaffolded roster against this canonical set as a
   reviewable diff; arrives with the team tier.
