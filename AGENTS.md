@@ -10,7 +10,7 @@ coordinator that sits on top of a coding-agent harness (OpenCode first) and make
 **specification the unit of work**, from authoring through delivery. The orchestrator
 realises, visualises and coordinates; the harness owns execution.
 
-Read `docs/PRD-Specification-Orchestrator.html` for the full product definition.
+Read `docs/PRD-Arke.html` for the full product definition.
 
 ## Non-negotiable rules
 

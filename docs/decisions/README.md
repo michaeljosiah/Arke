@@ -1,6 +1,6 @@
 # Decision records
 
-The authoritative decision log for the product is the PRD (`docs/PRD-Specification-Orchestrator.html`,
+The authoritative decision log for the product is the PRD (`docs/PRD-Arke.html`,
 §20), decisions **D1–D19**. As the build progresses, decisions that need more depth than a
 log row are promoted into their own ADR here.
 
