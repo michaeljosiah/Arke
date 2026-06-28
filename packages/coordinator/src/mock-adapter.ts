@@ -4,7 +4,11 @@ import type {
   DiffSummary,
   DomainEvent,
   HarnessAdapter,
+  PermissionAck,
+  PermissionDecision,
+  Readiness,
   SendMessageInput,
+  SendReceipt,
   SessionRef,
   TodoItem,
 } from "@arke/contracts";
@@ -22,14 +26,23 @@ export class MockAdapter implements HarnessAdapter {
     return this.caps;
   }
 
+  readiness(): Readiness {
+    return { ready: true };
+  }
+
   async createSession(input: CreateSessionInput): Promise<SessionRef> {
     return { sessionId: `${input.specId}-s${Date.now() % 10000}` };
   }
 
-  async sendMessage(_input: SendMessageInput): Promise<void> {}
+  async sendMessage(input: SendMessageInput): Promise<SendReceipt> {
+    return { sessionId: input.sessionId, correlationId: input.correlationId ?? "mock-corr" };
+  }
 
-  async dispatchAsync(input: SendMessageInput): Promise<SessionRef> {
-    return { sessionId: `${input.sessionId}-child` };
+  async dispatchAsync(input: SendMessageInput): Promise<SendReceipt> {
+    return {
+      sessionId: `${input.sessionId}-child`,
+      correlationId: input.correlationId ?? "mock-corr",
+    };
   }
 
   async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
@@ -57,6 +70,8 @@ export class MockAdapter implements HarnessAdapter {
     return { added: 0, removed: 0, files: 0 };
   }
 
-  async respondToPermission(): Promise<void> {}
+  async respondToPermission(decision: PermissionDecision): Promise<PermissionAck> {
+    return { permissionId: decision.permissionId, status: "confirmed" };
+  }
   async runCommand(): Promise<void> {}
 }

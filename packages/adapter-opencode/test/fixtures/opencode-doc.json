@@ -1,0 +1,20 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "opencode", "version": "pinned-snapshot" },
+  "_note": "Pinned shape of the OpenCode OpenAPI document for the endpoints/events SPEC-002 depends on. The contract test fails if any of these paths disappear, so a server upgrade cannot silently break normalisation. Replace with a snapshot of the real `GET /doc` once a server version is pinned (SPEC-002 open question).",
+  "paths": {
+    "/global/health": { "get": {} },
+    "/global/event": { "get": {} },
+    "/doc": { "get": {} },
+    "/session": { "get": {}, "post": {} },
+    "/session/{id}": { "get": {} },
+    "/session/{id}/children": { "get": {} },
+    "/session/{id}/message": { "post": {} },
+    "/session/{id}/prompt_async": { "post": {} },
+    "/session/{id}/todo": { "get": {} },
+    "/session/{id}/diff": { "get": {} },
+    "/session/{id}/command": { "post": {} },
+    "/permission/": { "get": {} },
+    "/permission/{requestID}/reply": { "post": {} }
+  }
+}
