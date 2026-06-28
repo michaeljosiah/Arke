@@ -4,13 +4,13 @@
     {
       "name": "client",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--workspace", "@specone/client", "--", "--port", "5188", "--strictPort"],
+      "runtimeArgs": ["run", "dev", "--workspace", "@arke/client", "--", "--port", "5188", "--strictPort"],
       "port": 5188
     },
     {
       "name": "coordinator",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--workspace", "@specone/coordinator"],
+      "runtimeArgs": ["run", "dev", "--workspace", "@arke/coordinator"],
       "port": 4319
     }
   ]

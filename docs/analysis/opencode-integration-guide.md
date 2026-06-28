@@ -1,4 +1,4 @@
-# OpenCode Integration Guide for SpecOne
+# OpenCode Integration Guide for Arke
 
 **adapter target:** `packages/adapter-opencode`
 **sources verified against:** opencode.ai/docs, pkg.go.dev/github.com/sst/opencode-sdk-go, github.com/anomalyco/opencode (archived mirror), github.com/anomalyco/opencode-sdk-js, deepwiki/opencode, GitHub issues.
@@ -52,7 +52,7 @@ When the password is set, every request needs `Authorization: Basic <base64(user
 `https://*.opencode.ai`. Add origins with `--cors <origin>` or `server.cors`.
 
 **Directory scoping** — pass `?directory=<path>` query or `x-opencode-directory` header to
-scope a request to a working directory. SpecOne's adapter should always pass the project dir.
+scope a request to a working directory. Arke's adapter should always pass the project dir.
 
 Sources: [opencode.ai/docs/server/](https://opencode.ai/docs/server/), [issue #11616](https://github.com/anomalyco/opencode/issues/11616)
 
@@ -199,7 +199,7 @@ Model refs are `provider/model` (e.g. `anthropic/claude-sonnet-4-20250514`).
 Selection precedence: `--model` CLI > message-body `model` > `opencode.json` `model` >
 last-used > provider default.
 
-**Internal gateway** (any OpenAI-compatible endpoint) — this is how SpecOne resolves its
+**Internal gateway** (any OpenAI-compatible endpoint) — this is how Arke resolves its
 logical tiers to controlled infrastructure (NFR-5, FR-18):
 
 ```json
@@ -248,7 +248,7 @@ Hooks: `tool.execute.before` / `.after`; `session.created/updated/idle/error/com
 `permission.updated/replied`; `shell.env`; `stop`; and **experimental**
 `experimental.session.compacting`, `experimental.chat.system.transform`.
 
-**For SpecOne:** the deterministic projection plugin (FR-7) reacts to `session.idle` /
+**For Arke:** the deterministic projection plugin (FR-7) reacts to `session.idle` /
 `message.updated` and writes to the system of record the same way every time; the policy hook
 (direction-of-truth, §9 PRD) uses `tool.execute.before`.
 
@@ -260,7 +260,7 @@ Sources: [opencode.ai/docs/plugins/](https://opencode.ai/docs/plugins/)
 
 OpenCode supports ACP as a **subprocess JSON-RPC over stdio** (`opencode acp`), used by editors
 (Zed, JetBrains, Avante.nvim, CodeCompanion.nvim). All core capabilities work over ACP except
-`/undo` and `/redo`. **ACP is not HTTP** — SpecOne's `adapter-opencode` integrates via the HTTP
+`/undo` and `/redo`. **ACP is not HTTP** — Arke's `adapter-opencode` integrates via the HTTP
 server, not ACP. (ACP remains the future normalisation path for other harnesses per PRD D14.)
 
 Source: opencode.ai/docs/acp/ (confirm path)
@@ -284,9 +284,9 @@ plugins require Bun; CORS default only covers localhost + `*.opencode.ai`.
 
 ---
 
-## 10. SpecOne Capability → OpenCode Primitive
+## 10. Arke Capability → OpenCode Primitive
 
-| SpecOne capability | OpenCode primitive | Endpoint / event |
+| Arke capability | OpenCode primitive | Endpoint / event |
 |---|---|---|
 | Start a spec session | create session | `POST /session` `{title}` |
 | Create a child/task session | create child | `POST /session` `{parentID}` |
@@ -316,7 +316,7 @@ plugins require Bun; CORS default only covers localhost + `*.opencode.ai`.
 
 Use the official **`@opencode-ai/sdk`** (`createOpencodeClient({ baseUrl })`) rather than
 hand-rolling `fetch` — it tracks the OpenAPI spec and gives typed sessions/messages/events.
-Normalize OpenCode events → SpecOne `DomainEvent` in `packages/adapter-opencode`, and on SSE
+Normalize OpenCode events → Arke `DomainEvent` in `packages/adapter-opencode`, and on SSE
 reconnect re-fetch session/message/todo/diff state via REST (no `Last-Event-ID`). Map
 `permission.asked`→`DomainEvent.permission.asked`, `session.idle/error/status`→`session.status`,
 `todo.updated`→`todo.updated`, `session.diff`+`GET /diff`→`diff.finalized`.

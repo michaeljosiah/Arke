@@ -1,4 +1,4 @@
-import type { BoardColumn, DomainEvent } from "@specone/contracts";
+import type { BoardColumn, DomainEvent } from "@arke/contracts";
 
 /**
  * The normalized read model the board reads from (PRD §8.5, FR-9).

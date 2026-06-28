@@ -1,5 +1,5 @@
 {
-  "name": "@specone/coordinator",
+  "name": "@arke/coordinator",
   "version": "0.1.0",
   "private": true,
   "description": "Thin local coordinator: fronts the harness over WebSocket, normalizes provider events into one schema-validated domain model, persists an append-only trace as the audit source of truth, and survives reconnects (PRD §8.5, NFR-7, NFR-8).",
@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@specone/contracts": "*",
+    "@arke/contracts": "*",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },

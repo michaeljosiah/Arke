@@ -1,4 +1,4 @@
-// SpecOne Design System components — replaces window.SpecOneDesignSystem_b87656
+// Arke Design System components — replaces window.ArkeDesignSystem_b87656
 import React from 'react';
 import { Icon } from './icons';
 

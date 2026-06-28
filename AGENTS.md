@@ -1,11 +1,11 @@
-# AGENTS.md — SpecOne grounding
+# AGENTS.md — Arke grounding
 
-> This is the single canonical grounding file for coding agents working in SpecOne.
+> This is the single canonical grounding file for coding agents working in Arke.
 > `CLAUDE.md` mirrors it so both conventions resolve to the same guidance (PRD §12.2).
 
-## What SpecOne is
+## What Arke is
 
-SpecOne is the **Specification Orchestrator**: a React client plus a thin local
+Arke is the **Specification Orchestrator**: a React client plus a thin local
 coordinator that sits on top of a coding-agent harness (OpenCode first) and makes the
 **specification the unit of work**, from authoring through delivery. The orchestrator
 realises, visualises and coordinates; the harness owns execution.
@@ -26,7 +26,7 @@ Read `docs/PRD-Specification-Orchestrator.html` for the full product definition.
 4. **Projections to systems of record are deterministic code**, not free-form agent
    behaviour, and every projection write is logged with its trigger.
 5. **Every governed action is recorded.** Spec history is in git; permission decisions and
-   projections are in the append-only trace (`.specone/trace.ndjson`).
+   projections are in the append-only trace (`.arke/trace.ndjson`).
 6. **Agents reference logical model tiers** (`capable`, `mid`), resolved per project to the
    internal model gateway — never hardcoded vendor model IDs.
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SpecOne · Foundation Delivery Report</title>
+<title>Arke · Foundation Delivery Report</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -69,10 +69,10 @@
 <header class="mast">
   <div class="wrap">
     <div class="kicker">// Delivery report</div>
-    <h1>SpecOne — Foundation</h1>
+    <h1>Arke — Foundation</h1>
     <p class="sub">What was built in the first pass: a method-ready monorepo, schema-first contracts, a working local coordinator, an OpenCode adapter grounded in the live docs, and a React client that reproduces the approved design baseline.</p>
     <div class="meta">
-      <span class="pill">repo · github.com/michaeljosiah/SpecOne</span>
+      <span class="pill">repo · github.com/michaeljosiah/Arke</span>
       <span class="pill">date · 2026-06-28</span>
       <span class="pill ok">build ✓</span>
       <span class="pill ok">typecheck ✓</span>
@@ -100,7 +100,7 @@
   <section id="summary">
     <div class="eyebrow">01 / Executive summary</div>
     <h2>The loop's scaffolding is real and runs</h2>
-    <p>SpecOne is a brand-new public project that turns the specification-centric engineering method into a product (per the PRD). This first pass stands up the whole foundation and proves the moving parts in isolation: the <strong>contracts</strong> are schema-first and validated at the boundary; the <strong>coordinator</strong> ingests, normalizes, sequences, persists and pushes events over WebSocket; the <strong>OpenCode adapter</strong> is implemented against the real, documented HTTP/SSE surface (researched live); and the <strong>React client</strong> faithfully reproduces the approved design baseline with every v1 screen reachable.</p>
+    <p>Arke is a brand-new public project that turns the specification-centric engineering method into a product (per the PRD). This first pass stands up the whole foundation and proves the moving parts in isolation: the <strong>contracts</strong> are schema-first and validated at the boundary; the <strong>coordinator</strong> ingests, normalizes, sequences, persists and pushes events over WebSocket; the <strong>OpenCode adapter</strong> is implemented against the real, documented HTTP/SSE surface (researched live); and the <strong>React client</strong> faithfully reproduces the approved design baseline with every v1 screen reachable.</p>
     <p>It is deliberately <em>not</em> a live end-to-end loop yet — the client still renders against the prototype's in-memory simulation, and the adapter has not been exercised against a running <code>opencode serve</code>. Those two wires are the immediate next step and are scoped below.</p>
     <div class="callout">
       <div class="lbl">Direction of truth</div>
@@ -113,10 +113,10 @@
     <h2>A method-ready monorepo</h2>
     <div class="grid2">
       <div class="card"><h4>Monorepo &amp; tooling</h4><p>npm workspaces, shared <code>tsconfig.base.json</code>, <code>.gitignore</code>, <code>.editorconfig</code>, MIT licence, a public README, and a <code>.claude/launch.json</code> so the client and coordinator preview in one command.</p></div>
-      <div class="card"><h4>@specone/contracts</h4><p>zod schemas: spec lifecycle &amp; frontmatter, the spec anatomy, the normalized <code>DomainEvent</code> union with a per-connection envelope, computed board columns, and the backend-agnostic <code>HarnessAdapter</code> interface + capability flags.</p></div>
-      <div class="card"><h4>@specone/coordinator</h4><p>A thin local WebSocket coordinator: ingest → validate → normalize → fold a read model → persist an append-only NDJSON trace → push ordered, sequenced events. Ships a <code>MockAdapter</code> so the loop runs with no live harness.</p></div>
-      <div class="card"><h4>@specone/adapter-opencode</h4><p>A real <code>fetch</code>-based adapter mapped to OpenCode's server: sessions (parent/child), sync + async prompting, todos, diff, permission reply, commands, Basic-auth, and SSE → <code>DomainEvent</code> normalization. Tier → gateway model resolution built in.</p></div>
-      <div class="card"><h4>@specone/client</h4><p>Vite + React 19 + TypeScript reproducing the design baseline: app shell + sidebar nav, project picker/init, spec library, authoring cockpit, review panel, generation workspace, live board, session detail, diff review, permission overlay, audit, projections, agent roster, harness/model config, settings, notifications — plus the live event-simulation engine and shadcn "neutral" theme (light/dark, Geist).</p></div>
+      <div class="card"><h4>@arke/contracts</h4><p>zod schemas: spec lifecycle &amp; frontmatter, the spec anatomy, the normalized <code>DomainEvent</code> union with a per-connection envelope, computed board columns, and the backend-agnostic <code>HarnessAdapter</code> interface + capability flags.</p></div>
+      <div class="card"><h4>@arke/coordinator</h4><p>A thin local WebSocket coordinator: ingest → validate → normalize → fold a read model → persist an append-only NDJSON trace → push ordered, sequenced events. Ships a <code>MockAdapter</code> so the loop runs with no live harness.</p></div>
+      <div class="card"><h4>@arke/adapter-opencode</h4><p>A real <code>fetch</code>-based adapter mapped to OpenCode's server: sessions (parent/child), sync + async prompting, todos, diff, permission reply, commands, Basic-auth, and SSE → <code>DomainEvent</code> normalization. Tier → gateway model resolution built in.</p></div>
+      <div class="card"><h4>@arke/client</h4><p>Vite + React 19 + TypeScript reproducing the design baseline: app shell + sidebar nav, project picker/init, spec library, authoring cockpit, review panel, generation workspace, live board, session detail, diff review, permission overlay, audit, projections, agent roster, harness/model config, settings, notifications — plus the live event-simulation engine and shadcn "neutral" theme (light/dark, Geist).</p></div>
       <div class="card"><h4>apps/desktop</h4><p>An Electron shell skeleton documenting the embed-the-coordinator packaging plan (Electron recommended, Tauri the lighter alternative).</p></div>
       <div class="card"><h4>Method scaffolding</h4><p>The agent roster under <code>.opencode/agents</code> (product-owner, technical-architect, engineering, implementation, reviewer) in OpenCode's real frontmatter format; the canonical <code>specification.template.md</code>; the inaugural <code>SPEC-001</code>; <code>AGENTS.md</code> grounding (mirrored by <code>CLAUDE.md</code>); and ADR-0001.</p></div>
       <div class="card"><h4>Research, vendored</h4><p>The PRD and the design prototype are vendored into <code>docs/</code>. Two source-grounded guides sit in <code>docs/analysis</code>: the OpenCode integration guide and the T3 Code learnings.</p></div>
@@ -135,7 +135,7 @@
         <tr><td>Client production build</td><td><code>vite build</code></td><td class="s"><span class="tag t-done">36 modules · 305 kB</span></td></tr>
         <tr><td>Client dev server</td><td><code>vite --port 5188</code></td><td class="s"><span class="tag t-done">HTTP 200</span></td></tr>
         <tr><td>Coordinator boot + WS</td><td><code>tsx coordinator/src/server.ts</code></td><td class="s"><span class="tag t-done">snapshot + events</span></td></tr>
-        <tr><td>Audit trace persisted</td><td><code>.specone/trace.ndjson</code></td><td class="s"><span class="tag t-done">sequenced lines</span></td></tr>
+        <tr><td>Audit trace persisted</td><td><code>.arke/trace.ndjson</code></td><td class="s"><span class="tag t-done">sequenced lines</span></td></tr>
       </tbody>
     </table></div>
     <p>The coordinator smoke test connected a WebSocket client which received a <code>snapshot</code> frame from the read model, while the trace file recorded normalized events with monotonic <code>seq</code> numbers — the NFR-8 ordering/sequencing and NFR-7 audit-as-truth behaviours in miniature.</p>
@@ -145,7 +145,7 @@
     <div class="eyebrow">04 / Architecture as built</div>
     <h2>Thin client · thin local coordinator · harness owns execution</h2>
 <pre>  React client  ──(WebSocket: snapshot + ordered events)──▶  Local coordinator
-   @specone/client                                            @specone/coordinator
+   @arke/client                                            @arke/coordinator
    • cockpit · board · review                                 • ingest → validate (zod)
    • generation · diff · audit                                • normalize → read model
    • holds NO authoritative state                             • append-only NDJSON trace
@@ -154,7 +154,7 @@
                                           (HTTP + SSE, Basic-auth, inside trust boundary)
                                                                       ▼
                                                          OpenCode harness host
-                                                         @specone/adapter-opencode
+                                                         @arke/adapter-opencode
                                                          • opencode serve (4096)
                                                          • sessions · prompt_async
                                                          • todo · diff · permission
@@ -162,7 +162,7 @@
                                                                       │
                                                        repo (docs/specifications = truth)
                                                        git worktrees · gh/az · Jira/ADO MCP</pre>
-    <p>Shared <code>@specone/contracts</code> sit between the client and the coordinator; the adapter interface — not any one harness — is what the system is built against. The <code>MockAdapter</code> lets the coordinator run today; swapping in <code>OpenCodeAdapter</code> is a one-line change once a host is available.</p>
+    <p>Shared <code>@arke/contracts</code> sit between the client and the coordinator; the adapter interface — not any one harness — is what the system is built against. The <code>MockAdapter</code> lets the coordinator run today; swapping in <code>OpenCodeAdapter</code> is a one-line change once a host is available.</p>
   </section>
 
   <section id="frcov">
@@ -232,9 +232,9 @@
     <div class="eyebrow">09 / Suggested next steps</div>
     <h2>Prioritised path to a live loop</h2>
     <ol class="body-ol" style="max-width:74ch;padding-left:20px">
-      <li><strong>Wire the client transport (SPEC-001 T-7).</strong> Add a reconnecting WebSocket client to <code>@specone/client</code> that consumes the coordinator's <code>snapshot</code> + <code>event</code> frames and drives the board from real state. Adopt T3's five-state transport with queued-outbound-drain.</li>
+      <li><strong>Wire the client transport (SPEC-001 T-7).</strong> Add a reconnecting WebSocket client to <code>@arke/client</code> that consumes the coordinator's <code>snapshot</code> + <code>event</code> frames and drives the board from real state. Adopt T3's five-state transport with queued-outbound-drain.</li>
       <li><strong>Stand up a live OpenCode host and exercise the adapter (T-8).</strong> Run <code>opencode serve</code>, point the coordinator's adapter at it, validate every endpoint/event against <code>GET /doc</code>, and implement REST re-fetch on SSE reconnect.</li>
-      <li><strong>Extend the domain model for messages.</strong> Add streaming message/part events to <code>@specone/contracts</code> and a virtualized transcript to the cockpit and session detail.</li>
+      <li><strong>Extend the domain model for messages.</strong> Add streaming message/part events to <code>@arke/contracts</code> and a virtualized transcript to the cockpit and session detail.</li>
       <li><strong>Implement deterministic projection (FR-7).</strong> Ship an OpenCode plugin under <code>.opencode/plugins</code> that reacts to <code>session.idle</code>/status changes and writes Jira/Azure DevOps via MCP, logging every write with its trigger; add the <code>tool.execute.before</code> policy hook.</li>
       <li><strong>Add persistence.</strong> Introduce SQLite in the coordinator for sessions, spec snapshots and a queryable audit log alongside the trace.</li>
       <li><strong>Author a real spec through the loop.</strong> Use the cockpit + review panel end-to-end on a throwaway feature to prove "the card moves because the work moved" (the Phase-1 goal).</li>
@@ -246,8 +246,8 @@
   <section id="run">
     <div class="eyebrow">10 / How to run</div>
     <h2>From a clean clone</h2>
-<pre>git clone https://github.com/michaeljosiah/SpecOne
-cd SpecOne
+<pre>git clone https://github.com/michaeljosiah/Arke
+cd Arke
 npm install
 
 # the React client (design baseline)
@@ -263,7 +263,7 @@ npm run typecheck</pre>
   </section>
 
   <div class="endnote">
-    <p class="mono">SpecOne · foundation delivery report · 2026-06-28 · build ✓ typecheck ✓ · source of truth: git/docs/specifications</p>
+    <p class="mono">Arke · foundation delivery report · 2026-06-28 · build ✓ typecheck ✓ · source of truth: git/docs/specifications</p>
     <p>Written as a delivery artifact for an away reviewer. Status labels are deliberately honest: "scaffolded" means the surface and contracts exist; a live harness loop is the next milestone.</p>
   </div>
 </div>

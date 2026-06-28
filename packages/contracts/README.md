@@ -1,4 +1,4 @@
-# @specone/contracts
+# @arke/contracts
 
 Schema-first domain contracts shared by the client, the coordinator and every harness
 adapter (PRD §12, §21.1). zod-first and validated at the boundary, so a malformed event

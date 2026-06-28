@@ -9,7 +9,7 @@ const e = React.createElement;
 export function Wordmark({ size = 18, onDark = false }: { size?: number; onDark?: boolean }) {
   return e('div', { style: { display: 'flex', alignItems: 'baseline', gap: 4, fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: size, letterSpacing: '-0.02em', color: onDark ? '#FAFAFA' : 'var(--foreground)' } },
     e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: size * 0.66, fontWeight: 500, color: onDark ? '#A1A1A1' : 'var(--muted-foreground)' } }, '//'),
-    'SpecOne');
+    'Arke');
 }
 
 function ChromeBar() {

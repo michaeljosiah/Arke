@@ -80,7 +80,7 @@ export function Settings() {
       e('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 0' } },
         e('span', { style: { width: 36, height: 36, borderRadius: 'var(--radius-md)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 14 } }, '//'),
         e('div', null,
-          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, 'SpecOne · Specification Orchestrator'),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, 'Arke · Specification Orchestrator'),
           e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, 'v0.8 · open source · shadcn/Radix neutral theme')))),
   );
 }

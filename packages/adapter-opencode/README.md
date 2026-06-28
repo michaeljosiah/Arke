@@ -1,6 +1,6 @@
-# @specone/adapter-opencode
+# @arke/adapter-opencode
 
-The first harness adapter (PRD §15). Maps SpecOne capabilities onto OpenCode's headless
+The first harness adapter (PRD §15). Maps Arke capabilities onto OpenCode's headless
 server API and event stream, and normalizes OpenCode's native events into the canonical
 `DomainEvent` model.
 
@@ -10,7 +10,7 @@ HTTP/SSE calls are TODOs to fill against a running `opencode serve`. See the
 endpoints, event names and auth model used to complete it.
 
 ```ts
-import { OpenCodeAdapter } from "@specone/adapter-opencode";
+import { OpenCodeAdapter } from "@arke/adapter-opencode";
 
 const adapter = new OpenCodeAdapter({ baseUrl: "http://127.0.0.1:4096", password: process.env.OPENCODE_PASSWORD });
 ```

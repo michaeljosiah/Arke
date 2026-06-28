@@ -9,13 +9,13 @@ import {
   type SendMessageInput,
   type SessionRef,
   type TodoItem,
-} from "@specone/contracts";
+} from "@arke/contracts";
 import { parseSse } from "./sse.js";
 
 /**
  * OpenCode adapter (PRD §15; see docs/analysis/opencode-integration-guide.md).
  *
- * Maps SpecOne capabilities onto OpenCode's headless server (`opencode serve`) and
+ * Maps Arke capabilities onto OpenCode's headless server (`opencode serve`) and
  * normalizes its SSE events into the canonical {@link DomainEvent} model. Uses the global
  * `fetch` (Node 20+) so it carries no extra dependency; swap to `@opencode-ai/sdk` later if
  * typed coverage is wanted.
@@ -33,7 +33,7 @@ export interface OpenCodeConfig {
   /** Working directory to scope requests to (passed as ?directory=). */
   directory?: string;
   /**
-   * Resolves a SpecOne logical tier to an OpenCode `provider/model` id (FR-4, D10). Default
+   * Resolves a Arke logical tier to an OpenCode `provider/model` id (FR-4, D10). Default
    * targets a `gateway` provider configured in opencode.json with capable-tier/mid-tier models.
    */
   resolveModel?: (tier: ModelTier) => { provider: string; name: string };
@@ -144,10 +144,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   /**
-   * Normalize one OpenCode event into a SpecOne {@link DomainEvent}, or null to drop it.
+   * Normalize one OpenCode event into a Arke {@link DomainEvent}, or null to drop it.
    * Event property names vary by version (dot vs underscore casing — guide §4); read both.
    * Only events that map onto the current DomainEvent union are emitted; message.* streaming
-   * is a follow-up once message events are added to @specone/contracts.
+   * is a follow-up once message events are added to @arke/contracts.
    */
   private normalize(raw: unknown): DomainEvent | null {
     const e = raw as { type?: string; properties?: Record<string, unknown> };

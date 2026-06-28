@@ -1,5 +1,5 @@
 /* ============================================================
-   SpecOne · Color tokens — shadcn/ui "neutral" theme
+   Arke · Color tokens — shadcn/ui "neutral" theme
    Deliberately unbranded monochrome: white surfaces, near-black
    primary, neutral grays, one red for destructive. Built on the
    shadcn variable contract so the system re-skins cleanly.
@@ -134,7 +134,7 @@
 ::selection { background: var(--selection-bg); color: var(--selection-fg); }
 
 /* ============================================================
-   SpecOne · Typography tokens — shadcn / Geist
+   Arke · Typography tokens — shadcn / Geist
    One sans family (Geist) for everything; Geist Mono for code,
    IDs and technical values. No display/mono-label split — the
    shadcn look is quiet, sans, with small medium-weight labels.
@@ -194,7 +194,7 @@
 }
 
 /* ============================================================
-   SpecOne · Spacing & layout tokens
+   Arke · Spacing & layout tokens
    A 4px base grid. Generous reading measure for prose,
    tighter rhythm for dense tool surfaces (board, cockpit).
    ============================================================ */
@@ -229,7 +229,7 @@
 }
 
 /* ============================================================
-   SpecOne · Effects — radius, borders, shadows, motion
+   Arke · Effects — radius, borders, shadows, motion
    shadcn/ui contract: a single --radius (0.625rem) with derived
    steps, and the shadcn shadow scale (shadow-xs to shadow-lg).
    ============================================================ */

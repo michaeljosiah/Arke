@@ -1,8 +1,8 @@
 {
-  "name": "@specone/adapter-opencode",
+  "name": "@arke/adapter-opencode",
   "version": "0.1.0",
   "private": true,
-  "description": "The first harness adapter: maps SpecOne capabilities onto OpenCode's headless server API and SSE event stream (PRD §15). Normalizes provider-native events into the canonical domain model.",
+  "description": "The first harness adapter: maps Arke capabilities onto OpenCode's headless server API and SSE event stream (PRD §15). Normalizes provider-native events into the canonical domain model.",
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@specone/contracts": "*",
+    "@arke/contracts": "*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

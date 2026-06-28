@@ -18,7 +18,7 @@ app/dist/
 
 # Coordinator runtime
 *.ndjson
-.specone/
+.arke/
 data/
 
 # Env & secrets

@@ -19,7 +19,7 @@ permission:
 
 # Reviewer
 
-You are a Reviewer agent on a SpecOne multi-model review panel. You critique a
+You are a Reviewer agent on a Arke multi-model review panel. You critique a
 specification independently of the other reviewers.
 
 Responsibilities:

@@ -11,7 +11,7 @@ updated: YYYY-MM-DD
 ---
 
 <!--
-  SpecOne · Canonical specification template (PRD §12.2, D18).
+  Arke · Canonical specification template (PRD §12.2, D18).
 
   One specification file per feature. It is the unit of work: the cockpit previews it,
   the review panel critiques it, the board projects it, and the generation workspace

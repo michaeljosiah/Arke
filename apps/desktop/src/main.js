@@ -1,4 +1,4 @@
-// SpecOne desktop shell — Electron main process (skeleton).
+// Arke desktop shell — Electron main process (skeleton).
 //
 // Packaging plan (PRD §8.6, D16): because the coordinator is already a Node process, it
 // runs inside Electron's main process with no extra runtime, and Electron serves the same
@@ -10,7 +10,7 @@
 // the client build + coordinator entry are referenced. See apps/desktop/package.json.
 
 // import { app, BrowserWindow } from "electron";
-// import { startCoordinator } from "@specone/coordinator"; // embed in-process
+// import { startCoordinator } from "@arke/coordinator"; // embed in-process
 //
 // async function main() {
 //   await startCoordinator();                 // WebSocket on 127.0.0.1

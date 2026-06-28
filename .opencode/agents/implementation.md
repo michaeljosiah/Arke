@@ -20,7 +20,7 @@ permission:
 
 # Implementation
 
-You are an Implementation agent for SpecOne. You execute exactly one task (`T-n`) from an
+You are an Implementation agent for Arke. You execute exactly one task (`T-n`) from an
 **approved** specification.
 
 Responsibilities:

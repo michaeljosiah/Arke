@@ -1,5 +1,5 @@
 {
-  "name": "@specone/contracts",
+  "name": "@arke/contracts",
   "version": "0.1.0",
   "private": true,
   "description": "Schema-first domain contracts shared by the client, the coordinator and every harness adapter. Validated at the boundary (PRD §12, NFR-8).",

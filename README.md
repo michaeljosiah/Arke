@@ -1,6 +1,6 @@
 <div align="center">
 
-# SpecOne
+# Arke
 
 **The Specification Orchestrator** — a React client and a thin local coordinator that sit
 on top of a coding-agent harness and make the **specification the unit of work**, from
@@ -14,13 +14,13 @@ authoring through delivery.
 
 ## What this is
 
-AI code generation is fast but unreliable without structure. SpecOne turns the
+AI code generation is fast but unreliable without structure. Arke turns the
 specification-centric engineering method into a working product: the specification is
 co-authored by a human and AI, grounded in the codebase, and becomes the single source of
 truth. Everything downstream — tasks, code, tickets, tests, tracking, docs — is a
 **generated projection** of it and is kept in step with it.
 
-SpecOne does **not** replace the coding agent and does **not** become a system of record.
+Arke does **not** replace the coding agent and does **not** become a system of record.
 It is the cockpit a Product Engineer works in to orchestrate three things: authoring a
 specification, dispatching the agents that work against it, and a live kanban view of the
 specification moving across delivery. The harness owns execution; the orchestrator owns
@@ -47,7 +47,7 @@ independent of any single harness, so Claude Code, Copilot and others can be add
 ## Repository layout
 
 ```
-SpecOne/
+Arke/
 ├─ packages/
 │  ├─ contracts/        schema-first domain contracts (zod): spec, events, adapter
 │  ├─ coordinator/      thin local WebSocket coordinator + read model + audit trace

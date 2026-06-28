@@ -7,12 +7,12 @@ import type {
   SendMessageInput,
   SessionRef,
   TodoItem,
-} from "@specone/contracts";
+} from "@arke/contracts";
 
 /**
  * A mock harness adapter so the coordinator runs end-to-end without a live OpenCode
  * server. It emits a scripted sequence of normalized domain events on a timer. Replace
- * with `@specone/adapter-opencode` once a harness host is available.
+ * with `@arke/adapter-opencode` once a harness host is available.
  */
 export class MockAdapter implements HarnessAdapter {
   readonly id = "Mock";

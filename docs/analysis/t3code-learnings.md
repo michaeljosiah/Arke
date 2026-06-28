@@ -1,4 +1,4 @@
-# T3 Code — Learnings for SpecOne
+# T3 Code — Learnings for Arke
 
 > **Editor's note (verify before relying):** T3 Code is the PRD's cited architectural
 > reference ([github.com/pingdotgg/t3code](https://github.com/pingdotgg/t3code)). This
@@ -128,7 +128,7 @@ the server for correlation.
 
 ---
 
-## Concrete recommendations for SpecOne
+## Concrete recommendations for Arke
 
 **Copy directly**
 1. The **`ProviderDriver` SPI shape** (snapshot / adapter / lifecycle) and the
@@ -162,14 +162,14 @@ the server for correlation.
 15. Electron is optional for us (browser-first; desktop is a later phase) — we keep a skeleton only.
 16. Relay/tunnel/SSH remote access — out of scope; we run locally / as a service.
 17. Mobile, marketing apps — out of scope.
-18. The `textGeneration` closure — SpecOne delegates all inference to the harness; `snapshot` +
+18. The `textGeneration` closure — Arke delegates all inference to the harness; `snapshot` +
     lifecycle suffice for our adapters.
 
 ---
 
 ## What we deliberately differ on (per the PRD)
 
-| T3 | SpecOne |
+| T3 | Arke |
 |---|---|
 | Threads are generic chat containers; the spec is implicit | **Spec is a first-class, versioned aggregate**; the chat thread is a child of the spec |
 | Agents write to the working tree directly (full-access) | **Propose · decide · execute** — agent mutations become a proposal a human approves before materialisation |

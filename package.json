@@ -1,12 +1,12 @@
 {
-  "name": "specone",
+  "name": "arke",
   "version": "0.1.0",
   "private": true,
   "description": "Specification Orchestrator — a React + local-coordinator orchestration layer over coding-agent harnesses that makes the specification the unit of work, from authoring through delivery.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/michaeljosiah/SpecOne.git"
+    "url": "https://github.com/michaeljosiah/Arke.git"
   },
   "workspaces": [
     "packages/*",
@@ -16,8 +16,8 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "npm run dev --workspace @specone/client",
-    "dev:coordinator": "npm run dev --workspace @specone/coordinator",
+    "dev": "npm run dev --workspace @arke/client",
+    "dev:coordinator": "npm run dev --workspace @arke/coordinator",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

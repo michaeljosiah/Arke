@@ -1,5 +1,5 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import { DomainEvent, type HarnessAdapter } from "@specone/contracts";
+import { DomainEvent, type HarnessAdapter } from "@arke/contracts";
 import { ReadModel } from "./read-model.js";
 import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
@@ -13,8 +13,8 @@ import { MockAdapter } from "./mock-adapter.js";
  * monotonically sequenced per connection, schema-validated (NFR-8). No cloud backend
  * sits on the hot path; this process runs on the harness host, inside the trust boundary.
  */
-const PORT = Number(process.env.SPECONE_COORDINATOR_PORT ?? 4319);
-const TRACE_PATH = process.env.SPECONE_TRACE_PATH ?? ".specone/trace.ndjson";
+const PORT = Number(process.env.ARKE_COORDINATOR_PORT ?? 4319);
+const TRACE_PATH = process.env.ARKE_TRACE_PATH ?? ".arke/trace.ndjson";
 
 class Coordinator {
   private seq = 0;
@@ -45,7 +45,7 @@ class Coordinator {
 
   private onClientMessage(_ws: WebSocket, raw: string): void {
     // Outbound requests (sendMessage, respondToPermission, ...) are routed to the
-    // adapter here. Stubbed in the skeleton; the contract is in @specone/contracts.
+    // adapter here. Stubbed in the skeleton; the contract is in @arke/contracts.
     try {
       const msg = JSON.parse(raw) as { type?: string };
       void this.trace.write({ kind: "client.request", request: msg });
