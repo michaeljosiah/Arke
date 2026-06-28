@@ -98,6 +98,44 @@ export const ProjectionWriteEvent = base.extend({
   ok: z.boolean(),
 });
 
+/**
+ * A streaming delta from an in-progress assistant turn (SPEC-003). Parts are folded into
+ * per-session transcript state in `partIndex` order, not arrival order; `done: true` marks
+ * the final part of a message.
+ */
+export const MessagePartEvent = base.extend({
+  type: z.literal("message.part"),
+  sessionId: z.string(),
+  messageId: z.string(),
+  partIndex: z.number().int().nonnegative(),
+  delta: z.string(),
+  role: z.enum(["assistant", "tool"]),
+  done: z.boolean(),
+});
+
+/** A full turn-state snapshot once a message is complete (SPEC-003). */
+export const MessageUpdatedEvent = base.extend({
+  type: z.literal("message.updated"),
+  sessionId: z.string(),
+  messageId: z.string(),
+  role: z.enum(["user", "assistant", "tool"]),
+  text: z.string(),
+  toolCalls: z
+    .array(z.object({ id: z.string(), name: z.string(), result: z.string().optional() }))
+    .default([]),
+  isStreaming: z.boolean(),
+});
+
+/**
+ * A typed runtime-signal receipt the coordinator emits when a session goes idle after a turn
+ * (SPEC-003, D2). Consumers detect turn completion from this — never by polling or timeout.
+ */
+export const TurnQuiescentEvent = base.extend({
+  type: z.literal("turn.quiescent"),
+  sessionId: z.string(),
+  turnId: z.string(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -107,8 +145,20 @@ export const DomainEvent = z.discriminatedUnion("type", [
   PermissionAskedEvent,
   PermissionRepliedEvent,
   ProjectionWriteEvent,
+  MessagePartEvent,
+  MessageUpdatedEvent,
+  TurnQuiescentEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
+
+/** One message in a session's transcript, accumulated from message.part/updated events. */
+export interface TranscriptEntry {
+  messageId: string;
+  role: "user" | "assistant" | "tool";
+  text: string;
+  toolCalls: { id: string; name: string; result?: string }[];
+  isStreaming: boolean;
+}
 
 /**
  * Board columns are computed from real signals (FR-9, Figure 4) — never hand-set.

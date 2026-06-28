@@ -65,9 +65,20 @@ function NavItem({ it, active, onClick, badge }: any) {
   );
 }
 
+// Maps the transport state machine to a status dot + label for the connection indicator.
+const CONN_UI: Record<string, { status: string; pulse: boolean; label: string }> = {
+  open: { status: 'agree', pulse: true, label: 'coordinator live' },
+  connecting: { status: 'running', pulse: true, label: 'connecting…' },
+  reconnecting: { status: 'attention', pulse: true, label: 'reconnecting…' },
+  closed: { status: 'idle', pulse: false, label: 'coordinator closed' },
+  disposed: { status: 'idle', pulse: false, label: 'disconnected' },
+  offline: { status: 'idle', pulse: false, label: 'mock data (no coordinator)' },
+};
+
 function Sidebar() {
-  const { view, project, notifs, harnesses } = useStore();
+  const { view, project, notifs, harnesses, connection, live } = useStore();
   const unread = notifs.filter((n) => !n.read).length;
+  const conn = CONN_UI[connection] || CONN_UI.offline;
   const go = (id) => store.set({ view: id });
   return e('div', { style: { width: 230, flex: 'none', background: 'var(--background)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('button', { onClick: () => store.set({ project: null, view: 'picker' }), style: { display: 'flex', alignItems: 'center', gap: 10, margin: '12px 12px 6px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', background: 'var(--card)', cursor: 'pointer', textAlign: 'left' } },
@@ -85,10 +96,10 @@ function Sidebar() {
       )),
     ),
     e('div', { style: { borderTop: '1px solid var(--border)', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8 } },
-      e(StatusDot, { status: 'agree', pulse: true }),
+      e(StatusDot, { status: conn.status, pulse: conn.pulse }),
       e('div', { style: { flex: 1, minWidth: 0 } },
-        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--foreground)' } }, 'host connected'),
-        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, harnesses.filter((h) => h.status === 'connected').length + ' harnesses')),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--foreground)' } }, conn.label),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, live ? 'streaming from coordinator' : harnesses.filter((h) => h.status === 'connected').length + ' harnesses')),
     ),
   );
 }

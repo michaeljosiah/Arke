@@ -122,6 +122,10 @@ export const store = createStore({
   liveStream: true,
   chrome: 'desktop',
   emptyDemo: false,
+  // Live coordinator link (SPEC-003). `connection` mirrors the transport state machine;
+  // `live` flips true once a snapshot arrives, at which point the mock engine stands down.
+  connection: 'offline',
+  live: false,
 });
 
 // ---------- helpers to mutate ----------
@@ -176,6 +180,7 @@ function resolvePermission(approved) {
 let timer: ReturnType<typeof setInterval> | null = null;
 function tick() {
   const s = store.get();
+  if (s.live) return; // live coordinator data is in control; the mock engine stands down
   if (!s.liveStream || !s.project) return;
   if (s.permission && s.runtimeMode === 'supervised') return;
 
