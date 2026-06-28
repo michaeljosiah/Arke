@@ -29,6 +29,11 @@ export const EventEnvelope = z.object({
   seq: z.number().int().nonnegative(), // monotonic per connection
   ts: z.number().int(), // epoch ms, stamped at the coordinator
   harness: z.string(), // e.g. "OpenCode", "Claude Code"
+  // Correlation id (the harness messageID) attributing an event to the request that
+  // produced it (SPEC-002). Optional on the envelope; the full domain-model treatment
+  // — message/part events that always carry it — is SPEC-003. Landed early here so the
+  // OpenCode adapter can attribute turn output to its originating send.
+  correlationId: z.string().optional(),
 });
 export type EventEnvelope = z.infer<typeof EventEnvelope>;
 

@@ -43,6 +43,18 @@ export interface SendMessageInput {
   /** Logical model tier; the router resolves tier → model → harness (FR-4, D11). */
   tier: ModelTier;
   parts: MessagePart[];
+  /**
+   * Caller-supplied correlation id (the harness `messageID`, SPEC-002). Lets the
+   * coordinator attribute later events to the originating request. If omitted, the
+   * adapter generates one and returns it on the {@link SendReceipt}.
+   */
+  correlationId?: string;
+}
+
+/** Receipt for a send/dispatch: the session it ran on and the correlation id used. */
+export interface SendReceipt {
+  sessionId: string;
+  correlationId: string;
 }
 
 export interface DiffSummary {
@@ -64,20 +76,57 @@ export interface PermissionDecision {
 }
 
 /**
+ * The outcome of relaying a permission decision (SPEC-002). The reply endpoint can
+ * return HTTP 200 even for stale ids, so success is never inferred from status — it is
+ * confirmed only by the matching `permission.replied` event:
+ * - `confirmed`   — the matching reply event arrived.
+ * - `unconfirmed` — no reply within the timeout; the caller should surface "couldn't
+ *                   confirm — retry" rather than reporting success.
+ * - `stale`       — the server no longer lists the id as pending; offer to refresh.
+ * - `duplicate`   — the same decision was already confirmed; the second call was a no-op.
+ */
+export const PermissionAckStatus = z.enum(["confirmed", "unconfirmed", "stale", "duplicate"]);
+export type PermissionAckStatus = z.infer<typeof PermissionAckStatus>;
+
+export interface PermissionAck {
+  permissionId: string;
+  status: PermissionAckStatus;
+}
+
+/** Whether the adapter is ready to serve, with a reason when it is not (SPEC-002). */
+export interface Readiness {
+  ready: boolean;
+  reason?: string;
+}
+
+/**
  * One interface, many harnesses, honest about differences. Methods beyond the `core`
  * set are gated by the capabilities the adapter reports from {@link capabilities}.
  */
 export interface HarnessAdapter {
   /** Stable identifier shown on the board, e.g. "OpenCode". */
   readonly id: string;
-  /** What this adapter supports; callers check before invoking gated methods. */
+  /**
+   * What this adapter supports; callers check before invoking gated methods. The set is
+   * determined by probing the live server at {@link init}, not hard-coded (SPEC-002).
+   */
   capabilities(): ReadonlySet<Capability>;
+
+  // ---- lifecycle ----
+  /**
+   * Probe the server, derive capabilities, and build initial state. Idempotent. After it
+   * resolves, {@link capabilities} and {@link readiness} reflect the live server.
+   */
+  init?(): Promise<void>;
+  /** Whether the adapter can serve, with a reason when it cannot (SPEC-002). */
+  readiness?(): Readiness;
 
   // ---- core ----
   createSession(input: CreateSessionInput): Promise<SessionRef>;
-  sendMessage(input: SendMessageInput): Promise<void>;
+  /** Synchronous send: resolves when the turn completes. Returns the correlation id used. */
+  sendMessage(input: SendMessageInput): Promise<SendReceipt>;
   /** Fire-and-watch task execution; must not block while the task runs (FR-8). */
-  dispatchAsync(input: SendMessageInput): Promise<SessionRef>;
+  dispatchAsync(input: SendMessageInput): Promise<SendReceipt>;
 
   // ---- events ----
   /** Async iterator of normalized, validated domain events (capability: events). */
@@ -86,6 +135,10 @@ export interface HarnessAdapter {
   // ---- todos / diff / permissions / commands ----
   getTodos?(ref: SessionRef): Promise<TodoItem[]>;
   getDiff?(ref: SessionRef): Promise<DiffSummary>;
-  respondToPermission?(decision: PermissionDecision): Promise<void>;
+  /**
+   * Relay a human decision and confirm it via the matching `permission.replied` event —
+   * never by HTTP status. See {@link PermissionAck} for the outcomes (SPEC-002).
+   */
+  respondToPermission?(decision: PermissionDecision): Promise<PermissionAck>;
   runCommand?(ref: SessionRef, command: string, args?: string[]): Promise<void>;
 }
