@@ -19,6 +19,31 @@ test("parseModelRef defaults a bare name to the gateway provider", () => {
 test("the default resolver targets the internal gateway per tier", () => {
   assert.deepEqual(DEFAULT_RESOLVE_MODEL("capable"), { provider: "gateway", name: "capable-tier" });
   assert.deepEqual(DEFAULT_RESOLVE_MODEL("mid"), { provider: "gateway", name: "mid-tier" });
+  assert.deepEqual(DEFAULT_RESOLVE_MODEL("fast"), { provider: "gateway", name: "fast-tier" });
+});
+
+test("a configured fast serve resolves to its concrete model, not a downgrade", () => {
+  const { dir, path } = writeConfig({
+    registry: {
+      instances: [
+        {
+          id: "opencode-local",
+          driver: "opencode",
+          host: "localhost",
+          cwd: ".",
+          serves: [
+            { tier: "mid", model: "vendorx/small" },
+            { tier: "fast", model: "vendorx/tiny" },
+          ],
+        },
+      ],
+    },
+  });
+  const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} });
+  assert.ok(config);
+  assert.deepEqual(config!.resolveModel!("fast"), { provider: "vendorx", name: "tiny" });
+  // an unconfigured tier still falls back to its own gateway placeholder, never another tier
+  assert.deepEqual(config!.resolveModel!("capable"), { provider: "gateway", name: "capable-tier" });
 });
 
 function writeConfig(contents: unknown): { dir: string; path: string } {

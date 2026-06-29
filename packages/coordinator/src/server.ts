@@ -436,7 +436,7 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const grants = new GrantStore(resolve(arke, "grants.ndjson"));
   grants.load();
   if (mockEnabled()) {
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
   }
   const config = loadOpenCodeConfig({ configPath: resolve(arke, "config.json"), baseDir: root });
   if (!config) return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: {} };
@@ -455,6 +455,7 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const tierDefaults: ScaffoldTiers = {
     capable: config.resolveModel?.("capable").name,
     mid: config.resolveModel?.("mid").name,
+    fast: config.resolveModel?.("fast").name,
   };
   return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
 }
@@ -463,7 +464,7 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
   if (mockEnabled()) {
     console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
   }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
@@ -486,6 +487,7 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
   const tierDefaults: ScaffoldTiers = {
     capable: config.resolveModel?.("capable").name,
     mid: config.resolveModel?.("mid").name,
+    fast: config.resolveModel?.("fast").name,
   };
   return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
 }

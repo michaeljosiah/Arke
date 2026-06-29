@@ -14,7 +14,7 @@ export const SpecStatus = z.enum(["draft", "in-review", "approved", "merged"]);
 export type SpecStatus = z.infer<typeof SpecStatus>;
 
 /** Logical model tiers. Agents reference tiers, resolved per project to a gateway (FR-4, D10). */
-export const ModelTier = z.enum(["capable", "mid"]);
+export const ModelTier = z.enum(["capable", "mid", "fast"]);
 export type ModelTier = z.infer<typeof ModelTier>;
 
 /** Frontmatter block at the head of every specification file. */
