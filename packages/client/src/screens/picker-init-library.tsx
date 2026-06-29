@@ -134,6 +134,7 @@ export function Picker() {
 }
 
 const SCAFFOLD = [
+  { id: 'config', icon: 'settings', title: 'Project configuration', detail: '.arke/config.json — the registry: tier→model mapping (capable/mid/fast) and the role roster; vendor model ids live only here', lines: ['+ .arke/config.json'] },
   { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — six canonical roles: spec-author, architect, reviewer-a/b, implementer, researcher', lines: ['+ .opencode/agents/spec-author.md', '+ .opencode/agents/architect.md', '+ .opencode/agents/implementer.md', '+ .opencode/agents/researcher.md'] },
   { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
   { id: 'grounding', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md baseline stub, enriched in full by the researcher grounding session', lines: ['+ AGENTS.md', '+ .repos/ (read-only references)'] },
@@ -164,12 +165,17 @@ export function Initialisation() {
   const effLog = live ? ((scaffold && scaffold.log) || []) : log;
   const effRunning = live ? !!(scaffold && scaffold.running) : running;
   const effFinished = live ? !!(scaffold && scaffold.done) : finished;
+  // The coordinator now supplies gateway tier defaults even for a greenfield project, so scaffolding
+  // is no longer blocked: the `config` step writes .arke/config.json (which the engineer then edits
+  // with real models). Kept as a guard only for a truly empty registry.
   const tiersBlocked = live && (!tierDefaults || !tierDefaults.capable || !tierDefaults.mid);
-  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise.
+  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise. Three
+  // logical tiers — capable (authoring/review), mid (implementation), fast (routine/classification).
   const tierRows = live
     ? [
         { tier: 'capable', label: 'Capable tier', model: (tierDefaults && tierDefaults.capable) || 'capable — not configured' },
         { tier: 'mid', label: 'Mid tier', model: (tierDefaults && tierDefaults.mid) || 'mid — not configured' },
+        { tier: 'fast', label: 'Fast tier', model: (tierDefaults && tierDefaults.fast) || 'fast — not configured' },
       ]
     : tiers;
 

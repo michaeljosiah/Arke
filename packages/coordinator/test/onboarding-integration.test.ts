@@ -89,15 +89,17 @@ test("scaffold.run streams scaffold.step events then scaffold.done, and writes a
   ws.close();
 });
 
-test("scaffold.run with a missing tier default is blocked (no artefacts written)", async () => {
+test("scaffold.run on a greenfield project (no tier defaults) creates the config and is not blocked (SPEC-018)", async () => {
   const { c, port, dir } = await coordinator({ tierDefaults: {} });
   after(() => c.stop());
   const { ws, waitFor } = await connect(port);
   await waitFor((f) => f.type === "snapshot");
-  ws.send(JSON.stringify({ type: "scaffold.run", path: "." }));
-  const err = await waitFor((f) => f.type === "error" || f.type === "validation-error");
-  assert.match(err.reason, /tier defaults not configured/);
-  assert.ok(!existsSync(resolve(dir, ".opencode/agents/spec-author.md")));
+  ws.send(JSON.stringify({ type: "request", id: "sc", op: "scaffold.run", args: { path: "." } }));
+  const res = await waitFor((f) => f.type === "response" && f.id === "sc");
+  assert.equal(res.ok, true); // no longer blocked — the config step seeds the registry
+  assert.ok(res.result.stepsRun.includes("config"));
+  assert.ok(existsSync(resolve(dir, ".arke/config.json")), "the config step writes .arke/config.json");
+  assert.ok(existsSync(resolve(dir, ".opencode/agents/spec-author.md")));
   ws.close();
 });
 

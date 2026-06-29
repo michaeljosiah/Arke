@@ -429,6 +429,22 @@ function mockEnabled(): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
+/**
+ * Logical-tier defaults used when a project has no `.arke/config.json` yet (SPEC-018). These are
+ * the gateway placeholders — never vendor model ids — so a greenfield project is NEVER blocked from
+ * scaffolding (the `config` scaffold step then writes a real `.arke/config.json` the user edits).
+ */
+const GATEWAY_TIER_DEFAULTS: ScaffoldTiers = { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" };
+
+/** Tier defaults resolved from a loaded config (the registry-resolved model names, incl. fast). */
+function tierDefaultsFrom(config: { resolveModel?: (t: "capable" | "mid" | "fast") => { name: string } }): ScaffoldTiers {
+  return {
+    capable: config.resolveModel?.("capable").name,
+    mid: config.resolveModel?.("mid").name,
+    fast: config.resolveModel?.("fast").name,
+  };
+}
+
 /** Build context dependencies for an arbitrary project root (used to open projects at runtime). */
 async function buildContextDeps(root: string): Promise<ContextDeps> {
   const arke = resolve(root, ".arke");
@@ -436,10 +452,10 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const grants = new GrantStore(resolve(arke, "grants.ndjson"));
   grants.load();
   if (mockEnabled()) {
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   const config = loadOpenCodeConfig({ configPath: resolve(arke, "config.json"), baseDir: root });
-  if (!config) return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: {} };
+  if (!config) return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
     sessionStore: new CoordinatorSessionStore(resolve(arke, "sessions.ndjson"), "OpenCode"),
@@ -450,21 +466,17 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
     await adapter.init();
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: {} };
+    // The config parsed fine; only the harness server failed — its tier mapping is still known.
+    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: tierDefaultsFrom(config) };
   }
-  const tierDefaults: ScaffoldTiers = {
-    capable: config.resolveModel?.("capable").name,
-    mid: config.resolveModel?.("mid").name,
-    fast: config.resolveModel?.("fast").name,
-  };
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
 }
 
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
   if (mockEnabled()) {
     console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
@@ -472,7 +484,8 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
       "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
         "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
     );
-    return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: {} };
+    // Greenfield still gets logical-tier defaults so it can scaffold (which writes the real config).
+    return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
@@ -484,12 +497,7 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
     `[coordinator] ${config.manageHarness ? "starting & probing" : "probing"} OpenCode at ${config.baseUrl} …`,
   );
   await adapter.init();
-  const tierDefaults: ScaffoldTiers = {
-    capable: config.resolveModel?.("capable").name,
-    mid: config.resolveModel?.("mid").name,
-    fast: config.resolveModel?.("fast").name,
-  };
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
 }
 
 async function bootstrap(): Promise<void> {
@@ -502,7 +510,7 @@ async function bootstrap(): Promise<void> {
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
-    deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: {} };
+    deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   await new Coordinator(deps.adapter, deps.trace, deps.grants, PORT, {
     endpoints: deps.endpoints,
