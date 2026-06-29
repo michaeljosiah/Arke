@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="en-GB" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arke · Architecture</title>
+<meta name="description" content="The architecture of Arke — the Specification Orchestrator. From a plain-language overview to the full stack, the harness substrate, the event model and the governance loop.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     Tokens — Arke design system (shadcn neutral, monochrome).
+     Mirrors .claude/skills/arke-design/_ds/.../tokens/colors.css
+     ============================================================ */
+  :root{
+    --background:#FFFFFF;  --foreground:#0A0A0A;
+    --card:#FFFFFF;        --card-foreground:#0A0A0A;
+    --primary:#171717;     --primary-foreground:#FAFAFA;
+    --muted:#F5F5F5;       --muted-foreground:#737373;
+    --border:#E5E5E5;      --ring:#A1A1A1;
+    --success:#16A34A;     --success-bg:#F0FDF4;
+    --warning:#D97706;     --warning-bg:#FFFBEB;
+    --destructive:#E7000B; --danger-bg:#FEF2F2;
+    --n50:#FAFAFA;  --n100:#F5F5F5; --n200:#E5E5E5; --n300:#D4D4D4;
+    --n400:#A1A1A1; --n500:#737373; --n600:#525252; --n700:#404040;
+    --n800:#262626; --n900:#171717; --n950:#0A0A0A;
+    --font-sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --font-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --maxw:980px;
+    --radius:10px;
+    --shadow:0 1px 2px rgba(10,10,10,.04),0 8px 24px -12px rgba(10,10,10,.10);
+  }
+  html[data-theme="dark"]{
+    --background:#0A0A0A;  --foreground:#FAFAFA;
+    --card:#121212;       --card-foreground:#FAFAFA;
+    --primary:#FAFAFA;     --primary-foreground:#171717;
+    --muted:#1C1C1C;       --muted-foreground:#A1A1A1;
+    --border:#2A2A2A;      --ring:#707070;
+    --success:#22C55E;     --success-bg:#0B1F12;
+    --warning:#F59E0B;     --warning-bg:#241803;
+    --destructive:#EF4444; --danger-bg:#2A0E0E;
+    --n50:#0A0A0A;  --n100:#1C1C1C; --n200:#2A2A2A; --n300:#3A3A3A;
+    --n400:#5A5A5A; --n500:#8A8A8A; --n600:#A1A1A1; --n700:#C4C4C4;
+    --n800:#E0E0E0; --n900:#F0F0F0; --n950:#FAFAFA;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--background); color:var(--foreground);
+    font-family:var(--font-sans); font-size:15px; line-height:1.65;
+    -webkit-font-smoothing:antialiased; letter-spacing:-0.003em;
+  }
+  code,kbd,.mono{font-family:var(--font-mono)}
+
+  /* ---- layout ------------------------------------------------ */
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:0 28px}
+  main{padding-bottom:120px}
+  section{padding-top:30px; scroll-margin-top:78px}
+  section > .wrap > h2{scroll-margin-top:78px}
+
+  /* ---- top bar ----------------------------------------------- */
+  header.bar{
+    position:sticky; top:0; z-index:50;
+    background:color-mix(in srgb, var(--background) 86%, transparent);
+    backdrop-filter:saturate(140%) blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  .bar .wrap{display:flex; align-items:center; gap:16px; height:56px}
+  .wordmark{display:inline-flex; align-items:baseline; gap:.18em; font-weight:600; font-size:19px; letter-spacing:-.03em}
+  .wordmark .sl{font-family:var(--font-mono); font-weight:500; color:var(--n500); font-size:.78em}
+  .bar .sep{flex:1}
+  .bar nav{display:flex; gap:4px; flex-wrap:wrap}
+  .bar nav a{
+    color:var(--muted-foreground); text-decoration:none; font-size:12.5px; font-weight:500;
+    padding:6px 9px; border-radius:7px; white-space:nowrap;
+  }
+  .bar nav a:hover{color:var(--foreground); background:var(--muted)}
+  .toggle{
+    border:1px solid var(--border); background:var(--card); color:var(--muted-foreground);
+    width:34px; height:34px; border-radius:8px; cursor:pointer; display:grid; place-items:center;
+    font-size:15px;
+  }
+  .toggle:hover{color:var(--foreground); border-color:var(--n400)}
+
+  /* ---- hero -------------------------------------------------- */
+  .hero{
+    border-bottom:1px solid var(--border);
+    background:
+      radial-gradient(120% 120% at 80% -10%, color-mix(in srgb,var(--muted) 60%, transparent), transparent 60%),
+      linear-gradient(180deg, var(--background), var(--background));
+  }
+  .hero .wrap{padding-top:64px; padding-bottom:52px}
+  .hero .kicker{font-family:var(--font-mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:var(--n500)}
+  .hero h1{font-size:46px; line-height:1.05; letter-spacing:-.035em; margin:.35em 0 .2em; font-weight:600}
+  .hero p.lead{font-size:19px; color:var(--n700); max-width:62ch; margin:.2em 0 0}
+  .hero .meta{margin-top:26px; display:flex; gap:8px; flex-wrap:wrap}
+  .pill{
+    display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:500;
+    border:1px solid var(--border); background:var(--card); color:var(--n700);
+    padding:5px 11px; border-radius:999px;
+  }
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .dot.g{background:var(--success)} .dot.a{background:var(--warning)} .dot.k{background:var(--foreground)}
+
+  /* ---- typography -------------------------------------------- */
+  h2{font-size:28px; letter-spacing:-.025em; font-weight:600; margin:.2em 0 .15em; line-height:1.15}
+  h3{font-size:19px; letter-spacing:-.015em; font-weight:600; margin:1.9em 0 .4em}
+  h4{font-size:15px; font-weight:600; margin:1.4em 0 .3em}
+  p{margin:.7em 0}
+  a{color:var(--foreground); text-decoration-color:var(--n400); text-underline-offset:3px}
+  .secnum{font-family:var(--font-mono); font-size:13px; color:var(--n400); font-weight:500; letter-spacing:.02em}
+  .sectitle{display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--border); padding-bottom:14px; margin-bottom:4px}
+  strong{font-weight:600}
+  ul,ol{padding-left:22px; margin:.6em 0}
+  li{margin:.32em 0}
+  .lead-muted{color:var(--n600); font-size:16.5px}
+
+  code:not(pre code){
+    background:var(--muted); border:1px solid var(--border); border-radius:5px;
+    padding:1px 6px; font-size:.86em; color:var(--n800);
+  }
+
+  /* ---- callouts ---------------------------------------------- */
+  .note{
+    border:1px solid var(--border); border-left:3px solid var(--foreground);
+    background:var(--card); border-radius:8px; padding:14px 18px; margin:18px 0;
+    box-shadow:var(--shadow);
+  }
+  .note .lbl{font-family:var(--font-mono); font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--n500); display:block; margin-bottom:4px}
+  .note.principle{border-left-color:var(--foreground)}
+  .note.warn{border-left-color:var(--warning)}
+  .note.spec{border-left-color:var(--n400)}
+
+  /* ---- cards / grid ------------------------------------------ */
+  .grid{display:grid; gap:14px; margin:18px 0}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:740px){.g2,.g3{grid-template-columns:1fr}}
+  .card{
+    border:1px solid var(--border); background:var(--card); border-radius:var(--radius);
+    padding:16px 18px; box-shadow:var(--shadow);
+  }
+  .card h4{margin-top:0; display:flex; align-items:center; gap:8px}
+  .card .tag{font-family:var(--font-mono); font-size:11px; color:var(--n500); display:block; margin-top:-2px}
+  .card p{font-size:14px; color:var(--n700); margin:.5em 0 0}
+
+  /* ---- figures ----------------------------------------------- */
+  figure{margin:26px 0; }
+  .figbox{
+    border:1px solid var(--border); border-radius:14px; background:
+      linear-gradient(180deg, color-mix(in srgb,var(--muted) 40%, var(--card)), var(--card));
+    padding:22px; box-shadow:var(--shadow); overflow:hidden;
+  }
+  figure svg{display:block; width:100%; height:auto}
+  figcaption{font-size:13px; color:var(--n500); margin-top:12px; text-align:center; font-style:normal}
+  figcaption b{color:var(--n700); font-weight:600}
+
+  /* svg helpers (consumed by inline styles too) */
+  .svg-label{font-family:var(--font-sans); font-weight:500}
+  .svg-mono{font-family:var(--font-mono)}
+
+  /* ---- tables ------------------------------------------------ */
+  .tablewrap{overflow-x:auto; margin:18px 0; border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow)}
+  table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:560px}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:top}
+  thead th{background:var(--muted); font-weight:600; font-size:12px; letter-spacing:.02em; color:var(--n700); position:sticky; top:0}
+  tbody tr:last-child td{border-bottom:none}
+  td code{white-space:nowrap}
+  .mono-cell{font-family:var(--font-mono); font-size:12.5px; color:var(--n700)}
+
+  /* ---- badges ------------------------------------------------ */
+  .badge{display:inline-block; font-family:var(--font-mono); font-size:11px; padding:2px 7px; border-radius:6px; border:1px solid var(--border); background:var(--muted); color:var(--n700)}
+  .badge.green{color:var(--success); border-color:color-mix(in srgb,var(--success) 35%,var(--border)); background:var(--success-bg)}
+  .badge.amber{color:var(--warning); border-color:color-mix(in srgb,var(--warning) 35%,var(--border)); background:var(--warning-bg)}
+  .badge.red{color:var(--destructive); border-color:color-mix(in srgb,var(--destructive) 35%,var(--border)); background:var(--danger-bg)}
+
+  /* ---- TOC list in-page -------------------------------------- */
+  .toc{columns:2; gap:26px; margin:14px 0 4px}
+  @media(max-width:740px){.toc{columns:1}}
+  .toc a{display:block; text-decoration:none; color:var(--n700); padding:6px 0; font-size:14px; break-inside:avoid}
+  .toc a:hover{color:var(--foreground)}
+  .toc a .n{font-family:var(--font-mono); color:var(--n400); font-size:12px; margin-right:10px}
+
+  /* ---- footer ------------------------------------------------ */
+  footer{border-top:1px solid var(--border); padding:30px 0 70px; color:var(--n500); font-size:13px}
+  footer .wrap{display:flex; flex-wrap:wrap; gap:18px; justify-content:space-between}
+  footer a{color:var(--n600)}
+
+  hr.soft{border:none; border-top:1px solid var(--border); margin:30px 0}
+  .kpi{display:flex; gap:18px; flex-wrap:wrap; margin:18px 0}
+  .kpi .k{border:1px solid var(--border); border-radius:10px; padding:12px 16px; background:var(--card); min-width:120px; box-shadow:var(--shadow)}
+  .kpi .k b{display:block; font-size:24px; letter-spacing:-.02em; font-weight:600}
+  .kpi .k span{font-size:12px; color:var(--n500)}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="wrap">
+    <span class="wordmark"><span class="sl">//</span>Arke</span>
+    <span class="sep"></span>
+    <nav>
+      <a href="#plain">In plain terms</a>
+      <a href="#idea">The idea</a>
+      <a href="#stack">The stack</a>
+      <a href="#substrate">Substrate &amp; Omnigent</a>
+      <a href="#events">Event flow</a>
+      <a href="#governance">Governance</a>
+      <a href="#map">Repo map</a>
+    </nav>
+    <button class="toggle" id="themeBtn" title="Toggle theme" aria-label="Toggle light/dark">◐</button>
+  </div>
+</header>
+
+<!-- ============================ HERO ============================ -->
+<div class="hero">
+  <div class="wrap">
+    <div class="kicker">Architecture · the Specification Orchestrator</div>
+    <h1>How Arke is built</h1>
+    <p class="lead">A React cockpit and a thin local coordinator sit on top of a coding-agent harness and make the <strong>specification the unit of work</strong> — from authoring through delivery, across any agent. This document explains that architecture: first in plain language, then layer by layer.</p>
+    <div class="meta">
+      <span class="pill"><span class="dot k"></span> Thin client · local coordinator</span>
+      <span class="pill"><span class="dot g"></span> Harness owns execution</span>
+      <span class="pill"><span class="dot a"></span> Propose · decide · execute</span>
+      <span class="pill"><span class="dot k"></span> Omnigent-ready substrate</span>
+    </div>
+  </div>
+</div>
+
+<main>
+
+<!-- ============================ 0. PLAIN TERMS ============================ -->
+<section id="plain">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">00</span><h2>In plain terms</h2></div>
+    <p class="lead-muted">Read this part even if you read nothing else. No jargon.</p>
+
+    <p>Modern software is increasingly written by AI coding agents. They are fast, but on their own they are unpredictable — they wander off-brief, leave no record of <em>why</em> something was built, and need a human watching every keystroke. Teams cope by writing better and better instructions until, at the top of the ladder, all the intent lives in <strong>one authoritative document: a specification</strong> that says what to build and why.</p>
+
+    <p><strong>Arke is the place that document lives and does its work.</strong> Think of it as a control room — a cockpit — for a person we call a <em>Product Engineer</em>. In that cockpit you do three things, in a loop:</p>
+
+    <div class="grid g3">
+      <div class="card">
+        <h4>1 · Author</h4>
+        <span class="tag">write the spec</span>
+        <p>You and an AI co-write the specification, grounded in the real codebase. A panel of different AI models critiques it. When you're happy, it is committed to the repository as the single source of truth.</p>
+      </div>
+      <div class="card">
+        <h4>2 · Orchestrate</h4>
+        <span class="tag">run the agents</span>
+        <p>Arke dispatches coding agents to build against the spec — many at once, in parallel — and pauses for your approval at every decision point. You stay the one who decides; the agents do the typing.</p>
+      </div>
+      <div class="card">
+        <h4>3 · Keep the record</h4>
+        <span class="tag">watch &amp; prove</span>
+        <p>A live board shows the <em>real</em> state of delivery — a card moves because the work moved, not because someone dragged it. Every approval is written down, permanently.</p>
+      </div>
+    </div>
+
+    <h3>The architectural idea, in one breath</h3>
+    <p>Arke deliberately does <strong>not</strong> do the dangerous, heavy work itself. It does not run the AI agents, hold your passwords, or touch your codebase directly. That job belongs to a <em>harness</em> — a separate engine that owns execution and credentials. Arke is the thin, smart layer on top that <strong>realises, visualises and coordinates</strong>. The browser you look at never holds a secret and never talks to your live systems.</p>
+
+    <p>So the shape of the system is simple to picture: <strong>a human at the top who decides, a window that shows the picture, a small local translator in the middle, and a powerful engine underneath that does the building.</strong> Everything below is just that idea, drawn precisely.</p>
+
+    <div class="note">
+      <span class="lbl">The substrate, in plain terms</span>
+      The engine underneath can be a single coding agent (we start with one called <strong>OpenCode</strong>) — or it can be <strong>Omnigent</strong>, a "meta-engine" that drives <em>fifteen</em> different agents and adds cloud sandboxes, session rescue and more. Because Arke talks to the engine through one neutral plug, swapping a single agent for Omnigent unlocks all of that <em>without changing Arke</em>. That plug — and what Omnigent unlocks through it — is a major theme of this document.
+    </div>
+  </div>
+</section>
+
+<!-- ============================ TOC ============================ -->
+<section id="contents">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">··</span><h2>What's in here</h2></div>
+    <nav class="toc">
+      <a href="#idea"><span class="n">01</span>The big idea — spec as the unit of work</a>
+      <a href="#principles"><span class="n">02</span>Three non-negotiable principles</a>
+      <a href="#stack"><span class="n">03</span>The stack — every layer at a glance</a>
+      <a href="#layers"><span class="n">04</span>The layers in detail</a>
+      <a href="#substrate"><span class="n">05</span>The harness seam &amp; Omnigent</a>
+      <a href="#events"><span class="n">06</span>How an event flows end-to-end</a>
+      <a href="#agents"><span class="n">07</span>Agents, tiers &amp; model resolution</a>
+      <a href="#governance"><span class="n">08</span>Governance — propose · decide · execute</a>
+      <a href="#trust"><span class="n">09</span>The trust &amp; credential boundary</a>
+      <a href="#record"><span class="n">10</span>The record — trace &amp; observability</a>
+      <a href="#map"><span class="n">11</span>Repository map &amp; build phases</a>
+    </nav>
+  </div>
+</section>
+
+<!-- ============================ 1. THE IDEA ============================ -->
+<section id="idea">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">01</span><h2>The big idea — specification as the unit of work</h2></div>
+
+    <p>AI code generation is fast but unreliable without structure. Teams climb a maturity ladder to fix that:</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 300" role="img" aria-label="AI engineering maturity ladder">
+          <defs>
+            <linearGradient id="step" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--card)"/><stop offset="1" stop-color="var(--muted)"/>
+            </linearGradient>
+          </defs>
+          <!-- steps -->
+          <g class="svg-label" font-size="14" fill="var(--foreground)">
+            <!-- step 1 -->
+            <rect x="20" y="210" width="270" height="68" rx="10" fill="url(#step)" stroke="var(--border)"/>
+            <text x="36" y="238" font-weight="600">1 · Vibe coding</text>
+            <text x="36" y="260" font-size="12" fill="var(--n500)">Free-flow prompting. Fast, standard-less.</text>
+            <!-- step 2 -->
+            <rect x="240" y="140" width="290" height="68" rx="10" fill="url(#step)" stroke="var(--border)"/>
+            <text x="256" y="168" font-weight="600">2 · Context engineering</text>
+            <text x="256" y="190" font-size="12" fill="var(--n500)">AGENTS.md, guides, reusable prompts.</text>
+            <!-- step 3 -->
+            <rect x="480" y="62" width="420" height="92" rx="10" fill="var(--foreground)" stroke="var(--foreground)"/>
+            <text x="500" y="92" font-weight="600" fill="var(--background)">3 · Specification-driven development</text>
+            <text x="500" y="114" font-size="12" fill="var(--n400)">requirements + design + tasks collapse into</text>
+            <text x="500" y="134" font-size="13" fill="var(--background)" class="svg-mono">one authoritative specification.md</text>
+          </g>
+          <!-- riser line -->
+          <path d="M40 210 L40 150 M150 140 L150 110 M260 140 L260 110 M500 62 L500 40" stroke="var(--n300)" stroke-width="1.5" fill="none" stroke-dasharray="3 4"/>
+          <!-- arrow up -->
+          <g stroke="var(--n400)" stroke-width="2" fill="none">
+            <path d="M150 240 C 360 240, 360 110, 500 110" marker-end="url(#ar)"/>
+          </g>
+          <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--n400)"/></marker></defs>
+          <text x="20" y="36" font-size="12" fill="var(--n500)" class="svg-mono">maturity ↑</text>
+        </svg>
+      </div>
+      <figcaption>The ladder Arke is built for. At the top rung the spec becomes the centre of gravity, and the engineer's role shifts from <b>writing code</b> to <b>owning what gets built</b> — closer to a Product Engineer than a coder.</figcaption>
+    </figure>
+
+    <p>The method works on paper, but it has had no home: engineers drive agents by hand, keep tickets and tests in step with the spec manually, and track delivery in tools built for human-authored cards. <strong>Arke is that home.</strong> It turns the specification-centric method into a working product, and it does so by enforcing one direction of truth.</p>
+
+    <h3>The direction of truth</h3>
+    <p>The specification is authoritative. Everything else — tasks, code, tickets, tests, tracking, docs — is a <strong>generated projection</strong> of it, kept in step with it. When the spec changes, the projections are regenerated. <em>Nothing downstream ever flows back into the spec.</em></p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 360" role="img" aria-label="Specification at the centre, projections fanning outward">
+          <defs>
+            <marker id="oneway" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--n500)"/></marker>
+          </defs>
+          <!-- centre: spec -->
+          <g>
+            <circle cx="460" cy="180" r="92" fill="var(--foreground)"/>
+            <text x="460" y="166" text-anchor="middle" fill="var(--background)" font-size="16" font-weight="600" class="svg-label">specification.md</text>
+            <text x="460" y="190" text-anchor="middle" fill="var(--n400)" font-size="12">the single</text>
+            <text x="460" y="207" text-anchor="middle" fill="var(--n400)" font-size="12">source of truth</text>
+            <text x="460" y="232" text-anchor="middle" fill="var(--success)" font-size="11" class="svg-mono">git · reviewed via PR</text>
+          </g>
+          <!-- projections -->
+          <g class="svg-label" font-size="13" fill="var(--foreground)" text-anchor="middle">
+            <g><rect x="60" y="40" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="135" y="64">Tasks</text><text x="135" y="82" font-size="11" fill="var(--n500)">work breakdown</text></g>
+            <g><rect x="60" y="150" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="135" y="174">Code &amp; PRs</text><text x="135" y="192" font-size="11" fill="var(--n500)">feature branch</text></g>
+            <g><rect x="60" y="260" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="135" y="284">Tests</text><text x="135" y="302" font-size="11" fill="var(--n500)">acceptance</text></g>
+            <g><rect x="710" y="40" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="785" y="64">Tickets</text><text x="785" y="82" font-size="11" fill="var(--n500)">Jira · ADO</text></g>
+            <g><rect x="710" y="150" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="785" y="174">Tracking</text><text x="785" y="192" font-size="11" fill="var(--n500)">delivery board</text></g>
+            <g><rect x="710" y="260" width="150" height="52" rx="9" fill="var(--card)" stroke="var(--border)"/><text x="785" y="284">Docs</text><text x="785" y="302" font-size="11" fill="var(--n500)">generated</text></g>
+          </g>
+          <!-- one-way arrows out -->
+          <g stroke="var(--n500)" stroke-width="1.6" fill="none">
+            <path d="M375 150 C 300 110, 250 80, 212 70" marker-end="url(#oneway)"/>
+            <path d="M368 180 C 300 180, 250 178, 212 177" marker-end="url(#oneway)"/>
+            <path d="M375 210 C 300 250, 250 280, 212 288" marker-end="url(#oneway)"/>
+            <path d="M545 150 C 620 110, 670 80, 708 70" marker-end="url(#oneway)"/>
+            <path d="M552 180 C 620 180, 670 178, 708 177" marker-end="url(#oneway)"/>
+            <path d="M545 210 C 620 250, 670 280, 708 288" marker-end="url(#oneway)"/>
+          </g>
+          <text x="460" y="330" text-anchor="middle" font-size="12" fill="var(--n500)" class="svg-mono">projections flow outward · never back in</text>
+        </svg>
+      </div>
+      <figcaption>One-way projection. The spec is regenerated by a human-driven loop; tickets, tests, tracking and docs are computed from it. This is enforced by architecture, not convention — projections are deterministic code, and the board is a <b>computed read model</b>, not a manual kanban.</figcaption>
+    </figure>
+
+    <div class="note spec">
+      <span class="lbl">The loop</span>
+      <code>author ──▶ review ──▶ approve ──▶ fan out ──▶ sync</code> &nbsp; — and a change to the spec re-runs the loop. The engineer owns the spec; Arke keeps everything downstream honest to it.
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 2. PRINCIPLES ============================ -->
+<section id="principles">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">02</span><h2>Three non-negotiable principles</h2></div>
+    <p>Every architectural decision below is downstream of three rules. They are what make Arke safe to point at a real, production — even <em>financial</em> — codebase.</p>
+
+    <div class="grid g3">
+      <div class="card">
+        <h4>① Spec is the source of truth</h4>
+        <p>Its canonical copy is a markdown file in <code>docs/specifications</code>, versioned and reviewed via pull request. Nothing downstream overrides it; projections are generated from it and never flow back.</p>
+      </div>
+      <div class="card">
+        <h4>② Harness owns execution &amp; credentials</h4>
+        <p>All repo, agent, CLI and MCP access happens inside the harness host. <strong>The browser is never in the credential path</strong> and never calls a system of record.</p>
+      </div>
+      <div class="card">
+        <h4>③ Propose · decide · execute</h4>
+        <p>No agent output reaches the repository, a system of record, or a teammate without a <strong>human decision in between</strong>. It is never an autonomous pipeline.</p>
+      </div>
+    </div>
+
+    <p>Three further rules fall out of these and shape the implementation:</p>
+    <ul>
+      <li><strong>Projections to systems of record are deterministic code</strong>, not free-form agent behaviour, and every projection write is logged with its trigger.</li>
+      <li><strong>Every governed action is recorded.</strong> Spec history is in git; permission decisions and projections are in the append-only trace (<code>.arke/trace.ndjson</code>).</li>
+      <li><strong>Agents reference logical model tiers</strong> (<code>capable</code>, <code>mid</code>, <code>fast</code>), resolved per project to an internal model gateway — never hardcoded vendor model IDs.</li>
+    </ul>
+
+    <div class="note principle">
+      <span class="lbl">What Arke is not</span>
+      Not a coding agent · not a system of record · not a Jira/GitHub replacement · not an autonomous pipeline. It <em>realises, visualises and coordinates</em> — it does not execute, and it holds no authoritative state in the browser.
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 3. THE STACK ============================ -->
+<section id="stack">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">03</span><h2>The stack — every layer at a glance</h2></div>
+    <p>This is the whole system on one page. Read it top-to-bottom: a <strong>human who decides</strong>, the <strong>surfaces they look at</strong>, a <strong>thin client</strong> that holds no truth, a single <strong>WebSocket</strong> on localhost, the <strong>coordinator</strong> that normalises everything, the neutral <strong>adapter seam</strong>, and the <strong>harness substrate</strong> that owns all execution and credentials. Systems of record sit to the side, reached only by deterministic projections.</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 940 720" role="img" aria-label="Arke architecture stack diagram">
+          <defs>
+            <linearGradient id="band" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--card)"/><stop offset="1" stop-color="var(--muted)"/></linearGradient>
+            <marker id="dn" markerWidth="11" markerHeight="11" refX="5" refY="9" orient="auto"><path d="M0 0 L10 0 L5 9 z" fill="var(--n500)"/></marker>
+            <marker id="up" markerWidth="11" markerHeight="11" refX="5" refY="1" orient="auto"><path d="M0 10 L10 10 L5 1 z" fill="var(--n500)"/></marker>
+          </defs>
+
+          <!-- column labels left -->
+          <g class="svg-mono" font-size="11" fill="var(--n400)" text-anchor="end">
+            <text x="86" y="44">DECIDES</text>
+            <text x="86" y="120">SEES</text>
+            <text x="86" y="250">REALISES</text>
+            <text x="86" y="400">NORMALISES</text>
+            <text x="86" y="560">EXECUTES</text>
+          </g>
+
+          <!-- 1. Human -->
+          <g>
+            <rect x="100" y="22" width="740" height="46" rx="9" fill="var(--foreground)"/>
+            <text x="470" y="50" text-anchor="middle" fill="var(--background)" font-size="14" font-weight="600" class="svg-label">Product Engineer — owns the spec, approves every decision</text>
+          </g>
+          <line x1="470" y1="68" x2="470" y2="86" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#dn)"/>
+          <line x1="470" y1="92" x2="470" y2="74" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#up)"/>
+
+          <!-- 2. Surfaces (client) -->
+          <g>
+            <rect x="100" y="92" width="740" height="96" rx="11" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="116" y="114" font-size="12" class="svg-mono" fill="var(--n500)">packages/client · React · thin realisation layer (no authoritative state)</text>
+            <g class="svg-label" font-size="12.5" fill="var(--foreground)" text-anchor="middle">
+              <g><rect x="118" y="126" width="132" height="48" rx="8" fill="var(--muted)" stroke="var(--border)"/><text x="184" y="148">Authoring</text><text x="184" y="164" font-size="10.5" fill="var(--n500)">cockpit</text></g>
+              <g><rect x="258" y="126" width="132" height="48" rx="8" fill="var(--muted)" stroke="var(--border)"/><text x="324" y="148">Review</text><text x="324" y="164" font-size="10.5" fill="var(--n500)">panel</text></g>
+              <g><rect x="398" y="126" width="132" height="48" rx="8" fill="var(--muted)" stroke="var(--border)"/><text x="464" y="148">Delivery</text><text x="464" y="164" font-size="10.5" fill="var(--n500)">board</text></g>
+              <g><rect x="538" y="126" width="132" height="48" rx="8" fill="var(--muted)" stroke="var(--border)"/><text x="604" y="148">Generation</text><text x="604" y="164" font-size="10.5" fill="var(--n500)">workspace</text></g>
+              <g><rect x="678" y="126" width="146" height="48" rx="8" fill="var(--muted)" stroke="var(--border)"/><text x="751" y="148">Session detail</text><text x="751" y="164" font-size="10.5" fill="var(--n500)">diff · rescue</text></g>
+            </g>
+          </g>
+
+          <!-- electron wrapper note -->
+          <text x="824" y="206" text-anchor="end" font-size="11" class="svg-mono" fill="var(--n400)">apps/desktop — Electron shell embeds the coordinator (one signed app)</text>
+
+          <!-- WS link -->
+          <g>
+            <line x1="470" y1="188" x2="470" y2="232" stroke="var(--n500)" stroke-width="2" marker-end="url(#dn)"/>
+            <line x1="490" y1="232" x2="490" y2="188" stroke="var(--n500)" stroke-width="2" marker-end="url(#up)"/>
+            <rect x="300" y="200" width="340" height="24" rx="12" fill="var(--background)" stroke="var(--border)"/>
+            <text x="470" y="216" text-anchor="middle" font-size="11.5" class="svg-mono" fill="var(--n600)">WebSocket · ws://127.0.0.1:4319 · ordered + sequenced</text>
+          </g>
+
+          <!-- ===== TRUST BOUNDARY ===== -->
+          <rect x="100" y="240" width="740" height="430" rx="16" fill="none" stroke="var(--n400)" stroke-width="1.5" stroke-dasharray="6 6"/>
+          <text x="116" y="262" font-size="11" class="svg-mono" fill="var(--warning)">TRUST &amp; CREDENTIAL BOUNDARY · harness host · credentials never cross upward</text>
+
+          <!-- 3. Coordinator -->
+          <g>
+            <rect x="120" y="276" width="700" height="92" rx="11" fill="url(#band)" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="136" y="298" font-size="12" class="svg-mono" fill="var(--n500)">packages/coordinator · thin local Node WebSocket coordinator</text>
+            <g class="svg-label" font-size="12" fill="var(--foreground)" text-anchor="middle">
+              <g><rect x="138" y="310" width="150" height="44" rx="8" fill="var(--card)" stroke="var(--border)"/><text x="213" y="330">Normalise</text><text x="213" y="346" font-size="10" fill="var(--n500)">+ validate (zod)</text></g>
+              <g><rect x="296" y="310" width="150" height="44" rx="8" fill="var(--card)" stroke="var(--border)"/><text x="371" y="330">Read model</text><text x="371" y="346" font-size="10" fill="var(--n500)">board = computed</text></g>
+              <g><rect x="454" y="310" width="150" height="44" rx="8" fill="var(--card)" stroke="var(--border)"/><text x="529" y="330">Trace</text><text x="529" y="346" font-size="10" fill="var(--n500)">append-only audit</text></g>
+              <g><rect x="612" y="310" width="190" height="44" rx="8" fill="var(--card)" stroke="var(--border)"/><text x="707" y="330">Push · sequence</text><text x="707" y="346" font-size="10" fill="var(--n500)">snapshot-on-connect</text></g>
+            </g>
+          </g>
+          <text x="824" y="388" text-anchor="end" font-size="11" class="svg-mono" fill="var(--n400)">packages/contracts — zod DomainEvent · HarnessAdapter · spec lifecycle (shared by all)</text>
+
+          <!-- adapter seam -->
+          <g>
+            <line x1="470" y1="368" x2="470" y2="406" stroke="var(--n500)" stroke-width="2" marker-end="url(#dn)"/>
+            <line x1="490" y1="406" x2="490" y2="368" stroke="var(--n500)" stroke-width="2" marker-end="url(#up)"/>
+            <rect x="262" y="398" width="416" height="26" rx="13" fill="var(--foreground)"/>
+            <text x="470" y="415" text-anchor="middle" font-size="11.5" fill="var(--background)" class="svg-mono">HarnessAdapter — the single neutral seam</text>
+          </g>
+
+          <!-- 4. Adapters -->
+          <g class="svg-label" font-size="12.5" fill="var(--foreground)" text-anchor="middle">
+            <g><rect x="138" y="436" width="320" height="56" rx="10" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/><text x="298" y="460" font-weight="600">@arke/adapter-opencode</text><text x="298" y="478" font-size="10.5" fill="var(--n500)">reference adapter · HTTP + SSE</text></g>
+            <g><rect x="482" y="436" width="320" height="56" rx="10" fill="var(--card)" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 4"/><text x="642" y="460" font-weight="600">@arke/adapter-omnigent</text><text x="642" y="478" font-size="10.5" fill="var(--n500)">substrate spike · v1 HTTP API</text></g>
+          </g>
+
+          <!-- 5. Substrate -->
+          <line x1="298" y1="492" x2="298" y2="520" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#dn)"/>
+          <line x1="642" y1="492" x2="642" y2="520" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#dn)"/>
+          <g>
+            <!-- leaf -->
+            <rect x="138" y="524" width="320" height="122" rx="11" fill="var(--muted)" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="298" y="548" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--foreground)">Leaf harness</text>
+            <text x="298" y="566" text-anchor="middle" font-size="10.5" fill="var(--n500)" class="svg-label">one coding agent</text>
+            <g text-anchor="middle" class="svg-mono" font-size="11" fill="var(--n700)">
+              <rect x="160" y="580" width="120" height="26" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="220" y="597">OpenCode</text>
+              <rect x="296" y="580" width="146" height="26" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="369" y="597">+ models / gateway</text>
+            </g>
+            <text x="298" y="630" text-anchor="middle" font-size="10.5" class="svg-label" fill="var(--n500)">owns repo working tree · agents · credentials</text>
+
+            <!-- meta -->
+            <rect x="482" y="524" width="320" height="122" rx="11" fill="var(--foreground)"/>
+            <text x="642" y="548" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--background)">Meta-harness · Omnigent</text>
+            <text x="642" y="566" text-anchor="middle" font-size="10.5" fill="var(--n400)" class="svg-label">control plane + runners</text>
+            <g text-anchor="middle" class="svg-mono" font-size="10" fill="var(--n300)">
+              <rect x="500" y="580" width="80" height="22" rx="6" fill="#222" stroke="#333"/><text x="540" y="595">Claude Code</text>
+              <rect x="584" y="580" width="58" height="22" rx="6" fill="#222" stroke="#333"/><text x="613" y="595">Codex</text>
+              <rect x="646" y="580" width="58" height="22" rx="6" fill="#222" stroke="#333"/><text x="675" y="595">Cursor</text>
+              <rect x="708" y="580" width="80" height="22" rx="6" fill="#222" stroke="#333"/><text x="748" y="595">…~15</text>
+            </g>
+            <text x="642" y="630" text-anchor="middle" font-size="10.5" class="svg-label" fill="var(--n400)">+ cloud sandboxes · multi-device · fork / rescue</text>
+          </g>
+
+          <!-- systems of record to the side -->
+          <g>
+            <rect x="100" y="676" width="740" height="34" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="120" y="697" font-size="11.5" class="svg-mono" fill="var(--n600)">Systems of record &nbsp;·&nbsp; git / PR &nbsp; Jira &nbsp; Azure DevOps &nbsp;—&nbsp; written only by deterministic projections, every write logged</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The full stack. The <b>dashed boundary</b> is the trust line: coordinator, adapter and harness live on the host where credentials are; the client above it never holds a secret. The <b>solid black bar</b> is the <code>HarnessAdapter</code> seam — the one place a backend is swapped. Below it, a project chooses <b>either</b> a leaf harness <b>or</b> Omnigent — never both.</figcaption>
+    </figure>
+
+    <div class="kpi">
+      <div class="k"><b>1</b><span>WebSocket leg · no cloud relay</span></div>
+      <div class="k"><b>0</b><span>cloud backends on the hot path</span></div>
+      <div class="k"><b>1</b><span>neutral adapter seam</span></div>
+      <div class="k"><b>~15</b><span>harnesses unlocked via Omnigent</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 4. LAYERS IN DETAIL ============================ -->
+<section id="layers">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">04</span><h2>The layers in detail</h2></div>
+
+    <h3>The client — a thin realisation layer</h3>
+    <p><code>packages/client</code> is a React app that <strong>holds no authoritative state</strong>. It renders five surfaces — the authoring cockpit, the multi-model review panel, the delivery board, the generation workspace, and session detail — entirely from state the coordinator pushes it. It cannot reach a harness, a repo, or a system of record directly. Its one job is to present the picture and capture human decisions. When it disconnects, it loses nothing: on reconnect it receives a fresh <em>snapshot</em> and re-converges.</p>
+    <p>The transport is a five-state reconnecting WebSocket machine (<code>connecting → open → reconnecting → closed → disposed</code>) that queues outbound requests — steering messages, permission decisions — while disconnected and drains them <em>in order, at most once</em> when the link returns. All reconnect logic is isolated in one <code>ArkeTransport</code> class so the board and session views never see a dropped socket.</p>
+
+    <h3>The desktop shell — packaging the trust boundary</h3>
+    <p><code>apps/desktop</code> is an Electron shell that <strong>embeds the coordinator</strong> in one signed application. Because the coordinator is a Node process living inside the credential boundary, wrapping it in Electron is the natural packaging: the user runs one app, and the whole trust boundary ships with it. The browser remains a first-class surface — the same client runs in a plain browser against a locally-running coordinator.</p>
+
+    <h3>The coordinator — the thin local brain</h3>
+    <p><code>packages/coordinator</code> runs on the harness host, inside the trust boundary, and does five things and no more:</p>
+    <div class="grid g2">
+      <div class="card"><h4>Ingest &amp; normalise</h4><p>Pulls provider events through a <code>HarnessAdapter</code> and normalises each into the canonical <code>DomainEvent</code> model, validated with zod at the boundary. A malformed event from any backend is <em>caught</em>, not silently trusted.</p></div>
+      <div class="card"><h4>Fold a read model</h4><p>Folds events into a <code>ReadModel</code> whose board columns are <em>computed</em> from real signals (spec status, session status, PR/CI state, <code>needsHuman</code>) — never set by hand.</p></div>
+      <div class="card"><h4>Persist the trace</h4><p>Writes every event to an append-only NDJSON <code>Trace</code> (<code>.arke/trace.ndjson</code>) <em>before</em> pushing it onward. The trace is the audit source of truth.</p></div>
+      <div class="card"><h4>Push, ordered &amp; sequenced</h4><p>Pushes events to clients over WebSocket with a monotonic, <em>per-connection</em> sequence number, replaying current state via a snapshot on every (re)subscribe. Slow clients are bounded, never block the pump.</p></div>
+    </div>
+    <p>Crucially, <strong>no cloud backend sits on the agent hot path</strong>. The coordinator absorbs every harness's quirks so the client learns no harness fact — and so the trust boundary stays a single, local, auditable process.</p>
+
+    <h3>The contracts — schema-first, backend-agnostic</h3>
+    <p><code>packages/contracts</code> is the spine. It is zod-first and shared by client, coordinator and every adapter:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>File</th><th>Defines</th></tr></thead>
+        <tbody>
+          <tr><td class="mono-cell">spec.ts</td><td>Specification lifecycle, frontmatter, model tiers, the spec anatomy.</td></tr>
+          <tr><td class="mono-cell">events.ts</td><td>The normalised <code>DomainEvent</code> union, the per-connection <code>EventEnvelope</code> (with <code>correlationId</code>), and the computed board columns.</td></tr>
+          <tr><td class="mono-cell">adapter.ts</td><td>The backend-agnostic <code>HarnessAdapter</code> interface and capability flags. <strong>This interface — not any one harness — is what the product is built against.</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The adapters — where harness facts are absorbed</h3>
+    <p>An adapter implements <code>HarnessAdapter</code> for one backend and keeps <em>everything</em> backend-specific behind the seam. <code>@arke/adapter-opencode</code> is the lean reference adapter against a live <code>opencode serve</code>: it connects with host-only credentials, probes capabilities at startup from <code>GET /doc</code> (advertising only what the live server exposes), owns a durable session-ownership graph that survives restarts, drives roles at a logical tier with a correlation id, and <strong>confirms permissions by event, not HTTP status</strong>. Unmappable events are dead-lettered with their reason — never silently dropped. <code>@arke/adapter-omnigent</code> is the substrate spike, covered next.</p>
+  </div>
+</section>
+
+<!-- ============================ 5. SUBSTRATE & OMNIGENT ============================ -->
+<section id="substrate">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">05</span><h2>The harness seam &amp; Omnigent — the feature multiplier</h2></div>
+    <p>The single most important architectural choice in Arke is the <strong>neutral adapter seam</strong>. Arke is built against the <code>HarnessAdapter</code> interface, not against any harness. That one decision is what lets a project run on a single coding agent today and inherit an entire ecosystem tomorrow — by swapping what sits below the seam.</p>
+
+    <h3>Two kinds of thing can sit below the seam</h3>
+    <p>There are <strong>leaf harnesses</strong> — a single coding agent, like OpenCode — and there is one <strong>meta-harness</strong>: <a href="https://github.com/omnigent-ai/omnigent">Omnigent</a>, "the open-source meta-harness for all your AI agents." A meta-harness is a backend that itself fronts <em>many</em> harnesses. Architecturally it sits at the <strong>same layer as Arke's own coordinator/runner</strong> — one level up from a leaf. Plugging it in through the seam is the same act as plugging in OpenCode, but what comes with it is vastly larger.</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 470" role="img" aria-label="Leaf harness versus Omnigent meta-harness through one adapter seam">
+          <defs>
+            <marker id="d2" markerWidth="10" markerHeight="10" refX="5" refY="9" orient="auto"><path d="M0 0 L10 0 L5 9 z" fill="var(--n500)"/></marker>
+          </defs>
+          <!-- seam -->
+          <rect x="300" y="24" width="320" height="40" rx="20" fill="var(--foreground)"/>
+          <text x="460" y="49" text-anchor="middle" fill="var(--background)" font-size="13.5" font-weight="600" class="svg-mono">HarnessAdapter — one seam</text>
+          <text x="460" y="82" text-anchor="middle" fill="var(--n500)" font-size="11.5" class="svg-label">a project picks exactly one substrate (mutually exclusive)</text>
+
+          <line x1="220" y1="100" x2="220" y2="132" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#d2)"/>
+          <line x1="700" y1="100" x2="700" y2="132" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#d2)"/>
+
+          <!-- LEFT: leaf -->
+          <g>
+            <rect x="40" y="136" width="360" height="300" rx="14" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="62" y="166" font-size="14" font-weight="600" class="svg-label" fill="var(--foreground)">Option A · Leaf harness</text>
+            <text x="62" y="186" font-size="11.5" class="svg-mono" fill="var(--n500)">@arke/adapter-opencode</text>
+
+            <rect x="120" y="206" width="200" height="56" rx="10" fill="var(--muted)" stroke="var(--border)"/>
+            <text x="220" y="230" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--foreground)">OpenCode</text>
+            <text x="220" y="248" text-anchor="middle" font-size="10.5" class="svg-label" fill="var(--n500)">headless server · HTTP + SSE</text>
+
+            <g class="svg-label" font-size="11.5" fill="var(--n600)">
+              <text x="62" y="300">• one coding agent, self-hostable</text>
+              <text x="62" y="324">• owns repo working tree + credentials</text>
+              <text x="62" y="348">• lean, proven reference path</text>
+              <text x="62" y="372">• capability surface is exactly OpenCode's</text>
+            </g>
+            <rect x="62" y="392" width="276" height="28" rx="8" fill="var(--success-bg)" stroke="color-mix(in srgb,var(--success) 30%,var(--border))"/>
+            <text x="200" y="411" text-anchor="middle" font-size="11" class="svg-mono" fill="var(--success)">stays the lean reference adapter</text>
+          </g>
+
+          <!-- RIGHT: meta -->
+          <g>
+            <rect x="520" y="136" width="360" height="300" rx="14" fill="var(--foreground)"/>
+            <text x="542" y="166" font-size="14" font-weight="600" class="svg-label" fill="var(--background)">Option B · Meta-harness</text>
+            <text x="542" y="186" font-size="11.5" class="svg-mono" fill="var(--n400)">@arke/adapter-omnigent · v1 HTTP</text>
+
+            <!-- control plane / runner -->
+            <rect x="542" y="200" width="316" height="30" rx="8" fill="#1d1d1d" stroke="#333"/>
+            <text x="700" y="220" text-anchor="middle" font-size="11.5" class="svg-mono" fill="var(--n300)">control plane (omnigent server)</text>
+            <rect x="542" y="236" width="316" height="30" rx="8" fill="#1d1d1d" stroke="#333"/>
+            <text x="700" y="256" text-anchor="middle" font-size="11.5" class="svg-mono" fill="var(--n300)">runner / host (omni host) — carries creds</text>
+
+            <!-- harness chips -->
+            <g class="svg-mono" font-size="10" fill="var(--n300)" text-anchor="middle">
+              <rect x="542" y="278" width="92" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="588" y="294">Claude Code</text>
+              <rect x="640" y="278" width="64" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="672" y="294">Codex</text>
+              <rect x="710" y="278" width="66" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="743" y="294">Cursor</text>
+              <rect x="782" y="278" width="76" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="820" y="294">Goose</text>
+              <rect x="542" y="306" width="64" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="574" y="322">Qwen</text>
+              <rect x="612" y="306" width="64" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="644" y="322">Kimi</text>
+              <rect x="682" y="306" width="80" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="722" y="322">Copilot</text>
+              <rect x="768" y="306" width="90" height="24" rx="6" fill="#262626" stroke="#3a3a3a"/><text x="813" y="322">…~15 total</text>
+            </g>
+
+            <g class="svg-label" font-size="11.5" fill="var(--n300)">
+              <text x="542" y="356">+ cloud sandboxing — Modal · E2B · Daytona · K8s</text>
+              <text x="542" y="378">+ multi-device session sync · team collaboration</text>
+              <text x="542" y="400">+ session fork / rescue · dynamic sub-agents</text>
+            </g>
+            <rect x="542" y="410" width="316" height="2" fill="#333"/>
+          </g>
+        </svg>
+      </div>
+      <figcaption>Same seam, two very different worlds below it. Picking Omnigent is "a different kind of choice": you then pick which leaf harness Omnigent <b>drives</b>. Note Omnigent's <b>control-plane / runner split</b> — the server is the brain, a bound runner carries the harness and its model credential. This <b>mirrors Arke's own coordinator/runner model</b>, which is why the substrate thesis holds.</figcaption>
+    </figure>
+
+    <h3>What Omnigent unlocks for Arke</h3>
+    <p>Because Arke targets the neutral seam, adopting Omnigent as the substrate lets Arke <strong>inherit a large platform layer "for free"</strong> and spend its own effort on the specification lifecycle — the differentiator. The spike (ADR-0002) drove a real OpenCode turn end-to-end through <code>@arke/adapter-omnigent</code> against a live Omnigent 0.3.0 and exited <span class="badge green">GREEN</span>.</p>
+
+    <div class="grid g3">
+      <div class="card"><h4>Harness breadth</h4><p>~15 coding agents (Claude Code, Codex, Cursor, Goose, Qwen, Copilot, OpenCode…) behind one backend, instead of writing an adapter per agent.</p></div>
+      <div class="card"><h4>Cloud sandboxing</h4><p>Modal, E2B, Daytona and Kubernetes execution environments — declarative sandboxes Arke's own image model doesn't yet express.</p></div>
+      <div class="card"><h4>Session fork &amp; rescue</h4><p><code>POST /v1/sessions/{id}/fork</code> — a branch/rescue capability the leaf path lacks, useful when a run goes wrong.</p></div>
+      <div class="card"><h4>Multi-device &amp; collaboration</h4><p>Session sync across devices and team collaboration ACLs, surfaced through the same coordinator.</p></div>
+      <div class="card"><h4>Dynamic sub-agents</h4><p>Runtime self-authored sub-agents as isolated, inbox-linked sessions in their own git worktrees — more capable than static rosters.</p></div>
+      <div class="card"><h4>Runner model alignment</h4><p>Omnigent's server/runner split is the <em>same</em> control-plane/runner architecture Arke adopted (SPEC-018), so the mapping is structural, not forced.</p></div>
+    </div>
+
+    <h3>How Arke maps onto Omnigent (substrate mode)</h3>
+    <p>The adapter compiles Arke's concepts down to Omnigent's v1 HTTP API at the edge. Arke keeps its abstraction; Omnigent specs become a <em>compiled artifact</em>.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Arke concept</th><th>Omnigent v1 (live-verified)</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Project (per-project context)</td><td class="mono-cell">workspace on a host</td><td>same control-plane/runner split</td></tr>
+          <tr><td><code>createSession</code></td><td class="mono-cell">POST /v1/sessions <span class="badge">agent_id required</span></td><td>parent/child ≈ spec/task graph</td></tr>
+          <tr><td><code>sendMessage</code> / <code>dispatchAsync</code></td><td class="mono-cell">POST /v1/sessions/{id}/events</td><td>flat message payload</td></tr>
+          <tr><td><code>streamEvents</code></td><td class="mono-cell">GET /v1/sessions/{id}/stream (SSE)</td><td>per-session stream, fanned into one channel</td></tr>
+          <tr><td>Roster image (tier)</td><td class="mono-cell">generated agent spec</td><td>fills <code>executor.harness</code> + registry-resolved <code>executor.model</code></td></tr>
+          <tr><td>Approval — <strong>high</strong> (money/ledger)</td><td><strong>stays in Arke</strong></td><td>never delegated to Omnigent; <code>Proposal</code> + dispatcher</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note principle">
+      <span class="lbl">Two rules that keep the seam honest</span>
+      <strong>Substrate exclusivity</strong> — a project picks <em>either</em> leaf harnesses <em>or</em> Omnigent, never both; the two are mutually exclusive in one project's registry (exclusivity is per-project, not org-wide).
+      <strong>Agent authority stays Arke</strong> — selecting Omnigent does <em>not</em> hand Arke's agent model over. Arke's roster (harness-agnostic images + logical tiers) stays the authored source on every substrate; the adapter <em>projects</em> it down. The Arke experience is identical regardless of what runs underneath, and high-risk gating is never delegated.
+    </div>
+
+    <div class="note warn">
+      <span class="lbl">Honest about maturity</span>
+      Omnigent is an <strong>alpha</strong> (v0.3.0), Python-primary project; its API may churn. Arke's hedge is exactly the neutral seam — it can always fall back to OpenCode-direct. The adapter stays on its spike branch until a hardening spec lands (correlation, event-confirmed approvals, reconnect, version pinning). Omnigent <em>widens the menu; it does not replace the reference path.</em>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 6. EVENT FLOW ============================ -->
+<section id="events">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">06</span><h2>How an event flows end-to-end</h2></div>
+    <p>Everything the user sees is the result of a normalised event making one disciplined trip from the harness to the screen. Follow a single agent turn:</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 470" role="img" aria-label="Event flow from harness through coordinator to client">
+          <defs>
+            <marker id="fr" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--foreground)"/></marker>
+          </defs>
+          <!-- lanes -->
+          <g font-size="12" class="svg-mono" fill="var(--n500)">
+            <text x="20" y="40">harness</text>
+            <text x="20" y="150">adapter</text>
+            <text x="20" y="270">coordinator</text>
+            <text x="20" y="420">client</text>
+          </g>
+          <line x1="120" y1="60" x2="900" y2="60" stroke="var(--border)"/>
+          <line x1="120" y1="180" x2="900" y2="180" stroke="var(--border)"/>
+          <line x1="120" y1="300" x2="900" y2="300" stroke="var(--border)"/>
+          <line x1="120" y1="440" x2="900" y2="440" stroke="var(--border)"/>
+
+          <!-- harness emits -->
+          <rect x="150" y="20" width="220" height="30" rx="8" fill="var(--card)" stroke="var(--border)"/>
+          <text x="260" y="40" text-anchor="middle" font-size="11.5" class="svg-mono" fill="var(--n700)">native event (e.g. message.part.updated)</text>
+          <line x1="260" y1="50" x2="260" y2="118" stroke="var(--foreground)" stroke-width="1.6" marker-end="url(#fr)"/>
+
+          <!-- adapter normalise -->
+          <rect x="150" y="120" width="320" height="50" rx="9" fill="var(--foreground)"/>
+          <text x="310" y="140" text-anchor="middle" font-size="12" font-weight="600" fill="var(--background)" class="svg-label">normalise + attach identity</text>
+          <text x="310" y="158" text-anchor="middle" font-size="10.5" fill="var(--n400)" class="svg-mono">→ DomainEvent · correlationId · sessionId</text>
+          <line x1="310" y1="170" x2="310" y2="238" stroke="var(--foreground)" stroke-width="1.6" marker-end="url(#fr)"/>
+          <text x="500" y="150" font-size="10.5" class="svg-label" fill="var(--n500)">unmappable → dead-letter (raw + reason)</text>
+
+          <!-- coordinator pump -->
+          <rect x="150" y="240" width="700" height="50" rx="9" fill="var(--muted)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="170" y="260" font-size="11.5" font-weight="600" class="svg-label" fill="var(--foreground)">Coordinator.pump( )</text>
+          <g class="svg-mono" font-size="10.5" fill="var(--n700)" text-anchor="middle">
+            <rect x="300" y="250" width="120" height="30" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="360" y="269">zod validate</text>
+            <rect x="430" y="250" width="140" height="30" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="500" y="269">fold read model</text>
+            <rect x="580" y="250" width="110" height="30" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="635" y="269">write trace</text>
+            <rect x="700" y="250" width="138" height="30" rx="7" fill="var(--card)" stroke="var(--border)"/><text x="769" y="269">stamp seq + push</text>
+          </g>
+          <!-- order arrow -->
+          <line x1="420" y1="265" x2="428" y2="265" stroke="var(--n500)" stroke-width="1.4"/>
+          <line x1="570" y1="265" x2="578" y2="265" stroke="var(--n500)" stroke-width="1.4"/>
+          <line x1="690" y1="265" x2="698" y2="265" stroke="var(--n500)" stroke-width="1.4"/>
+          <text x="635" y="222" text-anchor="middle" font-size="10.5" class="svg-mono" fill="var(--destructive)">trace is written BEFORE any client push</text>
+
+          <line x1="769" y1="290" x2="769" y2="388" stroke="var(--foreground)" stroke-width="1.6" marker-end="url(#fr)"/>
+
+          <!-- client -->
+          <rect x="150" y="390" width="700" height="42" rx="9" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="170" y="416" font-size="11.5" font-weight="600" class="svg-label" fill="var(--foreground)">ArkeTransport →</text>
+          <g class="svg-label" font-size="11" fill="var(--n700)" text-anchor="middle">
+            <rect x="320" y="398" width="150" height="26" rx="7" fill="var(--muted)" stroke="var(--border)"/><text x="395" y="415">board re-renders</text>
+            <rect x="480" y="398" width="150" height="26" rx="7" fill="var(--muted)" stroke="var(--border)"/><text x="555" y="415">transcript streams</text>
+            <rect x="640" y="398" width="180" height="26" rx="7" fill="var(--muted)" stroke="var(--border)"/><text x="730" y="415">card moves — work moved</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>One trip, in order. The adapter is the only component that knows a harness fact. The coordinator validates, folds, <b>traces, then pushes</b> — the trace is written before any client sees the event, which is what makes it the audit source of truth. The board column is recomputed from real signals; a card never moves by hand.</figcaption>
+    </figure>
+
+    <h3>The domain event model</h3>
+    <p>The canonical <code>DomainEvent</code> is a discriminated union in <code>@arke/contracts/events.ts</code>. Among its variants are the streaming-transcript and lifecycle events that make the cockpit and board live:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Event</th><th>Carries</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td class="mono-cell">message.part</td><td>sessionId, messageId, partIndex, delta, role, done</td><td>A streaming delta from an in-progress turn (assembled in <code>partIndex</code> order, not arrival order).</td></tr>
+          <tr><td class="mono-cell">message.updated</td><td>sessionId, messageId, role, text, toolCalls, isStreaming</td><td>Full turn-state snapshot once a message completes.</td></tr>
+          <tr><td class="mono-cell">turn.quiescent</td><td>sessionId, turnId</td><td>A typed idle receipt — consumers detect completion from this, never from a timeout or a poll.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Each is wrapped in an <code>EventEnvelope</code> that carries a per-connection <code>seq</code>, <code>ts</code>, <code>harness</code> and an optional <code>correlationId</code> (the harness <code>messageID</code>) so every event can be attributed to the request that triggered it. Resilience guarantees fall out of this model:</p>
+    <ul>
+      <li><strong>Snapshot-on-connect.</strong> Every new connection — including a reconnect — gets the current <code>CardState[]</code> as the very first frame, so a client converges without replaying the event log.</li>
+      <li><strong>Per-connection sequence.</strong> <code>seq</code> is scoped to the connection, not a shared counter, so two clients never race over increments.</li>
+      <li><strong>Crash-safe pump.</strong> A <code>parse()</code> failure is caught, dead-lettered to the trace, and the pump continues. A slow client's oldest events are dropped (and traced) rather than blocking everyone.</li>
+      <li><strong>Durable ownership.</strong> A session-ownership store (<code>.arke/sessions.ndjson</code>) maps <code>sessionId → {kind, parentSessionId, specId}</code> and is restored on startup, so a coordinator restart never loses which session belongs to which spec.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================ 7. AGENTS / TIERS ============================ -->
+<section id="agents">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">07</span><h2>Agents, tiers &amp; model resolution</h2></div>
+    <p>Arke ships a small, versioned <strong>roster</strong> of agents — and it never hardcodes a vendor model. An agent references a <strong>logical tier</strong> (<code>capable</code>, <code>mid</code>, <code>fast</code>); the project registry resolves that tier to a concrete model on a concrete harness instance, behind an internal gateway. Vendor IDs live in exactly one place and never reach the client.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Role</th><th>Purpose</th><th>Tier</th><th>Writes</th></tr></thead>
+        <tbody>
+          <tr><td class="mono-cell">spec-author</td><td>Co-authors the spec with the human — Why, requirements, scenarios.</td><td><span class="badge">capable</span></td><td><code>docs/specifications/</code></td></tr>
+          <tr><td class="mono-cell">architect</td><td>Fills the design depth — architecture, data model, interfaces.</td><td><span class="badge">capable</span></td><td>design sections</td></tr>
+          <tr><td class="mono-cell">reviewer-a</td><td>Independent critique, grounded in source.</td><td><span class="badge">capable</span> · model A</td><td>nothing (proposes)</td></tr>
+          <tr><td class="mono-cell">reviewer-b</td><td>Independent critique on a <strong>different</strong> model.</td><td><span class="badge">capable</span> · model B</td><td>nothing (proposes)</td></tr>
+          <tr><td class="mono-cell">implementer</td><td>Executes the tasks; writes code on the feature branch.</td><td><span class="badge">mid</span></td><td>workspace (code)</td></tr>
+          <tr><td class="mono-cell">researcher</td><td>Gathers and summarises codebase context to ground authoring.</td><td><span class="badge">mid</span></td><td>nothing (read-only)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The roster keeps itself honest: reviewers are read-only and must resolve to <em>two different models</em> for genuinely independent critique; the implementer is deliberately <code>mid</code>-tier (a capable model authored the spec precisely so a cheaper model can implement it accurately); projection is <em>not</em> an agent; and no harness gets its own orchestrator agent — <strong>the app is the conductor</strong>.</p>
+
+    <h3>Tier → model → instance</h3>
+    <p>An <em>instance</em> binds a driver to credentials, a host and a working directory, and declares which tiers it can serve. A role asks for a tier; the router picks an instance that serves it and returns a concrete selection. The role never names a harness — so "use a capable model" and "use Claude Code" become the same act.</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 280" role="img" aria-label="Tier to model to instance resolution">
+          <defs><marker id="rr" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--n500)"/></marker></defs>
+          <!-- agent -->
+          <rect x="30" y="100" width="180" height="80" rx="11" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="120" y="132" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--foreground)">agent role</text>
+          <text x="120" y="154" text-anchor="middle" font-size="12" class="svg-mono" fill="var(--n600)">tier: capable</text>
+          <text x="120" y="172" text-anchor="middle" font-size="10.5" class="svg-label" fill="var(--n500)">never names a model</text>
+
+          <line x1="210" y1="140" x2="280" y2="140" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#rr)"/>
+
+          <!-- registry -->
+          <rect x="288" y="70" width="300" height="140" rx="12" fill="var(--foreground)"/>
+          <text x="438" y="98" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--background)">project registry</text>
+          <text x="438" y="116" text-anchor="middle" font-size="10.5" class="svg-mono" fill="var(--n400)">.arke/config.json · the one place vendor IDs live</text>
+          <g class="svg-mono" font-size="10.5" fill="var(--n300)" text-anchor="middle">
+            <rect x="306" y="128" width="264" height="26" rx="6" fill="#1d1d1d" stroke="#333"/><text x="438" y="145">resolve(role) → pick instance serving tier</text>
+            <rect x="306" y="160" width="264" height="26" rx="6" fill="#1d1d1d" stroke="#333"/><text x="438" y="177">prefer one already on the right host/cwd</text>
+          </g>
+
+          <line x1="588" y1="140" x2="658" y2="140" stroke="var(--n500)" stroke-width="1.6" marker-end="url(#rr)"/>
+
+          <!-- instance -->
+          <rect x="666" y="70" width="224" height="140" rx="12" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="778" y="96" text-anchor="middle" font-size="13" font-weight="600" class="svg-label" fill="var(--foreground)">ModelSelection</text>
+          <g class="svg-mono" font-size="11" fill="var(--n700)" text-anchor="middle">
+            <text x="778" y="124">instanceId</text>
+            <text x="778" y="146">tier: capable</text>
+            <text x="778" y="168">model: «resolved»</text>
+          </g>
+          <rect x="690" y="180" width="176" height="22" rx="6" fill="var(--success-bg)" stroke="color-mix(in srgb,var(--success) 30%,var(--border))"/>
+          <text x="778" y="195" text-anchor="middle" font-size="10" class="svg-mono" fill="var(--success)">credentials stay on host</text>
+
+          <text x="438" y="244" text-anchor="middle" font-size="11.5" class="svg-label" fill="var(--n500)">Same mechanism as multi-harness routing — change the model without touching any agent file, spec, or the client.</text>
+        </svg>
+      </div>
+      <figcaption>Resolution happens <b>once</b>, in the coordinator's registry. Agents stay portable; the client and the committed spec never see a vendor model ID. When finer control is needed, the answer is to <em>add a tier</em> — not pin a model onto an agent.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================ 8. GOVERNANCE ============================ -->
+<section id="governance">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">08</span><h2>Governance — propose · decide · execute</h2></div>
+    <p>No agent output reaches the repository, a system of record, or a teammate without a human decision in between. Arke encodes this as a loop with a hard gate, and it couples the gate to the <strong>risk of the action</strong>.</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 300" role="img" aria-label="Propose decide execute loop with risk tiers">
+          <defs><marker id="gg" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--foreground)"/></marker></defs>
+          <!-- propose -->
+          <rect x="40" y="40" width="200" height="70" rx="11" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="140" y="70" text-anchor="middle" font-size="14" font-weight="600" class="svg-label" fill="var(--foreground)">Propose</text>
+          <text x="140" y="91" text-anchor="middle" font-size="11" class="svg-label" fill="var(--n500)">agent produces output</text>
+          <line x1="240" y1="75" x2="330" y2="75" stroke="var(--foreground)" stroke-width="1.8" marker-end="url(#gg)"/>
+
+          <!-- decide gate -->
+          <rect x="338" y="30" width="244" height="90" rx="11" fill="var(--foreground)"/>
+          <text x="460" y="60" text-anchor="middle" font-size="14" font-weight="600" class="svg-label" fill="var(--background)">Decide — human gate</text>
+          <text x="460" y="82" text-anchor="middle" font-size="11" class="svg-label" fill="var(--n400)">permission / elicitation card</text>
+          <text x="460" y="102" text-anchor="middle" font-size="10.5" class="svg-mono" fill="var(--n400)">once · always · reject (+ message)</text>
+          <line x1="582" y1="75" x2="672" y2="75" stroke="var(--foreground)" stroke-width="1.8" marker-end="url(#gg)"/>
+
+          <!-- execute -->
+          <rect x="680" y="40" width="200" height="70" rx="11" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="780" y="70" text-anchor="middle" font-size="14" font-weight="600" class="svg-label" fill="var(--foreground)">Execute</text>
+          <text x="780" y="91" text-anchor="middle" font-size="11" class="svg-label" fill="var(--n500)">harness acts · write logged</text>
+
+          <!-- loop back -->
+          <path d="M780 110 C 780 170, 140 170, 140 112" fill="none" stroke="var(--n400)" stroke-width="1.5" stroke-dasharray="4 5" marker-end="url(#gg)"/>
+          <text x="460" y="165" text-anchor="middle" font-size="10.5" class="svg-mono" fill="var(--n500)">every governed action recorded in the trace</text>
+
+          <!-- risk tiers -->
+          <g class="svg-label" font-size="11.5" text-anchor="middle">
+            <rect x="40" y="200" width="270" height="74" rx="10" fill="var(--success-bg)" stroke="color-mix(in srgb,var(--success) 30%,var(--border))"/>
+            <text x="175" y="224" font-weight="600" fill="var(--foreground)">low risk</text>
+            <text x="175" y="244" font-size="11" fill="var(--n600)">runs in-band — no interruption</text>
+            <text x="175" y="262" font-size="10" class="svg-mono" fill="var(--n500)">e.g. read, format, local edit</text>
+
+            <rect x="325" y="200" width="270" height="74" rx="10" fill="var(--warning-bg)" stroke="color-mix(in srgb,var(--warning) 30%,var(--border))"/>
+            <text x="460" y="224" font-weight="600" fill="var(--foreground)">medium risk</text>
+            <text x="460" y="244" font-size="11" fill="var(--n600)">confirm — human approves the action</text>
+            <text x="460" y="262" font-size="10" class="svg-mono" fill="var(--n500)">e.g. write to a system of record</text>
+
+            <rect x="610" y="200" width="270" height="74" rx="10" fill="var(--danger-bg)" stroke="color-mix(in srgb,var(--destructive) 30%,var(--border))"/>
+            <text x="745" y="224" font-weight="600" fill="var(--foreground)">high risk</text>
+            <text x="745" y="244" font-size="11" fill="var(--n600)">never in-band — durable Proposal</text>
+            <text x="745" y="262" font-size="10" class="svg-mono" fill="var(--n500)">e.g. money movement → dispatcher only</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The gate is coupled to action risk. <b>High-risk actions can never auto-execute</b> — they are marshalled into a durable <code>Proposal</code> executed only by the dispatcher, and on the Omnigent substrate this gating <b>stays in Arke</b>, never delegated. This financial-grade semantic is a deliberate differentiator.</figcaption>
+    </figure>
+
+    <h3>Projections are deterministic, not agentic</h3>
+    <p>Writing spec state into systems of record (Jira, Azure DevOps, git/PR) is <strong>deterministic plugin code reacting to events</strong> — never free-form agent behaviour. Every projection write is logged with its trigger. This is why "the board moved" can always be trusted: the integration registry decides, deterministically, what each event projects, and the trace records why.</p>
+  </div>
+</section>
+
+<!-- ============================ 9. TRUST BOUNDARY ============================ -->
+<section id="trust">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">09</span><h2>The trust &amp; credential boundary</h2></div>
+    <p>The browser is never in the credential path and never calls a system of record. Everything sensitive lives below a single boundary on the harness host.</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 330" role="img" aria-label="Trust and credential boundary">
+          <!-- outside -->
+          <rect x="30" y="30" width="860" height="90" rx="12" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="50" y="56" font-size="12" class="svg-mono" fill="var(--n500)">OUTSIDE THE BOUNDARY — holds no secret, no authoritative state</text>
+          <g class="svg-label" font-size="12.5" text-anchor="middle" fill="var(--foreground)">
+            <rect x="60" y="68" width="200" height="38" rx="9" fill="var(--muted)" stroke="var(--border)"/><text x="160" y="92">React client (browser)</text>
+            <rect x="280" y="68" width="220" height="38" rx="9" fill="var(--muted)" stroke="var(--border)"/><text x="390" y="92">Electron renderer</text>
+          </g>
+          <text x="740" y="92" text-anchor="middle" font-size="11.5" class="svg-mono" fill="var(--n500)">sees only normalised, sequenced events</text>
+
+          <!-- ws -->
+          <rect x="360" y="132" width="200" height="24" rx="12" fill="var(--background)" stroke="var(--border)"/>
+          <text x="460" y="148" text-anchor="middle" font-size="11" class="svg-mono" fill="var(--n600)">ws://127.0.0.1 · no cloud relay</text>
+          <line x1="460" y1="120" x2="460" y2="132" stroke="var(--n500)" stroke-width="1.4"/>
+          <line x1="460" y1="156" x2="460" y2="170" stroke="var(--n500)" stroke-width="1.4"/>
+
+          <!-- inside -->
+          <rect x="30" y="172" width="860" height="138" rx="14" fill="none" stroke="var(--warning)" stroke-width="1.6" stroke-dasharray="6 6"/>
+          <text x="50" y="196" font-size="12" class="svg-mono" fill="var(--warning)">INSIDE — harness host · credentials resolved here, never sent upward</text>
+          <g class="svg-label" font-size="12.5" text-anchor="middle" fill="var(--foreground)">
+            <rect x="60" y="212" width="180" height="74" rx="10" fill="var(--muted)" stroke="var(--border)"/><text x="150" y="244">Coordinator</text><text x="150" y="264" font-size="10.5" fill="var(--n500)">+ trace · read model</text>
+            <rect x="260" y="212" width="180" height="74" rx="10" fill="var(--muted)" stroke="var(--border)"/><text x="350" y="244">Adapter</text><text x="350" y="264" font-size="10.5" fill="var(--n500)">credentialsRef → host</text>
+            <rect x="460" y="212" width="180" height="74" rx="10" fill="var(--foreground)"/><text x="550" y="244" fill="var(--background)">Harness</text><text x="550" y="264" font-size="10.5" fill="var(--n400)">agents · repo · CLI · MCP</text>
+            <rect x="660" y="212" width="200" height="74" rx="10" fill="var(--card)" stroke="var(--border)"/><text x="760" y="244">Systems of record</text><text x="760" y="264" font-size="10.5" fill="var(--n500)">git · Jira · ADO</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The boundary is a real architectural line, not a guideline. Credentials are referenced by the registry (<code>credentialsRef</code>) and resolved on the host; the harness alone touches the repository, the CLI, MCP servers and systems of record. The client connects to the coordinator over a local WebSocket and there is <b>no cloud backend on the hot path</b>. The client never holds a credential regardless of binding — and the intended deployment posture is to bind that socket to loopback; verify the bind address before exposing a host with reachable network interfaces.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============================ 10. RECORD ============================ -->
+<section id="record">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">10</span><h2>The record — trace &amp; observability</h2></div>
+    <p>Every governed action is recorded, in two complementary places:</p>
+    <div class="grid g2">
+      <div class="card"><h4>Spec history → git</h4><p>The specification's canonical copy is a markdown file under <code>docs/specifications</code>, versioned and reviewed via pull request. Its full history — every revision, every approval — is git history.</p></div>
+      <div class="card"><h4>Runtime → the append-only trace</h4><p>Permission decisions, projections, and every normalised event are written to <code>.arke/trace.ndjson</code> <em>before they are pushed to any client</em> — the trace-before-push guarantee that makes it the audit source of truth, exportable over OTLP. (In <code>emit()</code> the in-memory read model is folded first, then the trace is written, then the event is published; no client observes an event the trace is missing.)</p></div>
+    </div>
+    <p>The trace is deliberately a plain append-only NDJSON file co-located with the session-ownership store — no database dependency in the local path. It records far more than events: snapshot frames (<code>{kind:"snapshot", cardCount}</code>), inbound client requests, dead-letters (with raw type and reason), and slow-client drops. Whatever reaches the read model is in the trace; nothing that reached the board is invisible.</p>
+
+    <div class="note spec">
+      <span class="lbl">Configuration — per-project vs process-wide</span>
+      <strong>Per-project</strong> config lives in the project's tracked <code>.arke/config.json</code> — the harness/model registry (instances + roster bindings) and integrations config — and is loaded at <em>project-open</em>, not coordinator startup. <strong>Process-wide</strong> coordinator settings — the WebSocket port, the active-context/concurrency cap, idle TTL, query limits and the OTLP endpoint — come from a global/launch source rather than any one project, so a multi-project coordinator has a single authority for them (SPEC-018 moves these out of the per-project file; the global project registry lives under <code>ARKE_HOME</code>). <code>ARKE_*</code> env vars override individual keys. Everything else under <code>.arke/</code> — <code>trace.ndjson</code>, <code>sessions.ndjson</code>, <code>scaffold-manifest.json</code>, <code>projection-fallback.ndjson</code> — is runtime <em>state</em>, git-ignored.
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 11. REPO MAP ============================ -->
+<section id="map">
+  <div class="wrap">
+    <div class="sectitle"><span class="secnum">11</span><h2>Repository map &amp; build phases</h2></div>
+    <p>The architecture maps cleanly onto the monorepo (TypeScript, <code>type: module</code>, npm workspaces):</p>
+
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 920 360" role="img" aria-label="Repository package map">
+          <g class="svg-mono" font-size="12">
+            <!-- packages -->
+            <rect x="30" y="24" width="500" height="312" rx="12" fill="none" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="48" y="48" fill="var(--n500)" font-size="11">packages/</text>
+
+            <rect x="50" y="60" width="460" height="44" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="66" y="80" fill="var(--foreground)" font-weight="600">contracts</text>
+            <text x="66" y="97" fill="var(--n500)" font-size="10.5">zod: spec · DomainEvent · HarnessAdapter</text>
+
+            <rect x="50" y="112" width="460" height="44" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="66" y="132" fill="var(--foreground)" font-weight="600">coordinator</text>
+            <text x="66" y="149" fill="var(--n500)" font-size="10.5">normalise · read model · trace · WS push</text>
+
+            <rect x="50" y="164" width="225" height="44" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="66" y="184" fill="var(--foreground)" font-weight="600">adapter-opencode</text>
+            <text x="66" y="201" fill="var(--n500)" font-size="10">reference · HTTP+SSE</text>
+
+            <rect x="285" y="164" width="225" height="44" rx="9" fill="var(--card)" stroke="var(--border)" stroke-dasharray="4 4"/>
+            <text x="301" y="184" fill="var(--foreground)" font-weight="600">adapter-omnigent</text>
+            <text x="301" y="201" fill="var(--n500)" font-size="10">substrate spike</text>
+
+            <rect x="50" y="216" width="460" height="44" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="66" y="236" fill="var(--foreground)" font-weight="600">client</text>
+            <text x="66" y="253" fill="var(--n500)" font-size="10.5">React cockpit · board · review · generation</text>
+
+            <text x="48" y="288" fill="var(--n500)" font-size="11">apps/</text>
+            <rect x="50" y="296" width="460" height="32" rx="9" fill="var(--muted)" stroke="var(--border)"/>
+            <text x="66" y="316" fill="var(--foreground)" font-weight="600">desktop <tspan fill="var(--n500)" font-weight="400" font-size="10.5">— Electron shell, embeds the coordinator</tspan></text>
+
+            <!-- right: docs & method -->
+            <rect x="550" y="24" width="340" height="312" rx="12" fill="none" stroke="var(--border)" stroke-width="1.5"/>
+            <text x="568" y="48" fill="var(--n500)" font-size="11">method &amp; docs</text>
+
+            <rect x="570" y="60" width="300" height="40" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="586" y="78" fill="var(--foreground)" font-weight="600">.opencode/agents/</text>
+            <text x="586" y="94" fill="var(--n500)" font-size="10">versioned roster · tier-referenced</text>
+
+            <rect x="570" y="108" width="300" height="40" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="586" y="126" fill="var(--foreground)" font-weight="600">docs/specifications/</text>
+            <text x="586" y="142" fill="var(--n500)" font-size="10">the unit of work · 001–018</text>
+
+            <rect x="570" y="156" width="300" height="40" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="586" y="174" fill="var(--foreground)" font-weight="600">docs/decisions/</text>
+            <text x="586" y="190" fill="var(--n500)" font-size="10">ADRs 0001–0004</text>
+
+            <rect x="570" y="204" width="300" height="40" rx="9" fill="var(--card)" stroke="var(--border)"/>
+            <text x="586" y="222" fill="var(--foreground)" font-weight="600">.claude/skills/arke-design</text>
+            <text x="586" y="238" fill="var(--n500)" font-size="10">canonical design template</text>
+
+            <rect x="570" y="252" width="300" height="40" rx="9" fill="var(--foreground)"/>
+            <text x="586" y="270" fill="var(--background)" font-weight="600">.arke/config.json</text>
+            <text x="586" y="286" fill="var(--n400)" font-size="10">per-project config (registry + integrations)</text>
+
+            <text x="570" y="316" fill="var(--n500)" font-size="10.5">AGENTS.md ≡ CLAUDE.md — one grounding</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The packages are the layers; the method (roster, specifications, ADRs, design system) and the single config file sit alongside. <code>AGENTS.md</code> and <code>CLAUDE.md</code> resolve to the same grounding.</figcaption>
+    </figure>
+
+    <h3>Build phases — and Arke building Arke</h3>
+    <p>The PRD's requirements were decomposed into ~8-point vertical slices, each its own spec with its own branch and its own board card. Phase 1 ("prove the loop") landed the monorepo, the schema-first contracts, the mock-driven coordinator, the OpenCode adapter mapped to the real HTTP/SSE surface, the React client reproducing the design baseline, and the method scaffolding. Phase 2 builds out projections, the managed harness lifecycle, richer approvals, portable agent images, the CLI and multi-project workspaces. Each spec is authored in the cockpit, run through the review panel, and approved before implementation — <em>Arke, building Arke</em>.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Spec</th><th>Slice</th><th>Phase</th></tr></thead>
+        <tbody>
+          <tr><td class="mono-cell">002 / 003</td><td>OpenCode adapter · coordinator domain model &amp; transport</td><td><span class="badge">1</span></td></tr>
+          <tr><td class="mono-cell">004 / 005</td><td>Project setup &amp; grounding · harness &amp; model registry</td><td><span class="badge">1–2</span></td></tr>
+          <tr><td class="mono-cell">006 / 007 / 008</td><td>Authoring cockpit · multi-model review · spec lifecycle &amp; library</td><td><span class="badge">1</span></td></tr>
+          <tr><td class="mono-cell">009 / 010 / 011 / 012</td><td>Fan-out · delivery board · session detail &amp; rescue · permissions</td><td><span class="badge">1</span></td></tr>
+          <tr><td class="mono-cell">013 / 014 / 015</td><td>Generation workspace · deterministic projection · audit &amp; observability</td><td><span class="badge">1–2</span></td></tr>
+          <tr><td class="mono-cell">016 / 017 / 018</td><td>Harness lifecycle &amp; agent images · CLI · multi-project workspaces</td><td><span class="badge">2</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<hr class="soft">
+<div class="wrap">
+  <p class="lead-muted">In Greek myth, <strong>Arke</strong> was the messenger of the Titans — the counterpart to Iris, messenger of the Olympians. The name fits a tool whose job is to carry intent faithfully between the human who decides and the agents that build.</p>
+</div>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="color:var(--n700)">//Arke · Architecture</strong><br>
+      Grounded in <a href="../../AGENTS.md">AGENTS.md</a>, the <a href="../PRD-Arke.html">PRD</a>, ADRs <a href="../decisions/0001-thin-client-local-coordinator.md">0001</a>–<a href="../decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md">0004</a>, and specs <a href="../specifications/README.md">001–018</a>.
+    </div>
+    <div style="text-align:right">
+      Author the spec. Orchestrate the build. Keep the record.<br>
+      <span class="mono" style="color:var(--n400)">specification orchestrator</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var root=document.documentElement, btn=document.getElementById('themeBtn');
+    var saved=null; try{saved=localStorage.getItem('arke-theme');}catch(e){}
+    if(saved){root.setAttribute('data-theme',saved);}
+    else if(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches){root.setAttribute('data-theme','dark');}
+    btn.addEventListener('click',function(){
+      var next=root.getAttribute('data-theme')==='dark'?'light':'dark';
+      root.setAttribute('data-theme',next);
+      try{localStorage.setItem('arke-theme',next);}catch(e){}
+    });
+  })();
+</script>
+</body>
+</html>
