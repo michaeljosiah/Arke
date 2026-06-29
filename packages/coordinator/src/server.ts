@@ -29,6 +29,7 @@ import { InputValidator, ValidationError } from "./input-validator.js";
 import { FolderInspector, type FolderState } from "./folder-inspector.js";
 import { HarnessReachabilityProbe } from "./reachability.js";
 import { ScaffoldRunner, type ScaffoldTiers } from "./scaffold.js";
+import { ProjectRegistry, projectIdForRoot } from "./project-registry.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
@@ -69,6 +70,8 @@ export class Coordinator {
 
   // ---- onboarding state (SPEC-004), folded into every connection's snapshot frame ----
   private readonly projectRoot: string; // the safe root all client paths are validated against
+  private readonly projectId: string; // stable id for the active project (SPEC-018)
+  private readonly registry: ProjectRegistry; // durable global recents (SPEC-018)
   private readonly endpoints: string[]; // harness endpoints to probe (empty → adapter readiness)
   private readonly probe: HarnessReachabilityProbe;
   private readonly tierDefaults: ScaffoldTiers; // pre-filled tier→model, from the registry
@@ -88,13 +91,19 @@ export class Coordinator {
       endpoints?: string[];
       probe?: HarnessReachabilityProbe;
       tierDefaults?: ScaffoldTiers;
+      registry?: ProjectRegistry;
     } = {},
   ) {
     this.adapter = adapter;
     this.trace = trace;
     this.grants = grants;
     this.port = port;
-    this.projectRoot = opts.projectRoot ?? REPO_ROOT;
+    this.projectRoot = resolve(opts.projectRoot ?? REPO_ROOT);
+    this.projectId = projectIdForRoot(this.projectRoot);
+    // No injected registry → a pure in-memory one (no disk writes), so tests and the current
+    // single-project run never touch the user's global projects.json. bootstrap injects the
+    // real global registry.
+    this.registry = opts.registry ?? new ProjectRegistry({ persist: false });
     this.endpoints = opts.endpoints ?? [];
     this.probe = opts.probe ?? new HarnessReachabilityProbe();
     this.tierDefaults = opts.tierDefaults ?? {};
@@ -115,6 +124,8 @@ export class Coordinator {
     // Classify the project folder and probe harness reachability once at startup; both fold into
     // the snapshot every client receives, so the onboarding gate has its state before any frame.
     this.classifyProject();
+    // Record this project in the durable recents registry (SPEC-018) so the picker lists it.
+    this.registry.upsert({ root: this.projectRoot, name: basename(this.projectRoot), state: this.projectState });
     await this.refreshReachability();
 
     const readiness = this.adapter.readiness?.();
@@ -203,6 +214,7 @@ export class Coordinator {
       JSON.stringify({
         type: "snapshot",
         cards,
+        projectId: this.projectId, // SPEC-018: every snapshot/event is scoped to a project
         // The single project this coordinator serves — name + canonical path are display-safe
         // (NFR-1 permits the project name and folder path). The coordinator is single-project;
         // there is no multi-project list.
@@ -402,6 +414,32 @@ export class Coordinator {
       case "scaffold.run": {
         const result = await this.runScaffold(a.path, a.tiers, a.resumeFrom);
         return { ok: result.ok, stepsRun: result.stepsRun, steps: result.steps };
+      }
+      // SPEC-018 project surface. This deployment is single-context today: `project.list` returns
+      // the durable recents, and `project.open` resolves the active (sole) project. Opening a
+      // *different* project (multi-context supervision) lands in the next increment.
+      case "project.list":
+        return this.registry.list();
+      case "project.open": {
+        const requested = a.projectId ? String(a.projectId) : undefined;
+        if (requested && requested !== this.projectId) {
+          throw new Error(
+            `project '${requested}' is not the active project; opening additional projects is not yet supported (SPEC-018, in progress)`,
+          );
+        }
+        return {
+          projectId: this.projectId,
+          name: basename(this.projectRoot),
+          root: this.projectRoot,
+          state: this.projectState,
+        };
+      }
+      case "project.forget": {
+        const targetId = String(a.projectId ?? "");
+        if (targetId === this.projectId) throw new Error("cannot forget the active project");
+        const forgotten = this.registry.forget(targetId);
+        await this.trace.write({ kind: "project.forget", projectId: targetId, forgotten });
+        return { forgotten: forgotten ? targetId : null };
       }
       default:
         throw new Error(`unknown op: ${op}`);
@@ -784,6 +822,7 @@ async function bootstrap(): Promise<void> {
   await new Coordinator(built.adapter, trace, grants, PORT, {
     endpoints: built.endpoints,
     tierDefaults: built.tierDefaults,
+    registry: new ProjectRegistry(), // the real global recents (SPEC-018)
   }).start();
 }
 

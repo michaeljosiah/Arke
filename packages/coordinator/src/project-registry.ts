@@ -47,10 +47,15 @@ interface RegistryFile {
 
 export class ProjectRegistry {
   private readonly path: string;
+  private readonly persist: boolean;
   private projects = new Map<string, ProjectEntry>();
   private readonly clock: () => number;
 
-  constructor(opts?: { path?: string; clock?: () => number }) {
+  constructor(opts?: { path?: string; persist?: boolean; clock?: () => number }) {
+    // `persist: false` gives a pure in-memory registry (no disk reads/writes) — used when no
+    // global registry is injected (e.g. tests), so the coordinator never writes to the user's
+    // real projects.json or into the repo working tree.
+    this.persist = opts?.persist ?? true;
     this.path = opts?.path ?? resolve(arkeHome(), "projects.json");
     this.clock = opts?.clock ?? Date.now;
     this.load();
@@ -59,7 +64,7 @@ export class ProjectRegistry {
   /** Restore from disk (best-effort; a corrupt/absent file yields an empty registry). */
   load(): void {
     this.projects.clear();
-    if (!existsSync(this.path)) return;
+    if (!this.persist || !existsSync(this.path)) return;
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<RegistryFile>;
       for (const p of parsed.projects ?? []) {
@@ -105,6 +110,7 @@ export class ProjectRegistry {
   }
 
   private save(): void {
+    if (!this.persist) return;
     const file: RegistryFile = { version: 1, projects: [...this.projects.values()] };
     const tmp = `${this.path}.tmp`;
     mkdirSync(dirname(this.path), { recursive: true });
