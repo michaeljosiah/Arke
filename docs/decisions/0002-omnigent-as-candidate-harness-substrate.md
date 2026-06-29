@@ -125,14 +125,20 @@ Built a recon-grounded adapter (8 src files, 14 unit tests) and ran it against a
 | `streamEvents` | `GET /v1/sessions/{id}/stream` SSE — real frames (`session.heartbeat`, `session.presence`, `session.changed_files.invalidated`) parse cleanly; unmapped types ignored, not dead-lettered | ✅ verified |
 | `respondToPermission` | elicitations `POST /v1/sessions/{id}/elicitations/{id}/resolve` | ⏳ not exercised live (no elicitation without a turn) |
 
-**Verdict: exit YELLOW — control-plane conformance is green; the model-driven turn is gated, not failed.**
-The HTTP control-plane (auth boundary, session create, event-stream parsing, send-event shape) is
-confirmed against the real server. A *real turn* did not run because Omnigent enforces a
-**server/runner split**: `omnigent server` is only the control plane, and `POST /events` returns
-`503 runner_unavailable: "No runner bound for session"` until a **runner/host** is bound
-(`omnigent host`), which needs the harness (e.g. claude-sdk → Claude Code) **and a model API key**
-(the operator's credential). Notably this is the *same* control-plane/runner architecture Arke
-adopted in SPEC-018 — the substrate thesis is structurally sound.
+**Verdict: exit GREEN — a real OpenCode turn ran end-to-end through the adapter's event path.**
+After registering a runner/host (`omni host --server …`) and installing the OpenCode harness with the
+operator's existing credentials (github-copilot/openai, mounted read-only), a full turn completed:
+`POST /v1/sessions/{id}/events` → 202 → stream `response.in_progress` → `response.output_item.done`
+(assistant `content:[{type:"output_text",text:"PONG"}]`, model `openai/gpt-5.5-fast`) →
+`response.completed` — the exact OpenAI-Responses shapes the adapter normalises. The control plane
+(auth boundary, session create, event-stream parsing, send-event shape) and the full
+runner-bound turn are both confirmed against the live server.
+
+Architecture note: Omnigent enforces a **server/runner split** — `omnigent server` is the control
+plane; a turn only executes once a runner/host is bound (`omni host`), which carries the harness +
+its model credential. `POST /events` returns `503 runner_unavailable` until then. This is the *same*
+control-plane/runner architecture Arke adopted in SPEC-018 — the substrate thesis is sound and now
+proven, not just structural.
 
 **Recorded gaps / risks:**
 - **Alpha instability is real:** `pip install omnigent` fails (dependency resolution conflict); only
@@ -144,7 +150,11 @@ adopted in SPEC-018 — the substrate thesis is structurally sound.
 - **No first-class long-lived API token** (auth is JWT-cookie/OIDC) → service-to-service likely needs
   a header proxy.
 
-**Recommendation:** keep the adapter on the spike branch (out of `main`). To finish the green/red
-call, run the runner-bound turn — needs `omnigent host` with Claude Code + an `ANTHROPIC_API_KEY` the
-operator supplies. The neutral `HarnessAdapter` seam holds either way; OpenCode-direct remains the
-lean reference.
+**Recommendation:** the substrate thesis is **proven** — Arke can target Omnigent through the neutral
+`HarnessAdapter` seam and inherit its harness breadth (~15 harnesses) + runner model. Keep the adapter
+on the spike branch for now (it is a real but un-hardened spike: best-effort correlation, 202-only
+approvals, no reconnect). Promotion to `main` should be its own spec — harden correlation/approvals,
+decide where Arke's `propose·decide·execute` maps onto elicitations, and weigh the alpha-churn risk
+(pin a version; generate clients from route source). OpenCode-direct stays the lean reference adapter;
+this widens the menu, it does not replace it. Repro: `packages/adapter-omnigent/spike/Dockerfile`
+(server + OpenCode harness) + `omni host` + a read-only mount of the operator's `opencode/auth.json`.

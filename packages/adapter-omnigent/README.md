@@ -22,18 +22,24 @@ todos).
 
 ```bash
 docker build -f packages/adapter-omnigent/spike/Dockerfile -t arke-omnigent-spike .
-docker run -d --name arke-omnigent -p 6767:6767 arke-omnigent-spike
+docker run -d --name arke-omnigent -p 6767:6767 \
+  -v arke-omnigent-data:/root/.omnigent \
+  -v "<your>/opencode/auth.json:/root/.local/share/opencode/auth.json:ro" \
+  arke-omnigent-spike
+docker exec -d arke-omnigent sh -c 'omni host --server http://localhost:6767'   # bind a runner
 curl http://127.0.0.1:6767/v1/sessions?limit=1     # 200, no auth (local single-user)
 ```
 
-The container is the **control plane only**. A real agent turn needs a **runner/host** bound to the
-session (`omnigent host`) with the harness (e.g. Claude Code) and a model API key; without one,
-`POST …/events` returns `503 runner_unavailable`. This server/runner split mirrors Arke's own
-coordinator/runner model (SPEC-018).
+`omnigent server` is the **control plane only**. A turn executes on a **runner/host** bound via
+`omni host`, which carries the harness (OpenCode here) and its model credential (the read-only
+`auth.json` mount). Without a runner, `POST …/events` returns `503 runner_unavailable`. This
+server/runner split mirrors Arke's own coordinator/runner model (SPEC-018).
 
-## Status
+## Status — exit GREEN (ADR-0002)
 
-Control-plane conformance is green (auth boundary, session create, SSE parsing, send-event shape).
-The model-driven turn is gated on a runner + an operator-supplied model key — **exit YELLOW** in
-ADR-0002. Unit tests (`npm test -w @arke/adapter-omnigent`) cover the normaliser + SSE parser against
-captured frame shapes.
+A real OpenCode turn was driven through the adapter's event path end-to-end: `POST …/events` → 202 →
+`response.output_item.done` (assistant `"PONG"`, model `openai/gpt-5.5-fast`) → `response.completed`.
+The substrate thesis is proven. The adapter remains on the spike branch pending a hardening spec
+(correlation, event-confirmed approvals, reconnect, alpha-churn pinning). Unit tests
+(`npm test -w @arke/adapter-omnigent`) cover the normaliser + SSE parser against captured **live**
+frame shapes (incl. the nested `item.content[]` assistant snapshot).

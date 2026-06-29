@@ -51,6 +51,35 @@ test("output_text.done maps to a non-streaming message.updated snapshot", () => 
   assert.equal(out[0].isStreaming, false);
 });
 
+test("output_item.done extracts text from the nested item.content[] (real OpenCode shape)", () => {
+  // Captured live from an OpenCode turn: the assistant text is in item.content[].text, not item.text.
+  const out = normalize(
+    {
+      type: "response.output_item.done",
+      data: {
+        item: {
+          id: "msg_7d55e7fb",
+          response_id: "msg_f1523000",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "PONG" }],
+          model: "opencode",
+        },
+      },
+    },
+    SID,
+    ID,
+    HARNESS,
+    createNormalizeState(),
+  );
+  if (out[0]?.type !== "message.updated") return assert.fail();
+  assert.equal(out[0].messageId, "msg_7d55e7fb");
+  assert.equal(out[0].text, "PONG");
+  assert.equal(out[0].role, "assistant");
+  assert.equal(out[0].isStreaming, false);
+});
+
 test("response.completed fans out to session.status idle + turn.quiescent", () => {
   const out = normalize({ type: "response.completed", data: { response_id: "resp_9" } }, SID, ID, HARNESS, createNormalizeState());
   assert.deepEqual(out.map((e) => e.type), ["session.status", "turn.quiescent"]);

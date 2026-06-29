@@ -84,12 +84,24 @@ export function normalize(
     case "response.output_text.done":
     case "response.output_item.done": {
       // A completed content item carries the full text — emit a non-streaming snapshot so the read
-      // model converges even if some deltas were missed (live-tail has no replay).
-      const messageId = str(d.item_id) ?? str(d.message_id) ?? str(d.response_id) ?? sessionId;
-      const text =
-        str(d.text) ??
-        str((d.item as { text?: string } | undefined)?.text) ??
-        "";
+      // model converges even if some deltas were missed (live-tail has no replay). Live-verified
+      // shape (OpenCode turn): `item: { id, role, content: [{ type:"output_text", text }] }` — the
+      // text is nested in item.content[], NOT item.text; `output_text.done` carries top-level text.
+      const item = (d.item ?? {}) as {
+        id?: string;
+        role?: string;
+        content?: Array<{ type?: string; text?: string }>;
+      };
+      const messageId =
+        str(item.id) ?? str(d.item_id) ?? str(d.message_id) ?? str(d.response_id) ?? sessionId;
+      const fromContent = Array.isArray(item.content)
+        ? item.content
+            .filter((c) => c?.type === "output_text" && typeof c.text === "string")
+            .map((c) => c.text as string)
+            .join("")
+        : "";
+      const text = str(d.text) ?? (fromContent || "");
+      const role = item.role === "user" || item.role === "tool" ? item.role : "assistant";
       return [
         {
           ...e,
@@ -97,7 +109,7 @@ export function normalize(
           type: "message.updated",
           sessionId,
           messageId,
-          role: "assistant",
+          role,
           text,
           toolCalls: [],
           isStreaming: false,
