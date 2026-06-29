@@ -1,0 +1,23 @@
+{
+  "name": "@arke/adapter-omnigent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SPIKE (ADR-0002): maps Arke's HarnessAdapter onto Omnigent's v1 HTTP API — the meta-harness substrate one level up from OpenCode. Validates the substrate thesis behind the neutral adapter seam; kept out of the default composition until it proves out.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@arke/contracts": "*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
