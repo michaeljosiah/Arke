@@ -1,9 +1,12 @@
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   DomainEvent,
+  appendChangeHistory,
+  parseFrontmatter,
+  setFrontmatterStatus,
   type AgentImage,
   type HarnessAdapter,
   type ModelInfo,
@@ -285,6 +288,132 @@ export class ProjectContext {
     } as DomainEvent);
   }
 
+  // ---- authoring cockpit (SPEC-006) ---------------------------------------
+
+  /**
+   * Locate a working specification file under this project's `docs/specifications/` by spec id
+   * (matched against the frontmatter `spec_id`/`slug`/`title` or the filename stem). Host-side read,
+   * confined to the project root. Returns the file's text + parsed frontmatter, or null if absent.
+   */
+  private findSpecFile(specId: string): { relPath: string; absPath: string; text: string; frontmatter: Record<string, string> } | null {
+    if (!specId) return null;
+    const dir = resolve(this.root, "docs", "specifications");
+    if (!existsSync(dir)) return null;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
+    } catch {
+      return null;
+    }
+    for (const f of entries) {
+      const absPath = resolve(dir, f);
+      // Defence-in-depth: never read outside the project root even via an odd entry name.
+      if (relative(this.root, absPath).startsWith("..")) continue;
+      let text: string;
+      try {
+        text = readFileSync(absPath, "utf8");
+      } catch {
+        continue;
+      }
+      const { data } = parseFrontmatter(text);
+      const stem = f.replace(/\.md$/, "");
+      if (data.spec_id === specId || data.slug === specId || data.title === specId || stem === specId) {
+        return { relPath: relative(this.root, absPath).replaceAll("\\", "/"), absPath, text, frontmatter: data };
+      }
+    }
+    return null;
+  }
+
+  /** `spec.file` — the working specification text + metadata for the cockpit preview (SPEC-006). */
+  private readSpecFile(specId: string): {
+    specId: string;
+    exists: boolean;
+    path?: string;
+    text?: string;
+    branch?: string;
+    status?: string;
+  } {
+    const found = this.findSpecFile(specId);
+    if (!found) return { specId, exists: false };
+    return {
+      specId,
+      exists: true,
+      path: found.relPath,
+      text: found.text,
+      ...(found.frontmatter.branch ? { branch: found.frontmatter.branch } : {}),
+      ...(found.frontmatter.status ? { status: found.frontmatter.status } : {}),
+    };
+  }
+
+  /**
+   * `approveDraft` — atomically advance a draft to `in-review` (SPEC-006). Verifies the git HEAD
+   * branch equals the frontmatter `branch`, writes the updated status + a Change history line,
+   * commits the file on the branch, and emits `spec.status`. Any failure emits `spec.approval-failed`,
+   * leaves the on-disk status unchanged (rolling back a written-but-uncommitted file), and throws so
+   * the client sees an error and can retry. A single transaction — no partial success.
+   */
+  private async approveDraft(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
+    const fail = async (reason: string): Promise<never> => {
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
+      throw new Error(reason);
+    };
+
+    const found = this.findSpecFile(specId);
+    if (!found) return fail(`no specification file found for '${specId}' under docs/specifications`);
+    const fmBranch = found.frontmatter.branch;
+    if (!fmBranch) return fail(`specification '${specId}' has no 'branch' in its frontmatter`);
+    if (clientBranch && clientBranch !== fmBranch) {
+      return fail(`branch mismatch: client sent '${clientBranch}' but frontmatter is '${fmBranch}'`);
+    }
+    if (!gitAvailable()) return fail("git not found on PATH; cannot commit the approval");
+    const head = gitHeadBranch(this.root);
+    if (head === null) return fail("could not determine the git HEAD branch (not a git repository?)");
+    if (head !== fmBranch) return fail(`branch guard: HEAD is '${head}' but the spec's branch is '${fmBranch}'`);
+
+    const date = new Date().toISOString().slice(0, 10);
+    const updated = appendChangeHistory(
+      setFrontmatterStatus(found.text, "in-review"),
+      `${date} · ${fmBranch} · in-review — approved via the authoring cockpit`,
+    );
+    try {
+      writeFileSync(found.absPath, updated, "utf8");
+    } catch (err) {
+      return fail(`could not write the specification file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const committed = gitCommit(this.root, found.relPath, `spec(${specId}): approve → in-review`);
+    if (!committed.ok) {
+      // Roll back the write so the on-disk status is unchanged (the approval did not happen).
+      try {
+        writeFileSync(found.absPath, found.text, "utf8");
+      } catch {
+        /* best-effort rollback */
+      }
+      return fail(`git commit failed: ${committed.error}`);
+    }
+
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
+    await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
+    return { ok: true, specId, status: "in-review", branch: fmBranch };
+  }
+
+  /**
+   * `convenePanel` — request a multi-model review of the working draft (SPEC-006). Passes a
+   * reference (`specId`/`branch`), never file content; the coordinator reads the authoritative file.
+   * The review panel itself is SPEC-007 (not yet implemented), so this records intent and acks.
+   */
+  private async convenePanel(specId: string, branch?: string): Promise<{ specId: string; branch?: string; convened: boolean; note: string }> {
+    const found = this.findSpecFile(specId);
+    const resolvedBranch = branch ?? found?.frontmatter.branch;
+    await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId, branch: resolvedBranch ?? null });
+    return {
+      specId,
+      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
+      convened: true,
+      note: "review panel (SPEC-007) is not yet implemented; the request was recorded",
+    };
+  }
+
   // ---- classification + reachability --------------------------------------
 
   private classify(target: string = this.root): void {
@@ -360,8 +489,17 @@ export class ProjectContext {
           requested === "capable" || requested === "mid" || requested === "fast"
             ? (requested as ModelTier)
             : "mid";
+        const sessionId = String(a.sessionId ?? "");
+        // Stale-session guard (SPEC-006): a queued message that targets a session no longer idle or
+        // running (e.g. it went waiting/done/error while the client was offline) is rejected with its
+        // current status rather than silently executed. Unknown sessions (not yet in the read model)
+        // are allowed — a brand-new session's first prompt must not be blocked.
+        const known = this.read.snapshot().find((c) => c.id === sessionId);
+        if (known && known.status !== "idle" && known.status !== "running") {
+          throw new Error(`session '${sessionId}' is '${known.status}', not idle/running — message rejected`);
+        }
         const input = {
-          sessionId: String(a.sessionId ?? ""),
+          sessionId,
           agent: String(a.agent ?? ""),
           tier,
           parts: [{ type: "text" as const, text: String(a.message ?? "") }],
@@ -407,9 +545,17 @@ export class ProjectContext {
       case "harness.probe":
         await this.refreshReachability();
         return this.reachableSummary();
+      case "registry.get":
+        return this.registrySnapshot; // current projection, no re-probe (read-only)
       case "registry.probe":
         await this.refreshRegistry(true); // explicit user action → re-probe the live adapter
         return this.registrySnapshot;
+      case "spec.file":
+        return this.readSpecFile(String(a.specId ?? ""));
+      case "approveDraft":
+        return this.approveDraft(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
+      case "convenePanel":
+        return this.convenePanel(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "folder.inspect":
         return this.inspectFolder(a.path);
       case "repo.clone":
@@ -647,6 +793,32 @@ export function gitAvailable(): boolean {
     return spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
   } catch {
     return false;
+  }
+}
+
+/** The current git HEAD branch name in `cwd`, or null when it can't be determined (SPEC-006). */
+export function gitHeadBranch(cwd: string): string | null {
+  try {
+    const res = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" });
+    if (res.status !== 0) return null;
+    const branch = (res.stdout ?? "").trim();
+    return branch.length > 0 && branch !== "HEAD" ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stage and commit a single file in `cwd` (SPEC-006). Returns the new sha or the failure reason. */
+export function gitCommit(cwd: string, relPath: string, message: string): { ok: true; sha: string } | { ok: false; error: string } {
+  try {
+    const add = spawnSync("git", ["add", "--", relPath], { cwd, encoding: "utf8" });
+    if (add.status !== 0) return { ok: false, error: (add.stderr || "git add failed").trim() };
+    const commit = spawnSync("git", ["commit", "-m", message, "--", relPath], { cwd, encoding: "utf8" });
+    if (commit.status !== 0) return { ok: false, error: (commit.stderr || commit.stdout || "git commit failed").trim() };
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
+    return { ok: true, sha: (sha.stdout ?? "").trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
