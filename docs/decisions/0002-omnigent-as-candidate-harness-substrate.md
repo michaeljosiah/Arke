@@ -103,7 +103,66 @@ infrastructure to build *on*.
 ## Open questions
 
 - The **public send-prompt endpoint** — not obvious in `openapi.json`; the internal transport uses
-  `prompt_async`. Confirm before the spike.
+  `prompt_async`. Confirm before the spike. → **Resolved (see Spike results): it's `POST /v1/sessions/{id}/events`; there is no `/prompt`.**
 - **Auth model** of the v1 API (token/session) and whether it fits the host-only credential boundary.
+  → **Resolved: bearer JWT / proxy header / cookie; host-only-compatible; local `omnigent server` runs no-auth with `OMNIGENT_LOCAL_SINGLE_USER=1`.**
 - Whether to map Arke approvals onto Omnigent **policies** or gate in the coordinator and treat
-  Omnigent purely as execution.
+  Omnigent purely as execution. → **Resolved: per-turn approvals are *elicitations* (`/elicitations/{id}/resolve`), not policies; policies are a separate static tool-gating engine. Map Arke decisions onto elicitations.**
+
+## Spike results (2026-06-29) — `@arke/adapter-omnigent` on branch `spike/adapter-omnigent`
+
+Built a recon-grounded adapter (8 src files, 14 unit tests) and ran it against a **live Omnigent
+0.3.0** stood up in Docker (`python:3.12-slim` + `uv tool install omnigent`, `omnigent server
+--host 0.0.0.0 --port 6767`, `OMNIGENT_LOCAL_SINGLE_USER=1`, SQLite, no-auth).
+
+**Corrected interface mapping (live-verified):**
+
+| Arke `HarnessAdapter` | Omnigent v1 (verified) | Status |
+|---|---|---|
+| init / readiness probe | `GET /v1/sessions?limit=1` → 200 (no-auth local) | ✅ verified |
+| `createSession` | `POST /v1/sessions` — **`agent_id` REQUIRED** (422 without); 201 returns the id under `id` (a `conv_…`) | ✅ verified (recon said agent_id optional — wrong) |
+| `sendMessage`/`dispatchAsync` | `POST /v1/sessions/{id}/events` `{type:"message",data:{role,content:[{type:"input_text",text}]}}` — body **accepted** (503 only on the runner precondition, not 422) | ✅ shape verified |
+| `streamEvents` | `GET /v1/sessions/{id}/stream` SSE — real frames (`session.heartbeat`, `session.presence`, `session.changed_files.invalidated`) parse cleanly; unmapped types ignored, not dead-lettered | ✅ verified |
+| `respondToPermission` | elicitations `POST /v1/sessions/{id}/elicitations/{id}/resolve` | ⏳ not exercised live (no elicitation without a turn) |
+
+**Verdict: exit GREEN on the substrate thesis — with one honest caveat on the adapter's normalize.**
+After registering a runner/host (`omni host --server …`) and installing the OpenCode harness with the
+operator's existing credentials (github-copilot/openai, mounted read-only), a full turn completed:
+`POST /v1/sessions/{id}/events` → 202 → stream `response.in_progress` → `response.output_item.done`
+(assistant `content:[{type:"output_text",text:"PONG"}]`, model `openai/gpt-5.5-fast`) →
+`response.completed`. The control plane (auth boundary, session create, event-stream parsing,
+send-event shape) and the full runner-bound turn are confirmed against the live server.
+
+**Caveat (PR #11 review):** that live turn was observed by reading the raw SSE stream directly — the
+adapter's `normalize` was **not** in the live path. Real Omnigent frames are **flat**
+(`{type, delta, …}` / `{type, item:{…}}`), but the spike normalizer reads a nested `properties.data.*`
+shape (its unit fixtures were written nested, so they passed while not matching reality). So: the
+*substrate + transport* are proven; the *adapter's normalize needs a real-frame rewrite* (flat
+payloads, `session.status`/`input.consumed` coverage, completion-aware `sendMessage`, event-confirmed
+approvals via the events channel). That rewrite + fixtures-from-captured-frames is the follow-up
+hardening spec — the adapter must not be wired in until then.
+
+Architecture note: Omnigent enforces a **server/runner split** — `omnigent server` is the control
+plane; a turn only executes once a runner/host is bound (`omni host`), which carries the harness +
+its model credential. `POST /events` returns `503 runner_unavailable` until then. This is the *same*
+control-plane/runner architecture Arke adopted in SPEC-018 — the substrate thesis is sound and now
+proven, not just structural.
+
+**Recorded gaps / risks:**
+- **Alpha instability is real:** `pip install omnigent` fails (dependency resolution conflict); only
+  `uv tool install` resolves it. Source-vs-`openapi.json` drift (phantom `/prompt`) and the
+  agent_id-optional miss confirm: generate clients from route source, pin a version, expect churn.
+- **Correlation:** `/events` does not echo a client message id → the adapter's correlationId is
+  best-effort and won't match stream item ids without extra bookkeeping.
+- **No event-confirmed approvals** like the OpenCode adapter (resolve is 202-acknowledged).
+- **No first-class long-lived API token** (auth is JWT-cookie/OIDC) → service-to-service likely needs
+  a header proxy.
+
+**Recommendation:** the substrate thesis is **proven** — Arke can target Omnigent through the neutral
+`HarnessAdapter` seam and inherit its harness breadth (~15 harnesses) + runner model. Keep the adapter
+on the spike branch for now (it is a real but un-hardened spike: best-effort correlation, 202-only
+approvals, no reconnect). Promotion to `main` should be its own spec — harden correlation/approvals,
+decide where Arke's `propose·decide·execute` maps onto elicitations, and weigh the alpha-churn risk
+(pin a version; generate clients from route source). OpenCode-direct stays the lean reference adapter;
+this widens the menu, it does not replace it. Repro: `packages/adapter-omnigent/spike/Dockerfile`
+(server + OpenCode harness) + `omni host` + a read-only mount of the operator's `opencode/auth.json`.
