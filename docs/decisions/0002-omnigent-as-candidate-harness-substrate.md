@@ -103,7 +103,48 @@ infrastructure to build *on*.
 ## Open questions
 
 - The **public send-prompt endpoint** — not obvious in `openapi.json`; the internal transport uses
-  `prompt_async`. Confirm before the spike.
+  `prompt_async`. Confirm before the spike. → **Resolved (see Spike results): it's `POST /v1/sessions/{id}/events`; there is no `/prompt`.**
 - **Auth model** of the v1 API (token/session) and whether it fits the host-only credential boundary.
+  → **Resolved: bearer JWT / proxy header / cookie; host-only-compatible; local `omnigent server` runs no-auth with `OMNIGENT_LOCAL_SINGLE_USER=1`.**
 - Whether to map Arke approvals onto Omnigent **policies** or gate in the coordinator and treat
-  Omnigent purely as execution.
+  Omnigent purely as execution. → **Resolved: per-turn approvals are *elicitations* (`/elicitations/{id}/resolve`), not policies; policies are a separate static tool-gating engine. Map Arke decisions onto elicitations.**
+
+## Spike results (2026-06-29) — `@arke/adapter-omnigent` on branch `spike/adapter-omnigent`
+
+Built a recon-grounded adapter (8 src files, 14 unit tests) and ran it against a **live Omnigent
+0.3.0** stood up in Docker (`python:3.12-slim` + `uv tool install omnigent`, `omnigent server
+--host 0.0.0.0 --port 6767`, `OMNIGENT_LOCAL_SINGLE_USER=1`, SQLite, no-auth).
+
+**Corrected interface mapping (live-verified):**
+
+| Arke `HarnessAdapter` | Omnigent v1 (verified) | Status |
+|---|---|---|
+| init / readiness probe | `GET /v1/sessions?limit=1` → 200 (no-auth local) | ✅ verified |
+| `createSession` | `POST /v1/sessions` — **`agent_id` REQUIRED** (422 without); 201 returns the id under `id` (a `conv_…`) | ✅ verified (recon said agent_id optional — wrong) |
+| `sendMessage`/`dispatchAsync` | `POST /v1/sessions/{id}/events` `{type:"message",data:{role,content:[{type:"input_text",text}]}}` — body **accepted** (503 only on the runner precondition, not 422) | ✅ shape verified |
+| `streamEvents` | `GET /v1/sessions/{id}/stream` SSE — real frames (`session.heartbeat`, `session.presence`, `session.changed_files.invalidated`) parse cleanly; unmapped types ignored, not dead-lettered | ✅ verified |
+| `respondToPermission` | elicitations `POST /v1/sessions/{id}/elicitations/{id}/resolve` | ⏳ not exercised live (no elicitation without a turn) |
+
+**Verdict: exit YELLOW — control-plane conformance is green; the model-driven turn is gated, not failed.**
+The HTTP control-plane (auth boundary, session create, event-stream parsing, send-event shape) is
+confirmed against the real server. A *real turn* did not run because Omnigent enforces a
+**server/runner split**: `omnigent server` is only the control plane, and `POST /events` returns
+`503 runner_unavailable: "No runner bound for session"` until a **runner/host** is bound
+(`omnigent host`), which needs the harness (e.g. claude-sdk → Claude Code) **and a model API key**
+(the operator's credential). Notably this is the *same* control-plane/runner architecture Arke
+adopted in SPEC-018 — the substrate thesis is structurally sound.
+
+**Recorded gaps / risks:**
+- **Alpha instability is real:** `pip install omnigent` fails (dependency resolution conflict); only
+  `uv tool install` resolves it. Source-vs-`openapi.json` drift (phantom `/prompt`) and the
+  agent_id-optional miss confirm: generate clients from route source, pin a version, expect churn.
+- **Correlation:** `/events` does not echo a client message id → the adapter's correlationId is
+  best-effort and won't match stream item ids without extra bookkeeping.
+- **No event-confirmed approvals** like the OpenCode adapter (resolve is 202-acknowledged).
+- **No first-class long-lived API token** (auth is JWT-cookie/OIDC) → service-to-service likely needs
+  a header proxy.
+
+**Recommendation:** keep the adapter on the spike branch (out of `main`). To finish the green/red
+call, run the runner-bound turn — needs `omnigent host` with Claude Code + an `ANTHROPIC_API_KEY` the
+operator supplies. The neutral `HarnessAdapter` seam holds either way; OpenCode-direct remains the
+lean reference.

@@ -108,10 +108,18 @@ export class OmnigentAdapter implements HarnessAdapter {
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionRef> {
+    // Live-confirmed (ADR-0002 spike): POST /v1/sessions REQUIRES agent_id (the Agent Image to run);
+    // the recon's "optional" reading was wrong — the server returns 422 without it.
+    if (!this.config.agentId) {
+      throw new Error(
+        "OmnigentConfig.agentId is required — Omnigent's POST /v1/sessions mandates agent_id (the Agent Image to run)",
+      );
+    }
     const body = {
-      ...(this.config.agentId ? { agent_id: this.config.agentId } : {}),
+      agent_id: this.config.agentId,
       title: input.specId, // the title encodes the spec id (mirrors the OpenCode adapter)
     };
+    // The 201 body returns the session/conversation id under `id` (a `conv_…`); accept `session_id` too.
     const res = await this.http.req<{ session_id?: string; id?: string }>("POST", "/v1/sessions", body);
     const sessionId = res.session_id ?? res.id;
     if (!sessionId) throw new Error("Omnigent createSession returned no session id");
@@ -145,6 +153,10 @@ export class OmnigentAdapter implements HarnessAdapter {
         content: input.parts.map((p) => ({ type: "input_text", text: p.text })),
       },
     };
+    // Live-confirmed (ADR-0002 spike): this body shape is accepted. A turn only EXECUTES once a
+    // runner/host is bound to the session (`omnigent host`); against a control-plane-only `omnigent
+    // server`, /events returns 503 `runner_unavailable` — the server/runner split, the same shape
+    // Arke's own coordinator/runner model takes (SPEC-018).
     const res = await this.http.req<{ queued?: boolean; pending_id?: string }>(
       "POST",
       `/v1/sessions/${input.sessionId}/events`,
