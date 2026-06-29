@@ -1,0 +1,24 @@
+{
+  "name": "@arke/agent-image",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Parser + validator for portable agent images — a harness-agnostic agent definition (config.yaml + AGENTS.md + skills/ + tools/ + sub-agents) loaded into a typed AgentImage (SPEC-016).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@arke/contracts": "*",
+    "yaml": "^2.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

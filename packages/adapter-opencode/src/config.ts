@@ -35,6 +35,13 @@ export interface OpenCodeConfig {
   reconnectBaseMs?: number;
   /** Max reconnect backoff (ms). */
   reconnectMaxMs?: number;
+  /**
+   * Managed mode (SPEC-016): when true the adapter spawns and owns the harness process; when
+   * false (default) it attaches to an already-running server and never stops it.
+   */
+  manageHarness?: boolean;
+  /** Override the spawn argv; defaults to `opencode serve --hostname <h> --port <p>` from baseUrl. */
+  harnessCommand?: string[];
 }
 
 export const DEFAULT_PERMISSION_TIMEOUT_MS = 120_000;
@@ -113,7 +120,7 @@ interface RegistryInstance {
 
 interface ArkeConfigFile {
   registry?: { instances?: RegistryInstance[] };
-  settings?: { permissionTimeoutMs?: number };
+  settings?: { permissionTimeoutMs?: number; manageHarness?: boolean };
 }
 
 /** Parse a model string into provider/name; bare names resolve to the gateway provider. */
@@ -180,7 +187,13 @@ export function loadOpenCodeConfig(opts: LoadConfigOptions): OpenCodeConfig | nu
       env.ARKE_PERMISSION_TIMEOUT_MS,
       parsed.settings?.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
     ),
+    manageHarness: boolFrom(env.ARKE_MANAGE_HARNESS, parsed.settings?.manageHarness ?? false),
   };
+}
+
+function boolFrom(override: string | undefined, fallback: boolean): boolean {
+  if (override === undefined) return fallback;
+  return override === "1" || override.toLowerCase() === "true";
 }
 
 function numberFrom(override: string | undefined, fallback: number): number {

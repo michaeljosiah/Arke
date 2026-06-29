@@ -1,0 +1,12 @@
+spec_version: 1
+name: spec-author
+description: "Co-authors the specification with the human: Why, Requirements, scenarios."
+tier: capable
+instructions: AGENTS.md
+interaction:
+  conversational: true
+  mode: primary
+permission:
+  read: allow
+  edit: allow
+  bash: ask

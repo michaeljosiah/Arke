@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { DomainEvent } from "@arke/contracts";
 import type {
+  AgentImage,
   Capability,
   CreateSessionInput,
   DiffSummary,
@@ -23,6 +26,7 @@ import {
   type ResolvedModel,
 } from "./config.js";
 import { OpenCodeHttp } from "./http.js";
+import { HarnessProcess } from "./harness-process.js";
 import { probeCapabilities } from "./capabilities.js";
 import {
   FileSessionStore,
@@ -49,14 +53,19 @@ export interface OpenCodeAdapterDeps {
   sessionStore?: SessionStore;
   /** Where unmappable events go. Defaults to an in-memory array. */
   deadLetterSink?: DeadLetterSink;
+  /** Records harness lifecycle events (started/exited) to the trace (SPEC-016). */
+  onLifecycleEvent?: (record: Record<string, unknown>) => void;
 }
 
 export class OpenCodeAdapter implements HarnessAdapter {
   readonly id = "OpenCode";
 
   private readonly http: OpenCodeHttp;
+  private readonly config: OpenCodeConfig;
   private readonly store: SessionStore;
   private readonly dlq: DeadLetterSink;
+  private readonly onLifecycleEvent?: (record: Record<string, unknown>) => void;
+  private harness?: HarnessProcess;
   private readonly permissions: PermissionCoordinator;
   private readonly resolveModel: (tier: ModelTier) => ResolvedModel;
   private readonly reconnectBaseMs: number;
@@ -71,17 +80,28 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
   constructor(config: OpenCodeConfig, deps: OpenCodeAdapterDeps = {}) {
     this.http = new OpenCodeHttp(config);
+    this.config = config;
     this.store = deps.sessionStore ?? new InMemorySessionStore();
     this.dlq = deps.deadLetterSink ?? new ArrayDeadLetterSink();
+    this.onLifecycleEvent = deps.onLifecycleEvent;
     this.resolveModel = config.resolveModel ?? DEFAULT_RESOLVE_MODEL;
     this.reconnectBaseMs = config.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS;
     this.reconnectMaxMs = config.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS;
 
     const permClient: PermissionClient = {
-      reply: (id, granted) =>
-        this.http
-          .req("POST", `/permission/${id}/reply`, { response: granted ? "approve" : "deny" })
-          .then(() => undefined),
+      // Map the once/always/reject vocabulary onto the server's reply (SPEC-016). OpenCode's
+      // UI surfaces once/always/reject; older servers accept approve/deny — send both forms.
+      reply: (id, decision, message) => {
+        const response = decision === "reject" ? "reject" : decision; // once | always | reject
+        const approve = decision !== "reject";
+        return this.http
+          .req("POST", `/permission/${id}/reply`, {
+            response,
+            approve, // tolerated by approve/deny servers; ignored by once/always/reject servers
+            ...(message ? { message } : {}),
+          })
+          .then(() => undefined);
+      },
       pending: async () => {
         const list = await this.http.req<
           Array<{ id?: string; request_id?: string; requestID?: string }>
@@ -115,12 +135,76 @@ export class OpenCodeAdapter implements HarnessAdapter {
   /** Probe the live server, load durable ownership, and build the initial graph. Idempotent. */
   async init(): Promise<void> {
     this.store.load();
+    if (this.config.manageHarness) await this.startServer();
     const probe = await probeCapabilities(this.http);
     this.caps = probe.capabilities;
     this._readiness = probe.readiness;
     if (probe.readiness.ready) {
       await this.rebuildSessionGraph();
     }
+  }
+
+  /** Spawn and own a harness process (managed mode). No-op if already running or in attach mode. */
+  async startServer(): Promise<void> {
+    if (!this.config.manageHarness || this.harness?.running) return;
+    const command = this.config.harnessCommand ?? this.defaultHarnessCommand();
+    this.harness = new HarnessProcess({
+      command,
+      cwd: this.http.directory,
+      // Host-only credentials go into the child's environment, never to the client (NFR-1).
+      env: this.config.password ? { OPENCODE_SERVER_PASSWORD: this.config.password } : undefined,
+      healthCheck: () => this.http.req("GET", "/global/health").then(() => true).catch(() => false),
+      shell: process.platform === "win32", // resolve the `opencode` shim on Windows
+      onExit: (code, signal) => {
+        this._readiness = {
+          ready: false,
+          reason: `managed harness exited (code=${code ?? "?"}, signal=${signal ?? "?"})`,
+        };
+        this.onLifecycleEvent?.({ kind: "harness.exit", harness: this.id, code, signal, at: Date.now() });
+      },
+    });
+    await this.harness.start();
+    this.onLifecycleEvent?.({ kind: "harness.started", harness: this.id, pid: this.harness.pid, at: Date.now() });
+  }
+
+  /** Stop a harness process this adapter started; never stops a server it did not start. */
+  async stopServer(): Promise<void> {
+    if (!this.harness) return; // attach mode, or we never started one
+    await this.harness.stop();
+    this.onLifecycleEvent?.({ kind: "harness.stopped", harness: this.id, at: Date.now() });
+    this.harness = undefined;
+  }
+
+  private defaultHarnessCommand(): string[] {
+    const u = new URL(this.config.baseUrl);
+    const port = u.port || "4096";
+    const host = u.hostname || "127.0.0.1";
+    return ["opencode", "serve", "--hostname", host, "--port", port];
+  }
+
+  // ---- agent images (SPEC-016) -------------------------------------------
+
+  /** Materialise a portable agent image into OpenCode's `.opencode/agents/<name>.md` convention. */
+  async materializeAgent(image: AgentImage): Promise<void> {
+    const dir = join(this.http.directory, ".opencode", "agents");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${image.name}.md`), this.agentMarkdown(image), "utf8");
+    // Sub-agents become their own files (OpenCode links them by parentID at runtime).
+    for (const sub of image.subAgents) await this.materializeAgent(sub);
+  }
+
+  /** Render the OpenCode agent markdown: frontmatter (with logical `tier:`) + instruction body. */
+  private agentMarkdown(image: AgentImage): string {
+    const lines: string[] = ["---", `description: ${image.description ?? image.name}`, `mode: ${image.interaction.mode}`];
+    // The tier is the contract; the registry resolves it to a concrete model at session-create.
+    lines.push(`tier: ${image.tier}`);
+    const perms = Object.entries(image.permission);
+    if (perms.length > 0) {
+      lines.push("permission:");
+      for (const [k, v] of perms) lines.push(`  ${k}: ${v}`);
+    }
+    lines.push("---", "", image.instructions ?? "");
+    return lines.join("\n") + "\n";
   }
 
   // ---- sessions -----------------------------------------------------------
@@ -411,6 +495,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
 // Public surface for the coordinator and tests.
 export { OpenCodeHttp, OpenCodeError } from "./http.js";
+export { HarnessProcess, type HarnessProcessOptions } from "./harness-process.js";
 export {
   type OpenCodeConfig,
   type ResolvedModel,
