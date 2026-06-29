@@ -2,12 +2,14 @@ import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { DomainEvent, HarnessAdapter } from "@arke/contracts";
+import type { DomainEvent, HarnessAdapter, ModelTier } from "@arke/contracts";
 import {
   OpenCodeAdapter,
   loadOpenCodeConfig,
   type DeadLetter,
   type DeadLetterSink,
+  type OpenCodeConfig,
+  type ResolvedModel,
 } from "@arke/adapter-opencode";
 import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
@@ -207,6 +209,33 @@ export class Coordinator {
     return ctx;
   }
 
+  /**
+   * After a scaffold writes the first `.arke/config.json` into a project that opened greenfield (its
+   * context holds a not-ready adapter), rebuild that context so it picks up the real harness. Without
+   * this the project still holds the NullAdapter and can't create sessions or run grounding until the
+   * coordinator restarts (PR #10 review). Re-snapshots the affected connections so the gate flips.
+   */
+  private async reloadContextIfHarnessAppeared(ctx: ProjectContext, rawPath: unknown): Promise<void> {
+    // Only the in-place case: a scaffold targeting the context's OWN root. A clone scaffolds a
+    // subdirectory that becomes its own context on project.open (which already builds fresh deps).
+    const target = resolve(ctx.root, typeof rawPath === "string" && rawPath.trim() ? rawPath : ".");
+    if (target !== ctx.root) return;
+    if (ctx.adapter.readiness?.().ready !== false) return; // harness already live → nothing to do
+    if (!existsSync(resolve(ctx.root, ".arke", "config.json"))) return; // no config was produced
+    const projectId = ctx.projectId;
+    const deps = await this.contextFactory(ctx.root);
+    await ctx.stop();
+    this.contexts.delete(projectId);
+    const fresh = this.addContext(ctx.root, deps);
+    await this.supervisorTrace.write({ kind: "supervisor.project", action: "reload", projectId, root: ctx.root });
+    await fresh.start();
+    // Push the fresh snapshot to every connection whose active project is this one (the harness gate
+    // now reflects the newly-loaded config instead of the greenfield NullAdapter).
+    for (const [c, pid] of this.activeByConn) {
+      if (pid === projectId) c.sendSnapshot(JSON.stringify(fresh.snapshotPayload()));
+    }
+  }
+
   private activeCount(projectId: string): number {
     let n = 0;
     for (const pid of this.activeByConn.values()) if (pid === projectId) n += 1;
@@ -318,7 +347,9 @@ export class Coordinator {
     }
     if (msg.type === "scaffold.run") {
       try {
-        await this.activeCtx(conn).runScaffold(msg.path, msg.tiers, msg.resumeFrom);
+        const ctx = this.activeCtx(conn);
+        await ctx.runScaffold(msg.path, msg.tiers, msg.resumeFrom);
+        await this.reloadContextIfHarnessAppeared(ctx, msg.path);
       } catch (err) {
         this.sendValidationError(ws, err);
       }
@@ -429,6 +460,31 @@ function mockEnabled(): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
+/**
+ * Logical-tier defaults used when a project has no `.arke/config.json` yet (SPEC-018). These are
+ * the gateway placeholders — never vendor model ids — so a greenfield project is NEVER blocked from
+ * scaffolding (the `config` scaffold step then writes a real `.arke/config.json` the user edits).
+ */
+const GATEWAY_TIER_DEFAULTS: ScaffoldTiers = { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" };
+
+/**
+ * Tier defaults resolved from a loaded config, as full model references (incl. fast). We keep the
+ * provider so a config seeded from these values round-trips: a registry model like
+ * `anthropic/claude-sonnet` is preserved verbatim, not flattened to its bare name (which the loader
+ * would later re-read as `gateway/claude-sonnet`). Gateway placeholders stay bare.
+ */
+function modelRef(m: ResolvedModel | undefined): string | undefined {
+  if (!m) return undefined;
+  return m.provider === "gateway" ? m.name : `${m.provider}/${m.name}`;
+}
+function tierDefaultsFrom(config: { resolveModel?: (t: ModelTier) => ResolvedModel }): ScaffoldTiers {
+  return {
+    capable: modelRef(config.resolveModel?.("capable")),
+    mid: modelRef(config.resolveModel?.("mid")),
+    fast: modelRef(config.resolveModel?.("fast")),
+  };
+}
+
 /** Build context dependencies for an arbitrary project root (used to open projects at runtime). */
 async function buildContextDeps(root: string): Promise<ContextDeps> {
   const arke = resolve(root, ".arke");
@@ -436,10 +492,20 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const grants = new GrantStore(resolve(arke, "grants.ndjson"));
   grants.load();
   if (mockEnabled()) {
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
-  const config = loadOpenCodeConfig({ configPath: resolve(arke, "config.json"), baseDir: root });
-  if (!config) return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: {} };
+  const configPath = resolve(arke, "config.json");
+  const config = loadOpenCodeConfig({ configPath, baseDir: root });
+  if (!config) {
+    // Absent config → genuine greenfield (the scaffold `config` step writes the real one). A config
+    // that EXISTS but is unparseable / has no OpenCode instance is a different situation: the config
+    // step would skip it as user-modified, so seeding gateway defaults and proceeding would let the
+    // project be classified ready while the registry is still unreadable. Surface it via the gate.
+    const reason = existsSync(configPath)
+      ? ".arke/config.json is present but invalid or has no OpenCode instance — fix or remove it to re-scaffold"
+      : undefined;
+    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
+  }
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
     sessionStore: new CoordinatorSessionStore(resolve(arke, "sessions.ndjson"), "OpenCode"),
@@ -450,29 +516,34 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
     await adapter.init();
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: {} };
+    // The config parsed fine; only the harness server failed — its tier mapping is still known.
+    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: tierDefaultsFrom(config) };
   }
-  const tierDefaults: ScaffoldTiers = {
-    capable: config.resolveModel?.("capable").name,
-    mid: config.resolveModel?.("mid").name,
-    fast: config.resolveModel?.("fast").name,
-  };
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
 }
 
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
   if (mockEnabled()) {
     console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" } };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
+    const present = existsSync(CONFIG_PATH);
     console.log(
-      "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
-        "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
+      present
+        ? "[coordinator] .arke/config.json is present but invalid or has no OpenCode instance — " +
+            "real mode, no harness (the client shows the reachability gate; fix or remove it to re-scaffold)"
+        : "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
+            "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
     );
-    return { adapter: new NullAdapter(), trace, grants, endpoints: [], tierDefaults: {} };
+    // Absent → greenfield: gateway defaults so it can scaffold (which writes the real config).
+    // Present-but-invalid → surface the reason rather than silently presenting as scaffold-ready.
+    const reason = present
+      ? ".arke/config.json is present but invalid or has no OpenCode instance — fix or remove it to re-scaffold"
+      : undefined;
+    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
@@ -483,13 +554,22 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
   console.log(
     `[coordinator] ${config.manageHarness ? "starting & probing" : "probing"} OpenCode at ${config.baseUrl} …`,
   );
-  await adapter.init();
-  const tierDefaults: ScaffoldTiers = {
-    capable: config.resolveModel?.("capable").name,
-    mid: config.resolveModel?.("mid").name,
-    fast: config.resolveModel?.("fast").name,
-  };
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults };
+  try {
+    await adapter.init();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    // The config parsed fine; only the harness server failed — keep the config-derived tier mapping
+    // (mirrors buildContextDeps) so the init screen and any child project seed the user's models.
+    console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
+    return {
+      adapter: new NullAdapter(`harness init failed: ${reason}`),
+      trace,
+      grants,
+      endpoints: [config.baseUrl],
+      tierDefaults: tierDefaultsFrom(config),
+    };
+  }
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
 }
 
 async function bootstrap(): Promise<void> {
@@ -502,7 +582,7 @@ async function bootstrap(): Promise<void> {
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
-    deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: {} };
+    deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
   await new Coordinator(deps.adapter, deps.trace, deps.grants, PORT, {
     endpoints: deps.endpoints,

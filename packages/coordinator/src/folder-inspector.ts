@@ -5,8 +5,8 @@ import { resolve } from "node:path";
  * Classifies an opened folder so the initialisation screen knows exactly what to offer
  * (SPEC-004). Deliberately a fast, deterministic sentinel check — not a full tree walk:
  *
- * - `method-ready`     — all three sentinels present → open straight into the spec library
- * - `partial-scaffold` — one or two sentinels present → explain precisely what is missing
+ * - `method-ready`     — all sentinels present → open straight into the spec library
+ * - `partial-scaffold` — some (but not all) sentinels present → explain precisely what is missing
  * - `has-code`         — source files but no sentinels → offer a full scaffold, warn about code
  * - `empty`            — no source files, no sentinels → fresh start
  *
@@ -20,8 +20,18 @@ export interface FolderClassification {
   missingSentinels: string[];
 }
 
-/** The three sentinels that together mark a repository as method-ready. */
-export const METHOD_READY_SENTINELS = [".opencode/agents", "docs/specifications", "AGENTS.md"] as const;
+/**
+ * The sentinels that together mark a repository as method-ready. `.arke/config.json` is included
+ * because the harness/model registry is required for a usable project (a scaffold that crashed after
+ * the first `config` step, or an older repo with the agent/spec sentinels but no registry, must
+ * classify as partial — so init prompts to finish — not method-ready).
+ */
+export const METHOD_READY_SENTINELS = [
+  ".arke/config.json",
+  ".opencode/agents",
+  "docs/specifications",
+  "AGENTS.md",
+] as const;
 
 /** File extensions that count as "source" when deciding has-code vs empty. */
 const SOURCE_EXTENSIONS = new Set([

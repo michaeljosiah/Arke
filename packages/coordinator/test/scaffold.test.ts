@@ -127,10 +127,38 @@ test("the repos step is skipped with a reason when git is unavailable", async ()
   assert.ok(!existsSync(resolve(root, ".repos/README.md")));
 });
 
-test("scaffolding is blocked when tier defaults are absent", async () => {
+test("a greenfield scaffold with no tier defaults is NOT blocked — it writes a config with placeholders", async () => {
   const root = fresh();
   const { runner } = harness(root);
-  await assert.rejects(() => runner.run({ tiers: { capable: "capable-tier" } }), /tier defaults not configured/);
+  // No tiers supplied at all (true greenfield): scaffolding proceeds and creates .arke/config.json
+  // with gateway placeholders the engineer edits later (revises SPEC-004 D9; SPEC-018).
+  const result = await runner.run({ tiers: {} });
+  assert.equal(result.ok, true);
+  const cfgPath = resolve(root, ".arke/config.json");
+  assert.ok(existsSync(cfgPath), ".arke/config.json should be created by the config step");
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  // serves all three logical tiers; the roster binds the six roles
+  const tiers = cfg.registry.instances[0].serves.map((s: { tier: string }) => s.tier).sort();
+  assert.deepEqual(tiers, ["capable", "fast", "mid"]);
+  assert.equal(cfg.registry.roster["spec-author"].tier, "capable");
+  assert.equal(cfg.registry.roster["implementer"].tier, "mid");
+  // placeholders, not real vendor ids
+  const capable = cfg.registry.instances[0].serves.find((s: { tier: string }) => s.tier === "capable");
+  assert.match(capable.model, /gateway\//);
+});
+
+test("the config step is idempotent — an existing user config is left untouched", async () => {
+  const root = fresh();
+  // a pre-existing, user-authored config must not be clobbered by scaffolding
+  const cfgPath = resolve(root, ".arke/config.json");
+  mkdirSync(resolve(root, ".arke"), { recursive: true });
+  writeFileSync(cfgPath, '{"mine":true}', "utf8");
+  const { runner, events } = harness(root);
+  await runner.run({ tiers: TIERS });
+  assert.equal(readFileSync(cfgPath, "utf8"), '{"mine":true}'); // untouched
+  const cfgStep = stepEvents(events).find((e) => e.step === "config" && e.status !== "running");
+  assert.equal(cfgStep?.status, "skipped");
+  assert.match(cfgStep?.detail ?? "", /user-modified/);
 });
 
 test("a failing step stops execution and records resume state", async () => {

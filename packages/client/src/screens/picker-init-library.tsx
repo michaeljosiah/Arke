@@ -31,6 +31,11 @@ export function Picker() {
   const connecting = !live && (connection === 'connecting' || connection === 'reconnecting' || connection === 'offline');
   const probe = live ? (harnessReachable ? 'reachable' : 'unreachable') : (connecting ? 'checking' : 'unreachable');
   const ready = probe === 'reachable';
+  // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
+  // project must be able to reach Initialisation even when the harness is unreachable, because the
+  // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
+  // project that's unreachable is a genuine harness-down situation and stays gated. (PR #10 review)
+  const canScaffold = ready || (!!projectState && projectState !== 'method-ready');
   const endpoint = (cp && cp.endpoint) || 'opencode://localhost:4096';
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
@@ -61,8 +66,8 @@ export function Picker() {
     e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, label),
     e('span', { style: { flex: 1 } }), extra || null);
 
-  const EntryCard = ({ icon, title, sub, onClick, primary }: any) => e('button', { onClick: ready ? onClick : undefined, disabled: !ready,
-    style: { appearance: 'none', textAlign: 'left', cursor: ready ? 'pointer' : 'not-allowed', opacity: ready ? 1 : 0.5, display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 'var(--radius-lg)', border: '1px solid ' + (primary ? 'var(--foreground)' : 'var(--border)'), background: primary ? 'var(--foreground)' : 'var(--card)', color: primary ? 'var(--background)' : 'var(--foreground)', width: '100%' } },
+  const EntryCard = ({ icon, title, sub, onClick, primary, enabled = ready }: any) => e('button', { onClick: enabled ? onClick : undefined, disabled: !enabled,
+    style: { appearance: 'none', textAlign: 'left', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.5, display: 'flex', alignItems: 'center', gap: 12, padding: '13px 14px', borderRadius: 'var(--radius-lg)', border: '1px solid ' + (primary ? 'var(--foreground)' : 'var(--border)'), background: primary ? 'var(--foreground)' : 'var(--card)', color: primary ? 'var(--background)' : 'var(--foreground)', width: '100%' } },
     e('span', { style: { display: 'flex', color: primary ? 'var(--background)' : 'var(--muted-foreground)' } }, e(Icon, { name: icon, size: 18 })),
     e('div', { style: { flex: 1, minWidth: 0 } },
       e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, title),
@@ -105,14 +110,14 @@ export function Picker() {
           : null,
 
         // 2 · entry
-        stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, 'connect a harness first')),
+        stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, canScaffold ? 'scaffold to configure a harness' : 'connect a harness first')),
         e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9, marginBottom: cloneOpen ? 10 : 18 } },
-          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Open the connected project — Arke detects and adapts', primary: true, onClick: openProject }),
-          e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a new working folder', onClick: () => setCloneOpen((o) => !o) }),
-          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', onClick: () => toInit((cp && cp.name) || 'new-service', '.') })),
+          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Open the connected project — Arke detects and adapts', primary: true, enabled: canScaffold, onClick: openProject }),
+          e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a new working folder', enabled: canScaffold, onClick: () => setCloneOpen((o) => !o) }),
+          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', enabled: canScaffold, onClick: () => toInit((cp && cp.name) || 'new-service', '.') })),
         cloneOpen ? e('div', { style: { display: 'flex', gap: 8, marginBottom: 18 } },
           e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
-          e(Button, { style: { flex: 'none' }, disabled: !ready || !cloneUrl.trim(), onClick: clone }, 'Clone')) : null,
+          e(Button, { style: { flex: 'none' }, disabled: !canScaffold || !cloneUrl.trim(), onClick: clone }, 'Clone')) : null,
 
         recentList.length
           ? e('div', null,
@@ -126,7 +131,7 @@ export function Picker() {
                     e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, (STATE_LABEL[p.lastState] || p.lastState || 'unknown') + (p.root ? ' · ' + p.root : ''))),
                   e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 }))))))
           : e('div', { style: { padding: '16px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', textAlign: 'center', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } },
-              ready ? 'No recent projects — open a folder to begin' : 'Connect a harness to see your project'),
+              ready ? 'No recent projects — open a folder to begin' : canScaffold ? 'Scaffold a new project to begin' : 'Connect a harness to see your project'),
       ),
       e('p', { style: { textAlign: 'center', margin: '16px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
     ),
@@ -134,6 +139,7 @@ export function Picker() {
 }
 
 const SCAFFOLD = [
+  { id: 'config', icon: 'settings', title: 'Project configuration', detail: '.arke/config.json — the registry: tier→model mapping (capable/mid/fast) and the role roster; vendor model ids live only here', lines: ['+ .arke/config.json'] },
   { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — six canonical roles: spec-author, architect, reviewer-a/b, implementer, researcher', lines: ['+ .opencode/agents/spec-author.md', '+ .opencode/agents/architect.md', '+ .opencode/agents/implementer.md', '+ .opencode/agents/researcher.md'] },
   { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
   { id: 'grounding', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md baseline stub, enriched in full by the researcher grounding session', lines: ['+ AGENTS.md', '+ .repos/ (read-only references)'] },
@@ -164,12 +170,17 @@ export function Initialisation() {
   const effLog = live ? ((scaffold && scaffold.log) || []) : log;
   const effRunning = live ? !!(scaffold && scaffold.running) : running;
   const effFinished = live ? !!(scaffold && scaffold.done) : finished;
+  // The coordinator now supplies gateway tier defaults even for a greenfield project, so scaffolding
+  // is no longer blocked: the `config` step writes .arke/config.json (which the engineer then edits
+  // with real models). Kept as a guard only for a truly empty registry.
   const tiersBlocked = live && (!tierDefaults || !tierDefaults.capable || !tierDefaults.mid);
-  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise.
+  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise. Three
+  // logical tiers — capable (authoring/review), mid (implementation), fast (routine/classification).
   const tierRows = live
     ? [
         { tier: 'capable', label: 'Capable tier', model: (tierDefaults && tierDefaults.capable) || 'capable — not configured' },
         { tier: 'mid', label: 'Mid tier', model: (tierDefaults && tierDefaults.mid) || 'mid — not configured' },
+        { tier: 'fast', label: 'Fast tier', model: (tierDefaults && tierDefaults.fast) || 'fast — not configured' },
       ]
     : tiers;
 

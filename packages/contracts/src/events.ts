@@ -136,8 +136,9 @@ export const TurnQuiescentEvent = base.extend({
   turnId: z.string(),
 });
 
-/** The five method-ready scaffold steps (SPEC-004). `repos` is advisory (skipped without git). */
-export const ScaffoldStep = z.enum(["agents", "specs", "grounding", "plugins", "repos"]);
+/** The method-ready scaffold steps (SPEC-004). `config` seeds `.arke/config.json` (registry +
+ *  roster); `repos` is advisory (skipped without git). */
+export const ScaffoldStep = z.enum(["config", "agents", "specs", "grounding", "plugins", "repos"]);
 export type ScaffoldStep = z.infer<typeof ScaffoldStep>;
 
 export const ScaffoldStepStatus = z.enum(["running", "done", "skipped", "error"]);

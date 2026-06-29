@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
+import { existsSync } from "node:fs";
 import { Coordinator, type ContextDeps } from "../src/server.js";
 import { MockAdapter } from "../src/mock-adapter.js";
+import { NullAdapter } from "../src/null-adapter.js";
 import { Trace } from "../src/trace.js";
 import { GrantStore } from "../src/grant-store.js";
 import { ProjectRegistry } from "../src/project-registry.js";
@@ -148,6 +150,40 @@ test("project.open refuses a path that does not exist (no phantom project on dis
   const res = await request("project.open", { path: join(tmpdir(), "arke-nope-zzz-does-not-exist") });
   assert.equal(res.ok, false);
   assert.match(res.error, /does not exist/);
+  ws.close();
+});
+
+test("a greenfield project's context reloads after the scaffold writes its config (harness appears)", async () => {
+  // PR #10 review #7: a greenfield default project opens with a not-ready adapter. Once the scaffold
+  // `config` step writes .arke/config.json, the context must rebuild and pick up the real harness —
+  // without a coordinator restart — and re-snapshot the connection so the gate flips to reachable.
+  const dir = mkdtempSync(join(tmpdir(), "arke-green-"));
+  // Stateful factory: not-ready while greenfield, ready once a config exists at the root.
+  const factory = async (root: string): Promise<ContextDeps> => ({
+    adapter: existsSync(join(root, ".arke", "config.json")) ? new MockAdapter() : new NullAdapter(),
+    trace: new Trace(join(root, ".arke", "trace.ndjson")),
+    grants: new GrantStore(join(root, ".arke", "grants.ndjson")),
+    endpoints: [],
+    tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" },
+  });
+  const c = new Coordinator(new NullAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
+    projectRoot: dir,
+    registry: new ProjectRegistry({ persist: false }),
+    contextFactory: factory,
+    tierDefaults: { capable: "capable-tier", mid: "mid-tier", fast: "fast-tier" },
+    idleTtlMs: 0,
+  });
+  const port = await c.start();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+
+  const greenfield = await waitFor((f) => f.type === "snapshot");
+  assert.equal(greenfield.harnessReachable, false); // NullAdapter → gate closed
+
+  ws.send(JSON.stringify({ type: "scaffold.run", path: "." }));
+  // the config step writes .arke/config.json → the context rebuilds → a fresh reachable snapshot
+  const reloaded = await waitFor((f) => f.type === "snapshot" && f.harnessReachable === true, 15000);
+  assert.equal(reloaded.projectId, greenfield.projectId); // same project, rebuilt in place
   ws.close();
 });
 
