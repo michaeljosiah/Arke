@@ -87,3 +87,41 @@ test("harness.reachability parses with reason + partial (SPEC-004)", () => {
   assert.equal(ev.reachable, false);
   assert.equal(ev.reason, "HTTP 503");
 });
+
+test("registry.updated parses with tier labels only — no model strings (SPEC-005)", () => {
+  const ev = DomainEvent.parse({
+    ...base,
+    type: "registry.updated",
+    instances: [
+      {
+        id: "opencode-local",
+        driver: "opencode",
+        endpoint: "http://127.0.0.1:4096",
+        reachable: true,
+        caps: ["events", "models"],
+        serves: [{ tier: "capable", label: "capable — opencode" }],
+        catalogUnavailable: false,
+      },
+    ],
+  });
+  if (ev.type !== "registry.updated") return assert.fail();
+  assert.equal(ev.instances[0]!.serves[0]!.label, "capable — opencode");
+});
+
+test("registry.warning parses each reason incl. model-not-in-catalog (SPEC-005)", () => {
+  for (const reason of [
+    "reviewer-models-identical",
+    "no-instance-for-tier",
+    "credential-missing",
+    "instance-failover",
+    "model-not-in-catalog",
+  ]) {
+    const ev = DomainEvent.parse({ ...base, type: "registry.warning", reason, detail: "x" });
+    assert.equal(ev.type, "registry.warning");
+  }
+});
+
+test("registry.warning rejects an unknown reason", () => {
+  const bad = { ...base, type: "registry.warning", reason: "totally-bogus" };
+  assert.equal(DomainEvent.safeParse(bad).success, false);
+});
