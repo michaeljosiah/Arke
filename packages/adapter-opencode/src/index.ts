@@ -8,6 +8,7 @@ import type {
   CreateSessionInput,
   DiffSummary,
   HarnessAdapter,
+  ModelInfo,
   ModelTier,
   PermissionAck,
   PermissionDecision,
@@ -48,6 +49,15 @@ import { parseSse } from "./sse.js";
  * first-class: the session ownership graph is rebuilt from REST and persisted; capabilities
  * are probed at startup; unmappable events are dead-lettered; permissions confirm by event.
  */
+/** The shape of `GET /config/providers` we read for {@link OpenCodeAdapter.listModels} (SPEC-005). */
+interface OpenCodeProvidersDoc {
+  providers?: Array<{
+    id?: string;
+    name?: string;
+    models?: Record<string, { id?: string; name?: string } | undefined>;
+  }>;
+}
+
 export interface OpenCodeAdapterDeps {
   /** Durable session ownership graph. Defaults to in-memory (durability needs a file store). */
   sessionStore?: SessionStore;
@@ -285,6 +295,30 @@ export class OpenCodeAdapter implements HarnessAdapter {
       added: list.reduce((n, f) => n + (f.additions ?? 0), 0),
       removed: list.reduce((n, f) => n + (f.deletions ?? 0), 0),
     };
+  }
+
+  /**
+   * The live model catalog the connected `opencode serve` can serve (capability: models, SPEC-005).
+   * Reads `GET /config/providers` and flattens each provider's models into `ModelInfo`. The registry
+   * validates configured `serves[].model` strings against this so a typo or unsupported model is
+   * caught at config load. (Shape matched to the OpenCode config API; live verification against a
+   * running server is pending — parsing is defensive so an unexpected shape yields an empty list.)
+   */
+  async listModels(): Promise<ModelInfo[]> {
+    const doc = await this.http.req<OpenCodeProvidersDoc>("GET", "/config/providers");
+    const providers = doc?.providers ?? [];
+    const out: ModelInfo[] = [];
+    for (const p of providers) {
+      const providerId = p.id ?? p.name;
+      if (!providerId) continue;
+      const models = p.models ?? {};
+      for (const [modelId, m] of Object.entries(models)) {
+        const id = m?.id ?? modelId;
+        if (!id) continue;
+        out.push({ id, provider: providerId, ...(m?.name ? { displayName: m.name } : {}) });
+      }
+    }
+    return out;
   }
 
   respondToPermission(decision: PermissionDecision): Promise<PermissionAck> {

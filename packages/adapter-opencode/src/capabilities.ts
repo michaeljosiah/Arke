@@ -25,6 +25,7 @@ const CAPABILITY_ENDPOINTS: ReadonlyArray<{ cap: Capability; match: RegExp }> = 
   { cap: "diff", match: /^\/session\/\*\/diff$/ },
   { cap: "permissions", match: /^\/permission\/\*\/reply$/ },
   { cap: "commands", match: /^\/session\/\*\/command$/ },
+  { cap: "models", match: /^\/config\/providers$/ }, // listModels() — provider/model catalog (SPEC-005)
 ];
 
 /** Capabilities without which the adapter cannot serve its purpose. */
