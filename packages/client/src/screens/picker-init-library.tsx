@@ -31,6 +31,13 @@ export function Picker() {
   const connecting = !live && (connection === 'connecting' || connection === 'reconnecting' || connection === 'offline');
   const probe = live ? (harnessReachable ? 'reachable' : 'unreachable') : (connecting ? 'checking' : 'unreachable');
   const ready = probe === 'reachable';
+  // Pre-snapshot, we have NO harness info yet — what's happening is the coordinator connection.
+  // Distinguish "connecting" from "can't reach the coordinator" so we don't mislabel a missing
+  // coordinator as "probing for a coding agent" (which is a harness concern, decided post-snapshot).
+  const coordinatorDown = !live && connection === 'reconnecting';
+  const checkingMsg = coordinatorDown
+    ? 'cannot reach the coordinator — is it running? (npm run dev:coordinator, or arke up)'
+    : 'connecting to the coordinator…';
   const endpoint = (cp && cp.endpoint) || 'opencode://localhost:4096';
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
@@ -83,8 +90,8 @@ export function Picker() {
         stepNum('1', 'Harness', ready ? e('button', { onClick: () => setSetup((o) => !o), style: linkBtn }, setup ? 'Hide' : 'Change host') : null),
         probe === 'checking'
           ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
-              e(StatusDot, { status: 'running', pulse: true }),
-              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'probing for a coding agent on the host…'))
+              e(StatusDot, { status: coordinatorDown ? 'idle' : 'running', pulse: !coordinatorDown }),
+              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: coordinatorDown ? 'var(--warning, #B45309)' : 'var(--muted-foreground)' } }, checkingMsg))
           : ready
             ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
                 e(StatusDot, { status: 'agree' }),
