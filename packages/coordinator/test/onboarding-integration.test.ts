@@ -150,18 +150,19 @@ test("project.open resolves the active project; a different id is refused (SPEC-
   ws.send(JSON.stringify({ type: "request", id: "o2", op: "project.open", args: { projectId: "deadbeefdeadbeef" } }));
   const err = await waitFor((f) => f.type === "response" && f.id === "o2");
   assert.equal(err.ok, false);
-  assert.match(err.error, /not yet supported|not the active project/);
+  assert.match(err.error, /unknown project/);
   ws.close();
 });
 
-test("project.forget refuses the active project (SPEC-018)", async () => {
+test("project.forget refuses an open project (must close first) (SPEC-018)", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());
   const { ws, waitFor } = await connect(port);
   const snap = await waitFor((f) => f.type === "snapshot");
+  // the default project is open, so it cannot be forgotten
   ws.send(JSON.stringify({ type: "request", id: "f1", op: "project.forget", args: { projectId: snap.projectId } }));
   const res = await waitFor((f) => f.type === "response" && f.id === "f1");
   assert.equal(res.ok, false);
-  assert.match(res.error, /cannot forget the active project/);
+  assert.match(res.error, /close the project before forgetting/);
   ws.close();
 });
