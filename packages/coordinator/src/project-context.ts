@@ -319,6 +319,7 @@ export class ProjectContext {
     const tiers: ScaffoldTiers = {
       capable: typeof supplied.capable === "string" ? supplied.capable : this.tierDefaults.capable,
       mid: typeof supplied.mid === "string" ? supplied.mid : this.tierDefaults.mid,
+      fast: typeof supplied.fast === "string" ? supplied.fast : this.tierDefaults.fast,
     };
     const resumeFrom = typeof rawResumeFrom === "string" ? (rawResumeFrom as ScaffoldStep) : undefined;
     const runner = new ScaffoldRunner({
