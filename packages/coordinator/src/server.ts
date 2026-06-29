@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
@@ -21,6 +21,7 @@ import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
+import { NullAdapter } from "./null-adapter.js";
 import { ClientConnection } from "./client-connection.js";
 import { CoordinatorSessionStore } from "./session-store.js";
 import { GrantStore } from "./grant-store.js";
@@ -210,6 +211,12 @@ export class Coordinator {
       JSON.stringify({
         type: "snapshot",
         cards,
+        // The single project this coordinator serves — name + canonical path are display-safe
+        // (NFR-1 permits the project name and folder path). The coordinator is single-project;
+        // there is no multi-project list.
+        projectName: basename(this.projectRoot),
+        projectPath: this.projectRoot,
+        harness: this.adapter.id,
         harnessReachable: this.harnessReachable,
         ...(this.harnessReachabilityReason ? { harnessReachabilityReason: this.harnessReachabilityReason } : {}),
         ...(this.harnessPartial ? { harnessReachabilityPartial: true } : {}),
@@ -670,12 +677,29 @@ interface BuiltAdapter {
   tierDefaults: ScaffoldTiers;
 }
 
-/** Build the harness adapter from config, falling back to the mock when unconfigured. */
+/** True only when mock data is explicitly opted into (ARKE_MOCK=1|true|yes). Off by default. */
+function mockEnabled(): boolean {
+  const v = (process.env.ARKE_MOCK ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * Build the harness adapter. Real by default: the MockAdapter (fabricated demo data) is used ONLY
+ * when `ARKE_MOCK` is explicitly set. With no harness configured we serve the honest {@link
+ * NullAdapter} — a real, empty state behind the reachability gate — never fabricated data.
+ */
 async function buildAdapter(trace: Trace): Promise<BuiltAdapter> {
+  if (mockEnabled()) {
+    console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
+    return { adapter: new MockAdapter(), endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier" } };
+  }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
-    console.log("[coordinator] no OpenCode instance in .arke/config.json — using MockAdapter");
-    return { adapter: new MockAdapter(), endpoints: [], tierDefaults: {} };
+    console.log(
+      "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
+        "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
+    );
+    return { adapter: new NullAdapter(), endpoints: [], tierDefaults: {} };
   }
 
   const deadLetterSink: DeadLetterSink = {
@@ -708,8 +732,10 @@ async function bootstrap(): Promise<void> {
     built = await buildAdapter(trace);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[coordinator] adapter init failed (${reason}); falling back to MockAdapter`);
-    built = { adapter: new MockAdapter(), endpoints: [], tierDefaults: {} };
+    // Never fall back to fabricated data on failure — that is exactly how mock data leaks in.
+    // Serve the honest empty state with the failure reason behind the reachability gate.
+    console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
+    built = { adapter: new NullAdapter(`harness init failed: ${reason}`), endpoints: [], tierDefaults: {} };
   }
   await new Coordinator(built.adapter, trace, grants, PORT, {
     endpoints: built.endpoints,

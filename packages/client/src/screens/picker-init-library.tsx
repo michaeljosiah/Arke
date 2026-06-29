@@ -59,9 +59,10 @@ export function HarnessGuidance() {
 
 export function Picker() {
   const live = useStore((s) => s.live);
+  const connection = useStore((s) => s.connection);
+  const connectedProject = useStore((s) => s.connectedProject);
+  const projectState = useStore((s) => s.projectState);
   const harnessReachable = useStore((s) => s.harnessReachable);
-  const [host, setHost] = React.useState('localhost:4096');
-  const [connecting, setConnecting] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
   // Clone a remote repository: the coordinator validates the URL (https/ssh only) and target,
   // runs git clone on the host, then folder-state detection (SPEC-004). The client only sends intent.
@@ -73,42 +74,49 @@ export function Picker() {
     store.set({ project: { name, specs: 0 }, view: 'init' });
   };
   // The reachability gate (SPEC-004): once live, no project action is shown until a harness is
-  // confirmed reachable. In the mock-only prototype `harnessReachable` defaults true, so the
-  // picker shows directly.
+  // confirmed reachable. In the mock-only prototype `harnessReachable` defaults true.
   if (live && !harnessReachable) return e(HarnessGuidance);
-  const projects = [
-    { name: 'asset-platform', specs: 14, status: 'connected', meta: 'github.com/acme/asset-platform' },
-    { name: 'billing-core', specs: 6, status: 'connected', meta: 'github.com/acme/billing-core' },
-    { name: 'identity', specs: 9, status: 'connected', meta: 'github.com/acme/identity' },
-  ];
-  const open = (p) => store.set({ project: p, view: 'cockpit', activeSpec: 'SPEC-014' });
+
+  // The coordinator is single-project: it serves exactly one project (its ARKE_PROJECT_ROOT).
+  // There is no multi-project list — the picker reflects the real connected project + state.
+  const connected = live;
+  const cp = connectedProject;
+  const connLabel = connected ? 'connected' : (connection === 'connecting' || connection === 'reconnecting' ? 'connecting…' : 'not connected');
+  const connDot = connected ? 'agree' : (connection === 'connecting' || connection === 'reconnecting' ? 'running' : 'idle');
+  const isMock = (cp && cp.harness) === 'Mock';
+  const STATE_LABEL = { 'method-ready': 'method-ready · open the spec library', 'partial-scaffold': 'partial scaffold · finish setup', 'has-code': 'existing code · scaffold the method', 'empty': 'empty · ready to scaffold' };
+  const openConnected = () => {
+    if (!cp) return;
+    store.set({ project: { name: cp.name, specs: 0 }, view: projectState === 'method-ready' ? 'library' : 'init' });
+  };
+
   return e('div', { style: { height: '100%', width: '100%', background: 'var(--muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto' } },
     e('div', { style: { width: 460, padding: 32 } },
       e('div', { style: { display: 'flex', justifyContent: 'center', marginBottom: 16 } },
         e('div', { style: { background: 'var(--primary)', borderRadius: 'var(--radius-xl)', padding: '14px 22px' } }, e(Wordmark, { size: 26, onDark: true }))),
       e('p', { style: { textAlign: 'center', margin: '0 0 24px', fontFamily: 'var(--font-sans)', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Specification Orchestrator'),
       e(Card, { padding: 22 },
-        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)', marginBottom: 8 } }, 'Harness host'),
-        e('div', { style: { display: 'flex', gap: 8, marginBottom: 22 } },
-          e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'opencode://', value: host, onChange: (ev) => setHost(ev.target.value) })),
-          e(Button, { variant: 'secondary', style: { flex: 'none' }, onClick: () => { setConnecting(true); setTimeout(() => setConnecting(false), 700); } }, connecting ? 'Connecting…' : 'Connect')),
-        e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 } },
-          e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' } }, 'Projects'),
-          e('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, e(StatusDot, { status: 'agree' }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, 'connected'))),
-        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9 } },
-          projects.map((p) => e('button', { key: p.name, onClick: () => open(p), style: { appearance: 'none', textAlign: 'left', cursor: 'pointer', background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, transition: 'var(--transition-control)' },
-            onMouseEnter: (ev) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev) => ev.currentTarget.style.background = 'var(--background)' },
-            e('span', { style: { color: 'var(--muted-foreground)', display: 'flex' } }, e(Icon, { name: 'folder', size: 18 })),
-            e('div', { style: { flex: 1, minWidth: 0 } },
-              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, p.name),
-              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, p.specs + ' specifications · ' + p.meta)),
-            e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 })))),
-        ),
+        // Real coordinator connection status (not a cosmetic host field).
+        e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isMock ? 8 : 18 } },
+          e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' } }, 'Coordinator'),
+          e('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, e(StatusDot, { status: connDot }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, connLabel + (connected && cp && cp.harness ? ' · ' + cp.harness : '')))),
+        isMock ? e('p', { style: { margin: '0 0 18px', padding: '8px 10px', borderRadius: 'var(--radius-md)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--warning, #B45309)', lineHeight: 1.5 } }, 'mock harness — no OpenCode configured (.arke/config.json). Onboarding & scaffolding are real; agent sessions need a live OpenCode server.') : null,
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)', marginBottom: 10 } }, 'Project'),
+        connected && cp
+          ? e('button', { onClick: openConnected, style: { width: '100%', appearance: 'none', textAlign: 'left', cursor: 'pointer', background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, transition: 'var(--transition-control)' },
+              onMouseEnter: (ev: any) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev: any) => ev.currentTarget.style.background = 'var(--background)' },
+              e('span', { style: { color: 'var(--muted-foreground)', display: 'flex' } }, e(Icon, { name: 'folder', size: 18 })),
+              e('div', { style: { flex: 1, minWidth: 0 } },
+                e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, cp.name),
+                e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, (STATE_LABEL[projectState] || (projectState || 'inspecting…')) + (cp.path ? ' · ' + cp.path : ''))),
+              e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 })))
+          : e('div', { style: { padding: '16px 14px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.6 } },
+              connected ? 'connected, no project resolved' : 'no coordinator — start it: npm run dev:coordinator'),
         e('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
           e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'git://', placeholder: 'https://… or ssh://… to clone', value: cloneUrl, onChange: (ev) => setCloneUrl(ev.target.value) })),
-          e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: !cloneUrl.trim(), onClick: clone }, 'Clone')),
-        e('button', { onClick: () => store.set({ project: { name: 'new-service', specs: 0 }, view: 'init' }), style: { marginTop: 10, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--muted-foreground)' } },
-          e(Icon, { name: 'plus', size: 15 }), 'Initialise a new project'),
+          e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: !connected || !cloneUrl.trim(), onClick: clone }, 'Clone')),
+        e('button', { disabled: !connected, onClick: () => connected && store.set({ project: { name: (cp && cp.name) || 'new-service', specs: 0 }, view: 'init' }), style: { marginTop: 10, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', background: 'transparent', cursor: connected ? 'pointer' : 'not-allowed', opacity: connected ? 1 : 0.5, fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--muted-foreground)' } },
+          e(Icon, { name: 'plus', size: 15 }), 'Initialise / scaffold this project'),
       ),
       e('p', { style: { textAlign: 'center', margin: '18px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
     ),
