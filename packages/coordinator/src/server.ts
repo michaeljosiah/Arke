@@ -197,11 +197,24 @@ export class Coordinator {
   private async dispatch(op: string, rawArgs: unknown): Promise<unknown> {
     const a = (rawArgs ?? {}) as Record<string, unknown>;
     switch (op) {
-      case "session.create":
-        return this.adapter.createSession({
-          specId: String(a.specId ?? ""),
-          ...(a.parent ? { parent: String(a.parent) } : {}),
+      case "session.create": {
+        const specId = String(a.specId ?? "");
+        const parent = a.parent ? String(a.parent) : undefined;
+        const ref = await this.adapter.createSession({ specId, ...(parent ? { parent } : {}) });
+        // Fold a normalized idle status so the new session shows up in session.list and for live
+        // clients immediately, even on adapters that emit no creation event (e.g. the mock).
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "session.status",
+          sessionId: ref.sessionId,
+          specId,
+          kind: parent ? "task" : "spec",
+          status: "idle",
         });
+        return ref;
+      }
       case "session.list":
         return this.read.snapshot();
       case "prompt.send":
@@ -264,13 +277,16 @@ export class Coordinator {
     const out: AgentImage[] = [];
     for (const name of readdirSync(base)) {
       const d = resolve(base, name);
+      // Only the filesystem probe is guarded; a directory that *is* an image (has config.yaml)
+      // but fails to parse must surface as an error, not be silently skipped — otherwise
+      // `agents.materialize` reports success while leaving a required role unmaterialised.
+      let isImage = false;
       try {
-        if (statSync(d).isDirectory() && existsSync(resolve(d, "config.yaml"))) {
-          out.push(loadAgentImage(d));
-        }
+        isImage = statSync(d).isDirectory() && existsSync(resolve(d, "config.yaml"));
       } catch {
-        // skip an unreadable/invalid image directory
+        isImage = false;
       }
+      if (isImage) out.push(loadAgentImage(d)); // throws on a malformed image → fails the command
     }
     return out;
   }

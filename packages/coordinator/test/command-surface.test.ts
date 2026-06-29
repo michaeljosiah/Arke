@@ -52,6 +52,21 @@ test("session.create returns a session id over the command surface", async () =>
   ws.close();
 });
 
+test("a created session immediately appears in session.list", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, request } = await connect(port);
+  const created = await request("session.create", { specId: "SPEC-NEW" });
+  assert.equal(created.ok, true);
+  const id = created.result.sessionId;
+  const list = await request("session.list");
+  assert.ok(
+    list.result.some((card: { id: string }) => card.id === id),
+    "session.list should include the just-created session",
+  );
+  ws.close();
+});
+
 test("an unknown op returns a structured error, not a crash", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());
