@@ -13,8 +13,13 @@ import { z } from "zod";
 export const SpecStatus = z.enum(["draft", "in-review", "approved", "merged"]);
 export type SpecStatus = z.infer<typeof SpecStatus>;
 
-/** Logical model tiers. Agents reference tiers, resolved per project to a gateway (FR-4, D10). */
-export const ModelTier = z.enum(["capable", "mid"]);
+/**
+ * Logical model tiers. Agents reference tiers, resolved per project to a gateway (FR-4, D10):
+ * - `capable` — authoring & review (the strongest model)
+ * - `mid`     — implementation
+ * - `fast`    — routine, classification & projection drafts (the cheapest/quickest model)
+ */
+export const ModelTier = z.enum(["capable", "mid", "fast"]);
 export type ModelTier = z.infer<typeof ModelTier>;
 
 /** Frontmatter block at the head of every specification file. */

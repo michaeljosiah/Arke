@@ -201,7 +201,7 @@ export class ProjectContext {
         const input = {
           sessionId: String(a.sessionId ?? ""),
           agent: String(a.agent ?? ""),
-          tier: a.tier === "capable" ? ("capable" as const) : ("mid" as const),
+          tier: a.tier === "capable" ? ("capable" as const) : a.tier === "fast" ? ("fast" as const) : ("mid" as const),
           parts: [{ type: "text" as const, text: String(a.message ?? "") }],
           ...(a.correlationId ? { correlationId: String(a.correlationId) } : {}),
         };

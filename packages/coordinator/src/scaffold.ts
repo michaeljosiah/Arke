@@ -24,7 +24,7 @@ import type { Trace } from "./trace.js";
  * can resume from the last incomplete step.
  */
 
-export const SCAFFOLD_STEP_ORDER: ScaffoldStep[] = ["agents", "specs", "grounding", "plugins", "repos"];
+export const SCAFFOLD_STEP_ORDER: ScaffoldStep[] = ["config", "agents", "specs", "grounding", "plugins", "repos"];
 
 /** Per-artefact outcome within a step. */
 export type ArtefactOutcome = "created" | "overwritten" | "skipped-uptodate" | "skipped-user-modified";
@@ -64,6 +64,7 @@ interface ScaffoldManifest {
 export interface ScaffoldTiers {
   capable?: string;
   mid?: string;
+  fast?: string;
 }
 
 export interface ScaffoldRunOptions {
@@ -107,10 +108,15 @@ export class ScaffoldRunner {
    * `scaffold.step` `error` event so the client can offer "Retry from step".
    */
   async run(opts: ScaffoldRunOptions): Promise<ScaffoldResult> {
-    // Block on absent tier defaults rather than writing unusable roster files (SPEC-004 D9).
-    if (!opts.tiers.capable || !opts.tiers.mid) {
-      throw new Error("tier defaults not configured — configure the registry before scaffolding (SPEC-005)");
-    }
+    // Greenfield is NOT blocked on a missing registry (revises SPEC-004 D9): the `config` step
+    // creates `.arke/config.json` with the logical-tier roster + model placeholders, and the agent
+    // roster references logical tiers (constant) — never vendor models — so nothing unusable is
+    // written. Any tier value not supplied falls back to a gateway placeholder the user edits later.
+    const tiers: ScaffoldTiers = {
+      capable: opts.tiers.capable ?? "gateway/capable-tier",
+      mid: opts.tiers.mid ?? "gateway/mid-tier",
+      fast: opts.tiers.fast ?? "gateway/fast-tier",
+    };
 
     const manifest = this.readManifest();
     const startIndex = opts.resumeFrom ? SCAFFOLD_STEP_ORDER.indexOf(opts.resumeFrom) : 0;
@@ -122,7 +128,7 @@ export class ScaffoldRunner {
       stepsRun.push(step);
       await this.emitStep(step, "running");
       try {
-        const result = await this.runStep(step, manifest, opts.tiers);
+        const result = await this.runStep(step, manifest, tiers);
         results.push(result);
         manifest.lastCompletedStep = step;
         this.writeManifest(manifest); // atomic, after each successful step
@@ -278,6 +284,8 @@ export class ScaffoldRunner {
 
   private filesFor(step: ScaffoldStep, tiers: ScaffoldTiers): Array<{ relPath: string; content: string }> {
     switch (step) {
+      case "config":
+        return [{ relPath: ".arke/config.json", content: configFile(tiers) }];
       case "agents":
         return ROSTER.map((r) => ({
           relPath: `.opencode/agents/${r.name}.md`,
@@ -364,6 +372,46 @@ This agent references the logical model tier \`${r.tier}\`; the concrete model i
 project registry (\`.arke/config.json\`), never hardcoded here. Edit the registry, not this file,
 to change which model serves this tier.
 `;
+}
+
+/**
+ * The project's `.arke/config.json` (SPEC-005 registry + roster) created during init. Maps each
+ * logical tier (capable/mid/fast) to a concrete model and binds the six roles to their tiers. The
+ * tier model values are gateway placeholders for a greenfield project — the engineer replaces them
+ * with real vendor model ids, which live ONLY in this file (behind the gateway), never in the
+ * agent files or the client. Process-wide coordinator settings come from the global/launch source.
+ */
+function configFile(tiers: ScaffoldTiers): string {
+  const roster: Record<string, { tier: ModelTier }> = {};
+  for (const r of ROSTER) roster[r.name] = { tier: r.tier };
+  const config = {
+    $comment:
+      "Arke project config, created by `arke` scaffolding. registry.instances[].serves maps each " +
+      "logical tier to a concrete model — replace the gateway placeholders with your real vendor " +
+      "model ids (capable=authoring/review, mid=implementation, fast=routine/classification). " +
+      "Vendor model ids live ONLY here. Process-wide coordinator settings (port, maxProjects, OTLP) " +
+      "come from the global/launch source, not this file (SPEC-005/018).",
+    registry: {
+      instances: [
+        {
+          id: "opencode-local",
+          driver: "opencode",
+          host: "localhost",
+          port: 4096,
+          cwd: ".",
+          credentialsRef: "opencode/gateway",
+          serves: [
+            { tier: "capable", model: tiers.capable ?? "gateway/capable-tier" },
+            { tier: "mid", model: tiers.mid ?? "gateway/mid-tier" },
+            { tier: "fast", model: tiers.fast ?? "gateway/fast-tier" },
+          ],
+        },
+      ],
+      roster,
+    },
+    settings: { permissionTimeoutMs: 120000 },
+  };
+  return JSON.stringify(config, null, 2) + "\n";
 }
 
 const SPEC_TEMPLATE = `---
