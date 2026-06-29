@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { SpecStatus } from "./spec.js";
+import { ModelTier, SpecStatus } from "./spec.js";
+import { Capability } from "./adapter.js";
 
 /**
  * The canonical, normalized domain-event model (PRD §8.5, §21.1).
@@ -21,6 +22,7 @@ export const SessionStatus = z.enum([
   "waiting", // blocked on a human (permission/elicitation)
   "error",
   "done",
+  "interrupted", // its harness instance was lost mid-session; not migrated (SPEC-005, NFR-4)
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
@@ -179,6 +181,47 @@ export const HarnessReachabilityEvent = base.extend({
   reason: z.string().optional(),
 });
 
+/**
+ * A live projection of the harness/model registry (SPEC-005, FR-4/FR-19). The client renders the
+ * harnesses screen from this — never from a static seed. Carries instance ids, drivers, endpoints,
+ * reachability, capability flags, and tier *labels* only: no `credentialsRef`, no credential value,
+ * and no vendor model string ever appears here.
+ */
+export const RegistryUpdatedEvent = base.extend({
+  type: z.literal("registry.updated"),
+  instances: z.array(
+    z.object({
+      id: z.string(),
+      driver: z.string(),
+      endpoint: z.string(),
+      reachable: z.boolean(),
+      // Reuse the adapter Capability + ModelTier schemas so a malformed projection (e.g.
+      // caps: ["eventz"] or tier: "turbo") is rejected at the boundary, not rendered.
+      caps: z.array(Capability),
+      // serves carries tier labels only — never a vendor model string or a credentialsRef.
+      serves: z.array(z.object({ tier: ModelTier, label: z.string() })),
+      /** True when the backend exposes no model catalog, so serves were trusted unvalidated. */
+      catalogUnavailable: z.boolean().optional(),
+    }),
+  ),
+});
+
+/**
+ * A registry health/config warning (SPEC-005). `detail` is human-readable and MUST NOT contain a
+ * credential value or a vendor model id beyond a label the operator already authored.
+ */
+export const RegistryWarningEvent = base.extend({
+  type: z.literal("registry.warning"),
+  reason: z.enum([
+    "reviewer-models-identical",
+    "no-instance-for-tier",
+    "credential-missing",
+    "instance-failover",
+    "model-not-in-catalog", // a configured serves[].model is absent from the instance's live catalog
+  ]),
+  detail: z.string().optional(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -194,6 +237,8 @@ export const DomainEvent = z.discriminatedUnion("type", [
   ScaffoldStepEvent,
   ScaffoldDoneEvent,
   HarnessReachabilityEvent,
+  RegistryUpdatedEvent,
+  RegistryWarningEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 

@@ -39,6 +39,17 @@ test("a fully-featured server advertises every capability and is ready", async (
   }
 });
 
+test("the models capability is advertised when /config/providers is present (SPEC-005)", async () => {
+  const paths = { ...FULL_PATHS, "/config/providers": {} };
+  const { capabilities } = await probeCapabilities(client({ paths }));
+  assert.equal(capabilities.has("models"), true);
+});
+
+test("the models capability is omitted when /config/providers is absent (SPEC-005)", async () => {
+  const { capabilities } = await probeCapabilities(client({})); // FULL_PATHS has no providers
+  assert.equal(capabilities.has("models"), false);
+});
+
 test("a missing optional endpoint is omitted, not assumed", async () => {
   const paths = { ...FULL_PATHS };
   delete (paths as Record<string, unknown>)["/session/{id}/diff"];
