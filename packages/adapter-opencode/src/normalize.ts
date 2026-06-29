@@ -239,19 +239,39 @@ export function normalize(
 
     // ---- streaming transcript (SPEC-003) ----
     case "message.part.updated": {
-      // OpenCode 1.17.11: properties = { sessionID, part: { type, text, messageID, id } }. The part
-      // carries the message's full current text (a snapshot, not a delta), so we map it to a
-      // message.updated (replace) — the read model re-converges on the latest text. The role lives
-      // on message.updated.info, remembered in state; absent that we assume assistant.
+      // OpenCode 1.17.11: properties = { sessionID, part: { type, text, messageID } }, where `text`
+      // is the message's FULL current text (a snapshot). We map it to a message.updated (replace) so
+      // the read model re-converges on the latest text; the role lives on message.updated.info,
+      // remembered in state (assistant if unseen).
+      //
+      // Older OpenCode builds stream this frame as an incremental DELTA (`part.delta` / top-level
+      // `delta`) with no full `text`. We still support that: accumulate the delta onto the prior
+      // text for the message so those servers don't lose transcript content. A frame carrying
+      // neither text nor delta is ignored, never coerced to "" (which would wipe the transcript).
       const sid = sessionIdOf(p);
-      const part = (p.part ?? {}) as { text?: string; type?: string; messageID?: string };
-      const messageId = (part.messageID ?? p.message_id ?? p.messageID) as string | undefined;
+      const part = (p.part ?? {}) as { text?: string; delta?: string; type?: string; messageID?: string };
+      const messageId = (part.messageID ?? p.message_id ?? p.messageID ?? p.messageId) as
+        | string
+        | undefined;
       if (!sid || !messageId) {
         return { kind: "dead-letter", reason: "message.part.updated without session/message id" };
       }
-      if (part.type !== "text") return { kind: "ignore" }; // tool / reasoning parts not mapped yet
+      if (part.type && part.type !== "text") return { kind: "ignore" }; // tool / reasoning parts
       const role = state.roleByMessage.get(messageId) ?? "assistant";
-      const text = String(part.text ?? "");
+      let text: string;
+      if (typeof part.text === "string") {
+        text = part.text; // 1.17.11 full snapshot (an empty string is a valid snapshot)
+      } else {
+        const delta =
+          typeof part.delta === "string"
+            ? part.delta
+            : typeof p.delta === "string"
+              ? (p.delta as string)
+              : undefined;
+        if (delta === undefined) return { kind: "ignore" }; // nothing to add — don't clobber
+        const prior = state.lastBySession.get(sid);
+        text = (prior?.messageId === messageId ? prior.text : "") + delta; // older delta shape
+      }
       state.lastBySession.set(sid, { messageId, text, role });
       return {
         kind: "event",
@@ -269,18 +289,43 @@ export function normalize(
       };
     }
     case "message.updated": {
-      // OpenCode 1.17.11: properties = { sessionID, info: { id, role, … } }. This frame carries the
-      // message's identity/role but NOT its text (text streams via the parts). Record the role so
-      // the part frames can attribute it correctly; emit nothing on its own.
+      // OpenCode 1.17.11: properties = { sessionID, info: { id, role, … } } — identity/role only,
+      // NO text (text streams via the parts). Record the role so the part frames attribute correctly.
+      //
+      // Older OpenCode builds carry the message's full text + isStreaming on the message itself
+      // (`properties.message.text` / `.isStreaming`). When the frame already carries text, emit a
+      // message.updated so that completed snapshot and its stream-close still reach the read model.
       const sid = sessionIdOf(p);
-      const info = (p.info ?? p.message ?? {}) as { id?: string; role?: string };
-      const messageId = (info.id ?? p.message_id ?? p.messageID) as string | undefined;
+      const info = (p.info ?? p.message ?? {}) as {
+        id?: string;
+        role?: string;
+        text?: string;
+        isStreaming?: boolean;
+      };
+      const messageId = (info.id ?? p.message_id ?? p.messageID ?? p.messageId) as string | undefined;
       if (!sid || !messageId) {
         return { kind: "dead-letter", reason: "message.updated without session/message id" };
       }
       const role = info.role === "user" || info.role === "tool" ? info.role : "assistant";
       state.roleByMessage.set(messageId, role);
-      return { kind: "ignore" };
+      if (typeof info.text !== "string") return { kind: "ignore" }; // 1.17.11: text comes via parts
+      const text = info.text;
+      const isStreaming = info.isStreaming === true; // older completed snapshots set this false
+      state.lastBySession.set(sid, { messageId, text, role });
+      return {
+        kind: "event",
+        event: {
+          ...env,
+          correlationId: messageId,
+          type: "message.updated",
+          sessionId: sid,
+          messageId,
+          role,
+          text,
+          toolCalls: [],
+          isStreaming,
+        },
+      };
     }
 
     default:

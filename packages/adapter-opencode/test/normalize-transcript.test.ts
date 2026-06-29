@@ -99,6 +99,57 @@ test("session.idle finalises the last message (closes streaming) and emits turn.
   assert.equal(quies.turnId, "m9");
 });
 
+// ---- backward-compat across OpenCode versions (PR #8 review) ----
+
+test("an older message.updated carrying full text + isStreaming:false is emitted, not dropped", () => {
+  const state = createNormalizeState();
+  const out = normalize(
+    {
+      type: "message.updated",
+      properties: { sessionID: "s1", message: { id: "m1", role: "assistant", text: "done", isStreaming: false } },
+    },
+    noIdentity,
+    HARNESS,
+    state,
+  );
+  if (out.kind !== "event" || out.event.type !== "message.updated") return assert.fail();
+  assert.equal(out.event.text, "done");
+  assert.equal(out.event.role, "assistant");
+  assert.equal(out.event.isStreaming, false);
+  assert.equal(out.event.correlationId, "m1");
+});
+
+test("message.part.updated accepts lower-camel ids (properties.sessionId + properties.messageId)", () => {
+  const out = normalize(
+    { type: "message.part.updated", properties: { sessionId: "s1", messageId: "m2", part: { type: "text", text: "hi" } } },
+    noIdentity,
+    HARNESS,
+  );
+  if (out.kind !== "event" || out.event.type !== "message.updated") return assert.fail();
+  assert.equal(out.event.messageId, "m2");
+  assert.equal(out.event.text, "hi");
+});
+
+test("an older delta-shaped message.part.updated accumulates instead of clobbering with empty text", () => {
+  const state = createNormalizeState();
+  normalize({ type: "message.updated", properties: { sessionID: "s1", info: { id: "m3", role: "assistant" } } }, noIdentity, HARNESS, state);
+  const a = normalize({ type: "message.part.updated", properties: { sessionID: "s1", part: { type: "text", delta: "PO", messageID: "m3" } } }, noIdentity, HARNESS, state);
+  const b = normalize({ type: "message.part.updated", properties: { sessionID: "s1", part: { type: "text", delta: "NG", messageID: "m3" } } }, noIdentity, HARNESS, state);
+  if (a.kind !== "event" || a.event.type !== "message.updated") return assert.fail();
+  if (b.kind !== "event" || b.event.type !== "message.updated") return assert.fail();
+  assert.equal(a.event.text, "PO");
+  assert.equal(b.event.text, "PONG"); // accumulated, not "NG"
+});
+
+test("a message.part.updated with neither text nor delta is ignored (never coerced to empty)", () => {
+  const out = normalize(
+    { type: "message.part.updated", properties: { sessionID: "s1", part: { type: "text", messageID: "m4" } } },
+    noIdentity,
+    HARNESS,
+  );
+  assert.equal(out.kind, "ignore");
+});
+
 test("message.part.updated without ids is dead-lettered", () => {
   const out = normalize({ type: "message.part.updated", properties: { sessionID: "s1", part: {} } }, noIdentity, HARNESS);
   assert.equal(out.kind, "dead-letter");

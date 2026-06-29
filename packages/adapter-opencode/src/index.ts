@@ -361,11 +361,22 @@ export class OpenCodeAdapter implements HarnessAdapter {
         return finished ? [finished] : [];
       }
       case "events": {
-        // One frame fanning to several (e.g. session.idle → finalise + turn.quiescent).
+        // One frame fanning to several (e.g. session.idle → finalise + turn.quiescent). Snapshot
+        // the in-flight turn correlations BEFORE observe() runs: session.status idle clears
+        // activeTurn (the turn closes), so without this the fanned-out turn.quiescent — which on the
+        // idle-only / empty-response path carries no correlationId of its own — would lose the
+        // dispatched id, and an async caller couldn't match the receipt back to its request.
+        const corrFallback = new Map<string, string>();
+        for (const ev of outcome.events) {
+          if ("sessionId" in ev && !ev.correlationId && !corrFallback.has(ev.sessionId)) {
+            const corr = this.activeTurn.get(ev.sessionId);
+            if (corr) corrFallback.set(ev.sessionId, corr);
+          }
+        }
         const out: DomainEvent[] = [];
         for (const ev of outcome.events) {
           this.observe(ev);
-          const finished = this.finishEvent(ev, raw);
+          const finished = this.finishEvent(ev, raw, corrFallback);
           if (finished) out.push(finished);
         }
         return out;
@@ -383,12 +394,17 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   /** Attach correlation id (where applicable) and validate at the boundary before emission. */
-  private finishEvent(event: DomainEvent, raw: unknown): DomainEvent | null {
+  private finishEvent(
+    event: DomainEvent,
+    raw: unknown,
+    corrFallback?: Map<string, string>,
+  ): DomainEvent | null {
     let candidate: DomainEvent = event;
     // Attach the in-flight turn's correlation id, unless the event already carries one
-    // (message.* events derive it from their own messageID in the normaliser).
+    // (message.* events derive it from their own messageID in the normaliser). The fallback map
+    // preserves the correlation across a fan-out whose earlier event (idle) already cleared activeTurn.
     if ("sessionId" in event && !event.correlationId) {
-      const corr = this.activeTurn.get(event.sessionId);
+      const corr = this.activeTurn.get(event.sessionId) ?? corrFallback?.get(event.sessionId);
       if (corr) candidate = { ...event, correlationId: corr };
     }
     const parsed = DomainEvent.safeParse(candidate);
