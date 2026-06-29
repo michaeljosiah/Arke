@@ -1,13 +1,22 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
-import { DomainEvent, type HarnessAdapter, type PermissionDecision } from "@arke/contracts";
+import {
+  DomainEvent,
+  type AgentImage,
+  type HarnessAdapter,
+  type PermissionAck,
+  type PermissionDecision,
+} from "@arke/contracts";
 import {
   OpenCodeAdapter,
   loadOpenCodeConfig,
+  resolveDirectory,
   type DeadLetter,
   type DeadLetterSink,
 } from "@arke/adapter-opencode";
+import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
@@ -96,11 +105,13 @@ export class Coordinator {
     });
     // Add before sending the snapshot so live events queue (gated) rather than being missed.
     this.clients.add(conn);
+    // Attach listeners synchronously — BEFORE any await — so a client that sends a request
+    // immediately on open (e.g. the CLI) is not dropped while the snapshot is being prepared.
+    ws.on("close", () => this.clients.delete(conn));
+    ws.on("message", (raw) => void this.onClientMessage(ws, raw.toString()));
     const cards = this.read.snapshot();
     await this.trace.write({ kind: "snapshot", cardCount: cards.length });
     conn.sendSnapshot(JSON.stringify({ type: "snapshot", cards }));
-    ws.on("close", () => this.clients.delete(conn));
-    ws.on("message", (raw) => void this.onClientMessage(ws, raw.toString()));
   }
 
   private async onClientMessage(ws: WebSocket, raw: string): Promise<void> {
@@ -112,28 +123,17 @@ export class Coordinator {
     }
     await this.trace.write({ kind: "client.request", request: msg });
 
-    if (msg.type === "respondToPermission" && this.adapter.respondToPermission) {
-      const verb = msg.decision === "always" || msg.decision === "reject" ? msg.decision : "once";
-      const decision: PermissionDecision = {
-        permissionId: String(msg.permissionId ?? ""),
-        decision: verb,
-        ...(typeof msg.message === "string" ? { message: msg.message } : {}),
-      };
-      // `always` persists a remembered grant so matching future requests auto-resolve (SPEC-016).
-      if (verb === "always") {
-        const pending = this.pendingPerms.get(decision.permissionId);
-        if (pending) {
-          const grant = this.grants.remember({
-            sessionId: pending.sessionId,
-            actionClass: pending.actionClass,
-            createdBy: "human", // SPEC-012 will carry the real identity
-          });
-          await this.trace.write({ kind: "grant.remembered", grant });
-        }
-      }
+    // SPEC-017: request/response command surface (CLI + any client) over the same WS.
+    if (msg.type === "request") {
+      await this.handleRequest(ws, msg);
+      return;
+    }
+
+    // Back-compat convenience messages the browser client already sends.
+    if (msg.type === "respondToPermission") {
+      const decision = this.buildDecision(msg);
       try {
-        const ack = await this.adapter.respondToPermission(decision);
-        await this.trace.write({ kind: "permission.ack", ack });
+        const ack = await this.decidePermission(decision);
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "permission.ack", ack }));
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -145,6 +145,150 @@ export class Coordinator {
       this.grants.revoke(String(msg.grantId ?? ""));
       await this.trace.write({ kind: "grant.revoked", grantId: msg.grantId });
     }
+  }
+
+  private buildDecision(msg: { [k: string]: unknown }): PermissionDecision {
+    // Fail closed: the WS is an API for any client, so an invalid/misspelled verb must error
+    // rather than silently coercing to allow-once (which could approve a pending permission).
+    const verb = msg.decision;
+    if (verb !== "once" && verb !== "always" && verb !== "reject") {
+      throw new Error(`invalid permission decision '${String(verb)}': must be once | always | reject`);
+    }
+    return {
+      permissionId: String(msg.permissionId ?? ""),
+      decision: verb,
+      ...(typeof msg.message === "string" ? { message: msg.message } : {}),
+    };
+  }
+
+  /** Relay a decision, remembering an `always` grant first, and trace the ack (SPEC-016). */
+  private async decidePermission(decision: PermissionDecision): Promise<PermissionAck> {
+    if (!this.adapter.respondToPermission) throw new Error("harness does not support permissions");
+    if (decision.decision === "always") {
+      const pending = this.pendingPerms.get(decision.permissionId);
+      if (pending) {
+        const grant = this.grants.remember({
+          sessionId: pending.sessionId,
+          actionClass: pending.actionClass,
+          createdBy: "human", // SPEC-012 will carry the real identity
+        });
+        await this.trace.write({ kind: "grant.remembered", grant });
+      }
+    }
+    const ack = await this.adapter.respondToPermission(decision);
+    await this.trace.write({ kind: "permission.ack", ack });
+    return ack;
+  }
+
+  /** One request → one response over the WS; ok with a result or a structured error. */
+  private async handleRequest(ws: WebSocket, msg: { [k: string]: unknown }): Promise<void> {
+    const id = msg.id;
+    const op = String(msg.op ?? "");
+    try {
+      const result = await this.dispatch(op, msg.args);
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "response", id, ok: true, result }));
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "response", id, ok: false, error }));
+    }
+  }
+
+  /** Map a CLI/client op to a coordinator/adapter capability (SPEC-017). */
+  private async dispatch(op: string, rawArgs: unknown): Promise<unknown> {
+    const a = (rawArgs ?? {}) as Record<string, unknown>;
+    switch (op) {
+      case "session.create": {
+        const specId = String(a.specId ?? "");
+        const parent = a.parent ? String(a.parent) : undefined;
+        const ref = await this.adapter.createSession({ specId, ...(parent ? { parent } : {}) });
+        // Fold a normalized idle status so the new session shows up in session.list and for live
+        // clients immediately, even on adapters that emit no creation event (e.g. the mock).
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "session.status",
+          sessionId: ref.sessionId,
+          specId,
+          kind: parent ? "task" : "spec",
+          status: "idle",
+        });
+        return ref;
+      }
+      case "session.list":
+        return this.read.snapshot();
+      case "prompt.send":
+      case "prompt.dispatch": {
+        const input = {
+          sessionId: String(a.sessionId ?? ""),
+          agent: String(a.agent ?? ""),
+          tier: a.tier === "capable" ? ("capable" as const) : ("mid" as const),
+          parts: [{ type: "text" as const, text: String(a.message ?? "") }],
+          ...(a.correlationId ? { correlationId: String(a.correlationId) } : {}),
+        };
+        return op === "prompt.send" ? this.adapter.sendMessage(input) : this.adapter.dispatchAsync(input);
+      }
+      case "todos.get":
+        if (!this.adapter.getTodos) throw new Error("harness does not support todos");
+        return this.adapter.getTodos({ sessionId: String(a.sessionId ?? "") });
+      case "diff.get":
+        if (!this.adapter.getDiff) throw new Error("harness does not support diff");
+        return this.adapter.getDiff({ sessionId: String(a.sessionId ?? "") });
+      case "permission.list":
+        return [...this.pendingPerms.entries()].map(([permissionId, p]) => ({
+          permissionId,
+          sessionId: p.sessionId,
+          actionClass: p.actionClass,
+        }));
+      case "permission.decide":
+        return this.decidePermission(this.buildDecision(a));
+      case "grant.list":
+        return this.grants.all();
+      case "grant.revoke": {
+        const grantId = String(a.grantId ?? "");
+        this.grants.revoke(grantId);
+        await this.trace.write({ kind: "grant.revoked", grantId });
+        return { revoked: grantId };
+      }
+      case "agents.list":
+        return this.loadAgentImages(a.dir).map((img) => ({
+          name: img.name,
+          tier: img.tier,
+          description: img.description,
+          mode: img.interaction.mode,
+        }));
+      case "agents.materialize": {
+        if (!this.adapter.materializeAgent) throw new Error("harness does not support agent materialisation");
+        const images = this.loadAgentImages(a.dir);
+        for (const img of images) await this.adapter.materializeAgent(img);
+        return { materialized: images.map((i) => i.name) };
+      }
+      default:
+        throw new Error(`unknown op: ${op}`);
+    }
+  }
+
+  /** Load every agent image directory under `dir` (default `agents/`) for list/materialize. */
+  private loadAgentImages(dir: unknown): AgentImage[] {
+    // `dir` comes from client args — validate it stays within the project root, refusing
+    // absolute paths and `..` escapes (throws DirectoryEscapeError, surfaced as a request error).
+    const base = resolveDirectory(REPO_ROOT, typeof dir === "string" && dir ? dir : "agents");
+    if (!existsSync(base)) return [];
+    const out: AgentImage[] = [];
+    for (const name of readdirSync(base)) {
+      const d = resolve(base, name);
+      // Only the filesystem probe is guarded; a directory that *is* an image (has config.yaml)
+      // but fails to parse must surface as an error, not be silently skipped — otherwise
+      // `agents.materialize` reports success while leaving a required role unmaterialised.
+      let isImage = false;
+      try {
+        isImage = statSync(d).isDirectory() && existsSync(resolve(d, "config.yaml"));
+      } catch {
+        isImage = false;
+      }
+      if (isImage) out.push(loadAgentImage(d)); // throws on a malformed image → fails the command
+    }
+    return out;
   }
 
   /**

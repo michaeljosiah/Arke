@@ -9,6 +9,11 @@ build/
 out/
 *.tsbuildinfo
 
+# .NET (Arke.Cli)
+bin/
+obj/
+*.user
+
 # Vite
 .vite/
 

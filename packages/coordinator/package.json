@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@arke/adapter-opencode": "*",
+    "@arke/agent-image": "*",
     "@arke/contracts": "*",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
