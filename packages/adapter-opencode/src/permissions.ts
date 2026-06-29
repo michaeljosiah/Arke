@@ -1,17 +1,19 @@
-import type { PermissionAck, PermissionDecision } from "@arke/contracts";
+import type { PermissionAck, PermissionDecision, PermissionVerb } from "@arke/contracts";
 
 /**
- * Relays a human's approve/deny decision and confirms it the only honest way (SPEC-002, D3):
- * by the matching `permission.replied` event, never by HTTP status — the reply endpoint
- * returns 200 even for stale ids (issue #15386). It defines what happens when confirmation
- * does not arrive (timeout → unconfirmed + re-fetch), refuses stale ids, is idempotent under
- * duplicate decisions, and reconciles in-flight decisions across a reconnect.
+ * Relays a human's decision and confirms it the only honest way (SPEC-002, D3): by the
+ * matching `permission.replied` event, never by HTTP status — the reply endpoint returns 200
+ * even for stale ids (issue #15386). It defines what happens when confirmation does not arrive
+ * (timeout → unconfirmed + re-fetch), refuses stale ids, is idempotent under duplicate
+ * decisions, and reconciles in-flight decisions across a reconnect. The decision vocabulary is
+ * `once | always | reject` (+ optional message) per SPEC-016; the adapter maps it onto the
+ * server's reply shape.
  */
 
 /** The minimal server surface the coordinator needs (stubbed in tests). */
 export interface PermissionClient {
-  /** POST the decision. Returns even for stale ids — confirmation is via the event. */
-  reply(permissionId: string, granted: boolean): Promise<void>;
+  /** POST the decision (verb + optional message). Confirmation is via the event, not status. */
+  reply(permissionId: string, decision: PermissionVerb, message?: string): Promise<void>;
   /** Ids the server currently lists as pending (GET /permission/). */
   pending(): Promise<string[]>;
 }
@@ -73,7 +75,7 @@ export class PermissionCoordinator {
       return { permissionId: id, status: "stale" };
     }
 
-    await this.client.reply(id, decision.granted);
+    await this.client.reply(id, decision.decision, decision.message);
 
     return await new Promise<PermissionAck>((resolve) => {
       // The confirming event may have raced ahead of the reply round-trip.

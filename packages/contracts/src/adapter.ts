@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { DomainEvent } from "./events.js";
 import type { ModelTier } from "./spec.js";
+import type { AgentImage } from "./agent-image.js";
 
 /**
  * The backend-agnostic harness adapter (PRD §8.2, §12).
@@ -70,9 +71,36 @@ export interface TodoItem {
   done: boolean;
 }
 
+/**
+ * A human's decision on a gated action (SPEC-016, replacing the SPEC-002 `granted` boolean):
+ * - `once`   — allow this single occurrence; a matching future request still prompts.
+ * - `always` — allow and remember; matching future requests auto-resolve (see {@link RememberedGrant}).
+ * - `reject` — deny.
+ */
+export const PermissionVerb = z.enum(["once", "always", "reject"]);
+export type PermissionVerb = z.infer<typeof PermissionVerb>;
+
 export interface PermissionDecision {
   permissionId: string;
-  granted: boolean;
+  decision: PermissionVerb;
+  /** Optional free-text rationale relayed to the harness. */
+  message?: string;
+}
+
+/**
+ * A remembered grant created by an `always` decision (SPEC-016). Durable across reconnects
+ * and restarts; a later permission request whose `key` matches auto-resolves without prompting
+ * a human, and every such auto-grant is recorded in the trace. Revocable.
+ */
+export interface RememberedGrant {
+  id: string;
+  /** Stable match key — the scope and action class this grant authorises. */
+  key: string;
+  sessionId?: string;
+  actionClass: string;
+  createdAt: number;
+  createdBy: string;
+  revoked?: boolean;
 }
 
 /**
@@ -115,11 +143,18 @@ export interface HarnessAdapter {
   // ---- lifecycle ----
   /**
    * Probe the server, derive capabilities, and build initial state. Idempotent. After it
-   * resolves, {@link capabilities} and {@link readiness} reflect the live server.
+   * resolves, {@link capabilities} and {@link readiness} reflect the live server. In managed
+   * mode (SPEC-016) this also starts the harness process.
    */
   init?(): Promise<void>;
   /** Whether the adapter can serve, with a reason when it cannot (SPEC-002). */
   readiness?(): Readiness;
+  /** Start a harness process this adapter owns (managed mode, SPEC-016). No-op in attach mode. */
+  startServer?(): Promise<void>;
+  /** Stop a harness process this adapter started. SHALL NOT stop a server it did not start. */
+  stopServer?(): Promise<void>;
+  /** Materialise a portable agent image into the harness's native agent convention (SPEC-016). */
+  materializeAgent?(image: AgentImage): Promise<void>;
 
   // ---- core ----
   createSession(input: CreateSessionInput): Promise<SessionRef>;

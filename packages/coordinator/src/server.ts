@@ -13,6 +13,7 @@ import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
 import { ClientConnection } from "./client-connection.js";
 import { CoordinatorSessionStore } from "./session-store.js";
+import { GrantStore } from "./grant-store.js";
 
 /**
  * Coordinator entry point (PRD §8.5; SPEC-003).
@@ -29,6 +30,8 @@ const PORT = Number(process.env.ARKE_COORDINATOR_PORT ?? 4319);
 const TRACE_PATH = process.env.ARKE_TRACE_PATH ?? resolve(REPO_ROOT, ".arke/trace.ndjson");
 const SESSION_STORE_PATH =
   process.env.ARKE_SESSION_STORE_PATH ?? resolve(REPO_ROOT, ".arke/sessions.ndjson");
+const GRANT_STORE_PATH =
+  process.env.ARKE_GRANT_STORE_PATH ?? resolve(REPO_ROOT, ".arke/grants.ndjson");
 
 export class Coordinator {
   private ingestSeq = 0; // canonical ingest order for the trace/read-model (NOT the wire seq)
@@ -39,13 +42,17 @@ export class Coordinator {
   private readonly read = new ReadModel();
   private readonly trace: Trace;
   private readonly adapter: HarnessAdapter;
+  private readonly grants: GrantStore;
   private readonly port: number;
   private wss?: WebSocketServer;
   private readonly abort = new AbortController();
+  /** permissionId → { sessionId, actionClass } for pending asks (so `always` can be keyed). */
+  private readonly pendingPerms = new Map<string, { sessionId: string; actionClass: string }>();
 
-  constructor(adapter: HarnessAdapter, trace: Trace, port: number = PORT) {
+  constructor(adapter: HarnessAdapter, trace: Trace, grants: GrantStore, port: number = PORT) {
     this.adapter = adapter;
     this.trace = trace;
+    this.grants = grants;
     this.port = port;
   }
 
@@ -71,13 +78,14 @@ export class Coordinator {
     return actual;
   }
 
-  /** Stop the pump and listener, closing all client connections. */
+  /** Stop the pump and listener, close client connections, and stop any managed harness. */
   async stop(): Promise<void> {
     this.abort.abort(); // ends the adapter stream (and its reconnect loop)
     await new Promise<void>((resolve) => {
       if (!this.wss) return resolve();
       this.wss.close(() => resolve());
     });
+    await this.adapter.stopServer?.(); // stops only a harness this adapter started (SPEC-016)
   }
 
   private async onConnection(ws: WebSocket): Promise<void> {
@@ -105,10 +113,24 @@ export class Coordinator {
     await this.trace.write({ kind: "client.request", request: msg });
 
     if (msg.type === "respondToPermission" && this.adapter.respondToPermission) {
+      const verb = msg.decision === "always" || msg.decision === "reject" ? msg.decision : "once";
       const decision: PermissionDecision = {
         permissionId: String(msg.permissionId ?? ""),
-        granted: Boolean(msg.granted),
+        decision: verb,
+        ...(typeof msg.message === "string" ? { message: msg.message } : {}),
       };
+      // `always` persists a remembered grant so matching future requests auto-resolve (SPEC-016).
+      if (verb === "always") {
+        const pending = this.pendingPerms.get(decision.permissionId);
+        if (pending) {
+          const grant = this.grants.remember({
+            sessionId: pending.sessionId,
+            actionClass: pending.actionClass,
+            createdBy: "human", // SPEC-012 will carry the real identity
+          });
+          await this.trace.write({ kind: "grant.remembered", grant });
+        }
+      }
       try {
         const ack = await this.adapter.respondToPermission(decision);
         await this.trace.write({ kind: "permission.ack", ack });
@@ -119,7 +141,35 @@ export class Coordinator {
           ws.send(JSON.stringify({ type: "permission.error", permissionId: decision.permissionId, reason }));
         }
       }
+    } else if (msg.type === "revokeGrant") {
+      this.grants.revoke(String(msg.grantId ?? ""));
+      await this.trace.write({ kind: "grant.revoked", grantId: msg.grantId });
     }
+  }
+
+  /**
+   * Auto-resolve a permission request matching a remembered grant — without prompting a human —
+   * and record the auto-grant in the trace with the rule that authorised it (SPEC-016). Returns
+   * true if handled (the caller then skips the normal emit so no needs-human flash occurs).
+   */
+  private async maybeAutoGrant(
+    event: Extract<DomainEvent, { type: "permission.asked" }>,
+  ): Promise<boolean> {
+    const match = this.grants.findMatch(event.sessionId, event.title);
+    if (!match) return false;
+    await this.trace.write({
+      kind: "permission.auto-grant",
+      permissionId: event.permissionId,
+      sessionId: event.sessionId,
+      actionClass: event.title,
+      ruleId: match.id,
+      at: Date.now(),
+    });
+    // Fire-and-forget: awaiting would deadlock (confirmation arrives via this same stream).
+    void this.adapter
+      .respondToPermission?.({ permissionId: event.permissionId, decision: "once" })
+      .catch(() => undefined);
+    return true;
   }
 
   /** Ingest → validate → fold → persist → push. Crash-safe: a bad event is dead-lettered. */
@@ -136,6 +186,20 @@ export class Coordinator {
         continue; // pump never crashes on a malformed event
       }
       const event = parsed.data;
+
+      // Permission asks: record the action class (so `always` can key a grant), and
+      // auto-resolve from a remembered grant without prompting (SPEC-016) — skipping the
+      // normal emit so no needs-human flash reaches the board.
+      if (event.type === "permission.asked") {
+        this.pendingPerms.set(event.permissionId, {
+          sessionId: event.sessionId,
+          actionClass: event.title,
+        });
+        if (await this.maybeAutoGrant(event)) continue;
+      } else if (event.type === "permission.replied") {
+        this.pendingPerms.delete(event.permissionId);
+      }
+
       await this.emit(event);
 
       // Derive the typed quiescence receipt: a completed turn that had at least one part.
@@ -183,14 +247,19 @@ async function buildAdapter(trace: Trace): Promise<HarnessAdapter> {
   const adapter = new OpenCodeAdapter(config, {
     sessionStore: new CoordinatorSessionStore(SESSION_STORE_PATH, "OpenCode"),
     deadLetterSink,
+    onLifecycleEvent: (record) => void trace.write(record), // harness start/stop/exit (SPEC-016)
   });
-  console.log(`[coordinator] probing OpenCode at ${config.baseUrl} …`);
+  console.log(
+    `[coordinator] ${config.manageHarness ? "starting & probing" : "probing"} OpenCode at ${config.baseUrl} …`,
+  );
   await adapter.init();
   return adapter;
 }
 
 async function bootstrap(): Promise<void> {
   const trace = new Trace(TRACE_PATH);
+  const grants = new GrantStore(GRANT_STORE_PATH);
+  grants.load(); // restore remembered grants across restarts (SPEC-016)
   let adapter: HarnessAdapter;
   try {
     adapter = await buildAdapter(trace);
@@ -199,7 +268,7 @@ async function bootstrap(): Promise<void> {
     console.error(`[coordinator] adapter init failed (${reason}); falling back to MockAdapter`);
     adapter = new MockAdapter();
   }
-  await new Coordinator(adapter, trace).start();
+  await new Coordinator(adapter, trace, grants).start();
 }
 
 // Only auto-start when run directly (not when imported by a test).

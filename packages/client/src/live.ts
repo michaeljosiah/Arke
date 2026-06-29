@@ -104,12 +104,22 @@ function applyEvent(ev: any) {
     case 'permission.asked': {
       const c = cards.get(ev.sessionId);
       if (c) { c.needsHuman = true; c.col = 'needs-human'; }
+      // Raise the live approval overlay (SPEC-016). Auto-granted asks never reach the client.
+      store.set({
+        permission: {
+          id: ev.permissionId, live: true, permissionId: ev.permissionId,
+          cardId: ev.sessionId, cardTitle: (c && c.title) || ev.sessionId,
+          action: ev.title, command: ev.detail || ev.title, harness: ev.harness || 'OpenCode', ts,
+        },
+      });
       rail('permission.requested', `permission.requested · ${ev.sessionId} · ${ev.title} — awaiting human`, ts);
       break;
     }
     case 'permission.replied': {
       const c = cards.get(ev.sessionId);
       if (c) { c.needsHuman = false; c.col = deriveColumn(c, specStatus.get(c.specId)); }
+      const cur: any = store.get().permission;
+      if (cur && cur.permissionId === ev.permissionId) store.set({ permission: null });
       rail(ev.granted ? 'permission.granted' : 'permission.denied', `permission.${ev.granted ? 'granted' : 'denied'} · ${ev.sessionId}`, ts);
       break;
     }

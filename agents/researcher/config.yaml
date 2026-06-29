@@ -1,0 +1,12 @@
+spec_version: 1
+name: researcher
+description: "Gathers and summarises codebase + vendored context to ground authoring."
+tier: mid
+instructions: AGENTS.md
+interaction:
+  conversational: true
+  mode: subagent
+permission:
+  read: allow
+  edit: deny
+  bash: deny

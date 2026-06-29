@@ -1,0 +1,13 @@
+spec_version: 1
+name: implementer
+description: "Executes the Tasks; writes code on the feature branch."
+tier: mid
+instructions: AGENTS.md
+interaction:
+  conversational: true
+  mode: subagent
+permission:
+  read: allow
+  edit: allow
+  bash: ask
+  webfetch: deny

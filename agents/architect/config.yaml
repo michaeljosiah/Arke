@@ -1,0 +1,12 @@
+spec_version: 1
+name: architect
+description: "Fills the Design depth: architecture, data model, interfaces, cross-cutting."
+tier: capable
+instructions: AGENTS.md
+interaction:
+  conversational: true
+  mode: primary
+permission:
+  read: allow
+  edit: allow
+  bash: ask

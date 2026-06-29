@@ -8,6 +8,7 @@ import { WebSocket } from "ws";
 import { Coordinator } from "../src/server.js";
 import { MockAdapter } from "../src/mock-adapter.js";
 import { Trace } from "../src/trace.js";
+import { GrantStore } from "../src/grant-store.js";
 
 /**
  * End-to-end over the real WebSocket: a coordinator on the MockAdapter streams a snapshot
@@ -16,8 +17,9 @@ import { Trace } from "../src/trace.js";
  * relies on, exercised without a live OpenCode server.
  */
 test("coordinator streams snapshot + ordered events with quiescence and correlation", async () => {
-  const tracePath = join(mkdtempSync(join(tmpdir(), "arke-coord-")), "trace.ndjson");
-  const coordinator = new Coordinator(new MockAdapter(), new Trace(tracePath), 0);
+  const dir = mkdtempSync(join(tmpdir(), "arke-coord-"));
+  const tracePath = join(dir, "trace.ndjson");
+  const coordinator = new Coordinator(new MockAdapter(), new Trace(tracePath), new GrantStore(join(dir, "grants.ndjson")), 0);
   const port = await coordinator.start();
   after(() => coordinator.stop());
 

@@ -178,7 +178,7 @@ test("permission decision is confirmed by the replied event, not the 200", async
   const collector = new EventCollector(adapter.streamEvents(ac.signal));
   await waitUntil(() => server.sseClientCount > 0);
 
-  const decisionP = adapter.respondToPermission({ permissionId: "perm_1", granted: true });
+  const decisionP = adapter.respondToPermission({ permissionId: "perm_1", decision: "once" });
   // the stub returns 200 immediately, but confirmation must wait for the event
   server.push({
     type: "permission.replied",

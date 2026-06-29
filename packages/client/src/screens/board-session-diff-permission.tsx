@@ -3,6 +3,7 @@ import { Icon } from '../icons';
 import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
+import { liveSend } from '../live';
 
 const e = React.createElement;
 
@@ -172,9 +173,20 @@ export function Session() {
 
 export function PermissionOverlay() {
   const req = useStore((s) => s.permission);
+  const [message, setMessage] = React.useState('');
+  React.useEffect(() => { setMessage(''); }, [req && req.permissionId]);
   if (!req) return null;
+  // once | always | reject (SPEC-016). Live mode sends over the transport; mock uses the engine.
+  const decide = (verb) => {
+    if (req.live) {
+      liveSend({ type: 'respondToPermission', permissionId: req.permissionId, decision: verb, message: message || undefined });
+      store.set({ permission: null });
+    } else {
+      engine.resolvePermission(verb !== 'reject');
+    }
+  };
   return e('div', { style: { position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,10,10,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 } },
-    e('div', { style: { width: 460, background: 'var(--popover)', border: '1px solid color-mix(in srgb, var(--destructive) 40%, var(--border))', borderRadius: 'var(--radius-xl)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' } },
+    e('div', { style: { width: 480, background: 'var(--popover)', border: '1px solid color-mix(in srgb, var(--destructive) 40%, var(--border))', borderRadius: 'var(--radius-xl)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' } },
       e('div', { style: { padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
         e('span', { style: { width: 34, height: 34, borderRadius: 'var(--radius-md)', background: 'var(--danger-bg)', color: 'var(--destructive)', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' } }, e(Icon, { name: 'lock', size: 18 })),
         e('div', null,
@@ -182,10 +194,12 @@ export function PermissionOverlay() {
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, color: 'var(--foreground)' } }, req.action))),
       e('div', { style: { padding: 20 } },
         e('p', { style: { margin: '0 0 14px', fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.55, color: 'var(--muted-foreground)' } }, 'The agent on ' + req.cardTitle + ' (' + req.cardId + ') wants to run a gated action on ' + req.harness + '. The agent proposes; you decide; the harness executes.'),
-        e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-md)', padding: '11px 14px', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: '#86EFAC', marginBottom: 18 } }, '$ ' + req.command),
-        e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end' } },
-          e(Button, { variant: 'outline', onClick: () => engine.resolvePermission(false) }, 'Deny'),
-          e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), onClick: () => engine.resolvePermission(true) }, 'Approve'))),
+        e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-md)', padding: '11px 14px', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: '#86EFAC', marginBottom: 14 } }, '$ ' + req.command),
+        e('input', { value: message, onChange: (ev) => setMessage(ev.target.value), placeholder: 'Optional message to the agent…', style: { width: '100%', boxSizing: 'border-box', marginBottom: 16, padding: '9px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--foreground)', fontFamily: 'var(--font-sans)', fontSize: 13 } }),
+        e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center' } },
+          e(Button, { variant: 'outline', onClick: () => decide('reject') }, 'Reject'),
+          e(Button, { variant: 'outline', onClick: () => decide('always') }, 'Always allow'),
+          e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), onClick: () => decide('once') }, 'Allow once'))),
     ),
   );
 }
