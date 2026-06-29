@@ -87,14 +87,14 @@ test("session.idle finalises the last message (closes streaming) and emits turn.
   if (out.kind !== "events") return assert.fail("expected multiple events on idle");
   const types = out.events.map((e) => e.type);
   assert.deepEqual(types, ["session.status", "message.updated", "turn.quiescent"]);
-  const status = out.events[0];
+  const status = out.events[0]!;
   if (status.type !== "session.status") return assert.fail();
   assert.equal(status.status, "idle");
-  const finalize = out.events[1];
+  const finalize = out.events[1]!;
   if (finalize.type !== "message.updated") return assert.fail();
   assert.equal(finalize.text, "PONG");
   assert.equal(finalize.isStreaming, false); // streaming closed
-  const quies = out.events[2];
+  const quies = out.events[2]!;
   if (quies.type !== "turn.quiescent") return assert.fail();
   assert.equal(quies.turnId, "m9");
 });
