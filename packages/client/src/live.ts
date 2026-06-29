@@ -218,7 +218,7 @@ function applySnapshot(snap: any) {
     cards: [...cards.values()],
     live: true,
     events: [],
-    connectedProject: snap?.projectName ? { name: snap.projectName, path: snap.projectPath ?? null, harness: snap.harness ?? null, endpoint: snap.harnessEndpoint ?? null } : null,
+    connectedProject: snap?.projectName ? { projectId: snap.projectId ?? null, name: snap.projectName, path: snap.projectPath ?? null, harness: snap.harness ?? null, endpoint: snap.harnessEndpoint ?? null } : null,
     harnessReachable: snap?.harnessReachable ?? true,
     harnessReachabilityReason: snap?.harnessReachabilityReason ?? null,
     harnessReachabilityPartial: snap?.harnessReachabilityPartial ?? false,
@@ -227,13 +227,45 @@ function applySnapshot(snap: any) {
     tierDefaults: snap?.tierDefaults ?? null,
   });
   engine.stop();
+  void refreshRecents(); // SPEC-018: populate the picker's real recents
+}
+
+// ---- request/response over the same WS (SPEC-017/018) ----
+let reqSeq = 0;
+const pending = new Map<string, (r: any) => void>();
+
+/** Send a coordinator op and resolve with its `{ ok, result | error }` response. */
+export function liveRequest(op: string, args?: unknown): Promise<any> {
+  return new Promise((resolve) => {
+    if (!transport) return resolve({ ok: false, error: 'not connected' });
+    const id = 'c' + ++reqSeq;
+    pending.set(id, resolve);
+    transport.send({ type: 'request', id, op, args });
+    setTimeout(() => { if (pending.delete(id)) resolve({ ok: false, error: 'timeout' }); }, 8000);
+  });
+}
+
+/** Refresh the durable recents list for the picker (SPEC-018 project.list). */
+export async function refreshRecents(): Promise<void> {
+  const res = await liveRequest('project.list');
+  if (res?.ok && Array.isArray(res.result)) store.set({ recents: res.result });
+}
+
+/** Open/switch the active project; the coordinator re-snapshots. Returns the open result. */
+export async function openProjectLive(target: { projectId?: string; path?: string }): Promise<any> {
+  const res = await liveRequest('project.open', target);
+  if (res?.ok) void refreshRecents();
+  return res;
 }
 
 function onFrame(frame: any) {
   if (!frame || typeof frame !== 'object') return;
   if (frame.type === 'snapshot' && Array.isArray(frame.cards)) applySnapshot(frame);
   else if (frame.type === 'event' && frame.event) applyEvent(frame.event);
-  else if (frame.type === 'folder.inspected') {
+  else if (frame.type === 'response' && pending.has(frame.id)) {
+    pending.get(frame.id)!(frame);
+    pending.delete(frame.id);
+  } else if (frame.type === 'folder.inspected') {
     // Result of folder.inspect / repo.clone (SPEC-004): refresh the onboarding classification so
     // the initialisation screen can explain exactly what is present and what will be added.
     store.set({ projectState: frame.state ?? null, missingSentinels: frame.missingSentinels ?? [] });

@@ -21,6 +21,59 @@ internal static class Ops
     }
 }
 
+public sealed class ProjectListCommand : AsyncCommand<ProjectListCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings { }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "project.list", null);
+}
+
+/// <summary>`arke project open` — activate a project by --path or a positional project id (SPEC-018).</summary>
+public sealed class ProjectOpenCommand : AsyncCommand<ProjectOpenCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "[PROJECT_ID]")]
+        public string? ProjectId { get; set; }
+
+        [CommandOption("--path <DIR>")]
+        public string? Path { get; set; }
+
+        public override ValidationResult Validate() =>
+            string.IsNullOrWhiteSpace(ProjectId) && string.IsNullOrWhiteSpace(Path)
+                ? ValidationResult.Error("provide a <PROJECT_ID> or --path <DIR>")
+                : ValidationResult.Success();
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "project.open", new { projectId = s.ProjectId, path = s.Path });
+}
+
+public sealed class ProjectCloseCommand : AsyncCommand<ProjectCloseCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<PROJECT_ID>")]
+        public string ProjectId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "project.close", new { projectId = s.ProjectId });
+}
+
+public sealed class ProjectForgetCommand : AsyncCommand<ProjectForgetCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<PROJECT_ID>")]
+        public string ProjectId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "project.forget", new { projectId = s.ProjectId });
+}
+
 public sealed class SessionCreateCommand : AsyncCommand<SessionCreateCommand.Settings>
 {
     public sealed class Settings : GlobalSettings

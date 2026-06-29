@@ -141,6 +141,8 @@ export const store = createStore({
   // project root ('.'); the clone flow sets it to the cloned subdirectory so scaffolding targets
   // the freshly cloned repo, not the coordinator root.
   entryPath: '.',
+  // Durable recents from the coordinator (SPEC-018 project.list). Real projects, most-recent-first.
+  recents: [],
   // Onboarding state (SPEC-004), folded from the coordinator snapshot + events. Defaults assume a
   // reachable harness so the mock-only prototype shows the picker directly.
   harnessReachable: true,

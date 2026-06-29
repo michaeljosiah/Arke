@@ -4,7 +4,7 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs, Badge } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend } from '../live';
+import { liveSend, openProjectLive } from '../live';
 
 const e = React.createElement;
 
@@ -19,6 +19,7 @@ export function Picker() {
   const connection = useStore((s) => s.connection);
   const cp = useStore((s) => s.connectedProject);
   const projectState = useStore((s) => s.projectState);
+  const recents = useStore((s) => s.recents);
   const harnessReachable = useStore((s) => s.harnessReachable);
   const reason = useStore((s) => s.harnessReachabilityReason);
   const [setup, setSetup] = React.useState(false);
@@ -37,7 +38,15 @@ export function Picker() {
   // entryPath is the coordinator-relative path the init screen scaffolds. Open/New target the
   // project root ('.'); Clone targets the freshly cloned subdirectory so scaffolding writes there.
   const toInit = (name: string, path: string) => store.set({ project: { name, specs: 0 }, entryPath: path, view: 'init' });
-  const openProject = () => { if (cp) store.set({ project: { name: cp.name, specs: 0 }, entryPath: '.', view: projectState === 'method-ready' ? 'library' : 'init' }); };
+  const enter = (name: string, state: string | null) => store.set({ project: { name, specs: 0 }, entryPath: '.', view: state === 'method-ready' ? 'library' : 'init' });
+  const openProject = () => { if (cp) enter(cp.name, projectState); };
+  // Switch the coordinator's active project to a recent, then route into it by its real state.
+  const openRecent = (entry: any) => {
+    if (cp && entry.projectId === cp.projectId) return enter(cp.name, projectState);
+    void openProjectLive({ projectId: entry.projectId }).then((res) => {
+      if (res?.ok) enter(res.result.name, res.result.state);
+    });
+  };
   const clone = () => {
     const url = cloneUrl.trim();
     if (!url) return;
@@ -60,8 +69,8 @@ export function Picker() {
       e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: primary ? 'rgba(255,255,255,0.7)' : 'var(--muted-foreground)' } }, sub)),
     e('span', { style: { display: 'flex', color: primary ? 'var(--background)' : 'var(--neutral-400)' } }, e(Icon, { name: 'arrowRight', size: 16 })));
 
-  // Single-project coordinator: the connected project is the one "recent". Empty when disconnected.
-  const recents = ready && cp ? [cp] : [];
+  // Real recents from the coordinator registry (SPEC-018 project.list), most-recent-first.
+  const recentList = ready ? (recents || []) : [];
 
   return e('div', { style: { height: '100%', width: '100%', background: 'var(--muted)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', overflow: 'auto' } },
     e('div', { style: { width: 540, padding: '40px 32px 64px' } },
@@ -105,16 +114,16 @@ export function Picker() {
           e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
           e(Button, { style: { flex: 'none' }, disabled: !ready || !cloneUrl.trim(), onClick: clone }, 'Clone')) : null,
 
-        recents.length
+        recentList.length
           ? e('div', null,
               e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, 'Recent projects'),
               e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9 } },
-                recents.map((p: any) => e('button', { key: p.name, onClick: openProject, style: { appearance: 'none', textAlign: 'left', cursor: 'pointer', background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '11px 14px', display: 'flex', alignItems: 'center', gap: 12 },
+                recentList.map((p: any) => e('button', { key: p.projectId || p.root || p.name, onClick: () => openRecent(p), style: { appearance: 'none', textAlign: 'left', cursor: 'pointer', background: 'var(--background)', border: '1px solid ' + (cp && p.projectId === cp.projectId ? 'var(--foreground)' : 'var(--border)'), borderRadius: 'var(--radius-lg)', padding: '11px 14px', display: 'flex', alignItems: 'center', gap: 12 },
                   onMouseEnter: (ev: any) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev: any) => ev.currentTarget.style.background = 'var(--background)' },
                   e('span', { style: { color: 'var(--muted-foreground)', display: 'flex' } }, e(Icon, { name: 'folder', size: 18 })),
                   e('div', { style: { flex: 1, minWidth: 0 } },
-                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, p.name),
-                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, (STATE_LABEL[projectState] || projectState || 'inspecting…') + (p.path ? ' · ' + p.path : ''))),
+                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, p.name + (cp && p.projectId === cp.projectId ? '  ·  active' : '')),
+                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, (STATE_LABEL[p.lastState] || p.lastState || 'unknown') + (p.root ? ' · ' + p.root : ''))),
                   e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 }))))))
           : e('div', { style: { padding: '16px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', textAlign: 'center', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } },
               ready ? 'No recent projects — open a folder to begin' : 'Connect a harness to see your project'),
