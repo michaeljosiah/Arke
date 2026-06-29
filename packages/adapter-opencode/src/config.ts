@@ -52,7 +52,7 @@ export const DEFAULT_OPENCODE_PORT = 4096;
 /** Default tier→model resolution: the internal gateway provider (NFR-5, FR-18). */
 export const DEFAULT_RESOLVE_MODEL = (tier: ModelTier): ResolvedModel => ({
   provider: "gateway",
-  name: tier === "capable" ? "capable-tier" : "mid-tier",
+  name: `${tier}-tier`, // capable-tier | mid-tier | fast-tier
 });
 
 // ---- directory canonicalisation + validation -----------------------------------

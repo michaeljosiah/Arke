@@ -157,9 +157,9 @@ public sealed class PromptCommand : AsyncCommand<PromptCommand.Settings>
         public bool Async { get; set; }
 
         public override Spectre.Console.ValidationResult Validate() =>
-            Tier is "capable" or "mid"
+            Tier is "capable" or "mid" or "fast"
                 ? Spectre.Console.ValidationResult.Success()
-                : Spectre.Console.ValidationResult.Error("--tier must be 'capable' or 'mid'");
+                : Spectre.Console.ValidationResult.Error("--tier must be 'capable', 'mid', or 'fast'");
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>

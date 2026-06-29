@@ -64,6 +64,7 @@ interface ScaffoldManifest {
 export interface ScaffoldTiers {
   capable?: string;
   mid?: string;
+  fast?: string;
 }
 
 export interface ScaffoldRunOptions {

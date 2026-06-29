@@ -6,6 +6,7 @@ import {
   DomainEvent,
   type AgentImage,
   type HarnessAdapter,
+  type ModelTier,
   type PermissionAck,
   type PermissionDecision,
   type ScaffoldStep,
@@ -198,10 +199,17 @@ export class ProjectContext {
         return this.read.snapshot();
       case "prompt.send":
       case "prompt.dispatch": {
+        // Pass through any known tier (capable | mid | fast); an unknown/absent tier falls back to
+        // mid rather than silently downgrading an explicit fast/capable request.
+        const requested = String(a.tier ?? "");
+        const tier: ModelTier =
+          requested === "capable" || requested === "mid" || requested === "fast"
+            ? (requested as ModelTier)
+            : "mid";
         const input = {
           sessionId: String(a.sessionId ?? ""),
           agent: String(a.agent ?? ""),
-          tier: a.tier === "capable" ? ("capable" as const) : ("mid" as const),
+          tier,
           parts: [{ type: "text" as const, text: String(a.message ?? "") }],
           ...(a.correlationId ? { correlationId: String(a.correlationId) } : {}),
         };
