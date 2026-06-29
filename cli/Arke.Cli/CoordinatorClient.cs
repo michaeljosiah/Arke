@@ -17,10 +17,13 @@ public static class CoordinatorClient
     public static async Task<JsonElement> RequestAsync(string url, string op, object? args, CancellationToken ct = default)
     {
         using var ws = new ClientWebSocket();
-        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        connectCts.CancelAfter(TimeSpan.FromSeconds(30));
+        // The 30s cap is scoped to CONNECTION establishment only. The response itself can take far
+        // longer (a sync `prompt.send` resolves when the agent's turn completes), so send/receive
+        // use the caller's token — not the connect cap — and wait as long as the caller allows.
         try
         {
+            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            connectCts.CancelAfter(TimeSpan.FromSeconds(30));
             await ws.ConnectAsync(new Uri(url), connectCts.Token);
         }
         catch (Exception e)
@@ -30,11 +33,11 @@ public static class CoordinatorClient
 
         var id = Guid.NewGuid().ToString("N");
         var payload = JsonSerializer.Serialize(new { type = "request", id, op, args });
-        await ws.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, connectCts.Token);
+        await ws.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, ct);
 
         while (true)
         {
-            var frame = await ReceiveTextAsync(ws, connectCts.Token);
+            var frame = await ReceiveTextAsync(ws, ct);
             using var doc = JsonDocument.Parse(frame);
             var root = doc.RootElement;
             if (root.TryGetProperty("type", out var t) && t.GetString() == "response" &&

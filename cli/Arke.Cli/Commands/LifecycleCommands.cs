@@ -22,28 +22,37 @@ public sealed class UpCommand : AsyncCommand<UpCommand.Settings>
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct)
     {
         var cfg = s.Config();
-        var handle = new RunHandle { StartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+        // Preserve a prior run handle: if an earlier `up` started the coordinator and this `up`
+        // only attaches + starts the client, we must keep the coordinator's PID so `down` still
+        // stops it ("stop exactly what up started").
+        var handle = RunHandle.Load(cfg.ProjectRoot) ?? new RunHandle();
+        handle.StartedAt = handle.StartedAt == 0 ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : handle.StartedAt;
 
         var alreadyUp = await CoordinatorClient.IsReachableAsync(cfg.CoordinatorUrl);
         if (alreadyUp)
         {
+            // Attaching — leave any existing CoordinatorPid in the handle untouched.
             if (!s.Json) AnsiConsole.MarkupLineInterpolated($"[grey]coordinator already running at[/] {cfg.CoordinatorUrl} [grey]— attaching[/]");
         }
         else
         {
             // arke up manages the harness by default (Decision #8) — the coordinator owns it (SPEC-016).
+            // Pass the SELECTED port so the spawned coordinator binds where we will look for it.
             var env = new Dictionary<string, string?>
             {
                 ["ARKE_MANAGE_HARNESS"] = s.NoManageHarness ? "false" : "true",
+                ["ARKE_COORDINATOR_PORT"] = new Uri(cfg.CoordinatorUrl).Port.ToString(),
             };
             var coord = Proc.StartNpm(cfg.ProjectRoot, "run dev:coordinator", env);
             handle.CoordinatorPid = coord.Id;
+            handle.CoordinatorStart = Proc.StartTicks(coord);
         }
 
         if (!s.NoClient)
         {
             var client = Proc.StartNpm(cfg.ProjectRoot, $"run dev --workspace @arke/client -- --port {ArkeConfig.DefaultClientPort} --strictPort");
             handle.ClientPid = client.Id;
+            handle.ClientStart = Proc.StartTicks(client);
         }
 
         handle.Save(cfg.ProjectRoot);
@@ -51,6 +60,10 @@ public sealed class UpCommand : AsyncCommand<UpCommand.Settings>
         var ready = await WaitForReady(cfg.CoordinatorUrl, TimeSpan.FromSeconds(40));
         if (!ready)
             return Output.Error($"coordinator did not become ready at {cfg.CoordinatorUrl} within 40s", s.Json);
+
+        // Don't report a healthy stack while the UI is down — wait for the client too (unless --no-client).
+        if (!s.NoClient && !await Proc.WaitForHttpAsync(cfg.ClientUrl, TimeSpan.FromSeconds(40)))
+            return Output.Error($"client did not become ready at {cfg.ClientUrl} within 40s (port in use, or the dev server exited)", s.Json);
 
         if (s.Json)
             return Output.Ok(s, new { ok = true, coordinator = cfg.CoordinatorUrl, client = s.NoClient ? null : cfg.ClientUrl, manageHarness = !s.NoManageHarness });
@@ -87,9 +100,11 @@ public sealed class DownCommand : Command<DownCommand.Settings>
         if (handle is null)
             return s.Json ? Output.Ok(s, new { ok = true, stopped = Array.Empty<string>() }) : Note(s, "nothing to stop (no run handle)");
 
+        // Kill only if the live PID still matches the start-time we recorded — a stale handle's
+        // PID may since have been reused by an unrelated process.
         var stopped = new List<string>();
-        if (handle.ClientPid is int cp) { Proc.Kill(cp); stopped.Add("client"); }
-        if (handle.CoordinatorPid is int kp) { Proc.Kill(kp); stopped.Add("coordinator"); }
+        if (handle.ClientPid is int cp && Proc.KillIfMatches(cp, handle.ClientStart)) stopped.Add("client");
+        if (handle.CoordinatorPid is int kp && Proc.KillIfMatches(kp, handle.CoordinatorStart)) stopped.Add("coordinator");
         RunHandle.Clear(cfg.ProjectRoot);
 
         return s.Json ? Output.Ok(s, new { ok = true, stopped }) : Note(s, $"stopped: {string.Join(", ", stopped.Count > 0 ? stopped : new List<string> { "(nothing running)" })}");

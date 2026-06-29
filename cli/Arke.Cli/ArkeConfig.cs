@@ -17,20 +17,26 @@ public sealed class ArkeConfig
     public const int DefaultCoordinatorPort = 4319;
     public const int DefaultClientPort = 5188;
 
-    /// <summary>Walk up from <paramref name="start"/> to find the repo root (the dir holding .arke or package.json).</summary>
+    /// <summary>
+    /// Walk up from <paramref name="start"/> to the Arke project root. The canonical marker is
+    /// <c>.arke/</c>; it takes priority so that invoking from a workspace subpackage (which has
+    /// its own <c>package.json</c>, e.g. <c>packages/client</c>) still resolves the repo root and
+    /// not the subpackage. Only when no <c>.arke/</c> exists anywhere do we fall back to the
+    /// nearest <c>package.json</c>.
+    /// </summary>
     public static string FindProjectRoot(string? start = null)
     {
-        var dir = new DirectoryInfo(start ?? Directory.GetCurrentDirectory());
-        while (dir is not null)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, ".arke")) ||
-                File.Exists(Path.Combine(dir.FullName, "package.json")))
-            {
-                return dir.FullName;
-            }
-            dir = dir.Parent;
-        }
-        return start ?? Directory.GetCurrentDirectory();
+        var startDir = start ?? Directory.GetCurrentDirectory();
+
+        for (var d = new DirectoryInfo(startDir); d is not null; d = d.Parent)
+            if (Directory.Exists(Path.Combine(d.FullName, ".arke")))
+                return d.FullName;
+
+        for (var d = new DirectoryInfo(startDir); d is not null; d = d.Parent)
+            if (File.Exists(Path.Combine(d.FullName, "package.json")))
+                return d.FullName;
+
+        return startDir;
     }
 
     public static ArkeConfig Load(string? projectOverride = null, string? coordinatorOverride = null)

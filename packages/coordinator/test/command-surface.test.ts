@@ -62,6 +62,26 @@ test("an unknown op returns a structured error, not a crash", async () => {
   ws.close();
 });
 
+test("permission.decide rejects an invalid verb (fails closed, no allow-once coercion)", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, request } = await connect(port);
+  const res = await request("permission.decide", { permissionId: "p1", decision: "reject " }); // trailing space
+  assert.equal(res.ok, false);
+  assert.match(res.error, /invalid permission decision/);
+  ws.close();
+});
+
+test("agents.list refuses a directory that escapes the project root", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, request } = await connect(port);
+  const res = await request("agents.list", { dir: "../../etc" });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /outside the configured project root/);
+  ws.close();
+});
+
 test("permission.list and grant.list respond with arrays", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());

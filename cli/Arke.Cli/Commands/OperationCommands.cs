@@ -30,6 +30,13 @@ public sealed class SessionCreateCommand : AsyncCommand<SessionCreateCommand.Set
 
         [CommandOption("--parent <SESSION_ID>")]
         public string? Parent { get; set; }
+
+        // A session must be tied to a specification (the source of truth) — refuse an empty spec id
+        // rather than persisting an unowned session in the graph.
+        public override ValidationResult Validate() =>
+            string.IsNullOrWhiteSpace(Spec)
+                ? ValidationResult.Error("--spec <SPEC_ID> is required")
+                : ValidationResult.Success();
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>

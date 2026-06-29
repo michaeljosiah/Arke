@@ -12,6 +12,7 @@ import {
 import {
   OpenCodeAdapter,
   loadOpenCodeConfig,
+  resolveDirectory,
   type DeadLetter,
   type DeadLetterSink,
 } from "@arke/adapter-opencode";
@@ -147,7 +148,12 @@ export class Coordinator {
   }
 
   private buildDecision(msg: { [k: string]: unknown }): PermissionDecision {
-    const verb = msg.decision === "always" || msg.decision === "reject" ? msg.decision : "once";
+    // Fail closed: the WS is an API for any client, so an invalid/misspelled verb must error
+    // rather than silently coercing to allow-once (which could approve a pending permission).
+    const verb = msg.decision;
+    if (verb !== "once" && verb !== "always" && verb !== "reject") {
+      throw new Error(`invalid permission decision '${String(verb)}': must be once | always | reject`);
+    }
     return {
       permissionId: String(msg.permissionId ?? ""),
       decision: verb,
@@ -251,7 +257,9 @@ export class Coordinator {
 
   /** Load every agent image directory under `dir` (default `agents/`) for list/materialize. */
   private loadAgentImages(dir: unknown): AgentImage[] {
-    const base = resolve(REPO_ROOT, typeof dir === "string" && dir ? dir : "agents");
+    // `dir` comes from client args — validate it stays within the project root, refusing
+    // absolute paths and `..` escapes (throws DirectoryEscapeError, surfaced as a request error).
+    const base = resolveDirectory(REPO_ROOT, typeof dir === "string" && dir ? dir : "agents");
     if (!existsSync(base)) return [];
     const out: AgentImage[] = [];
     for (const name of readdirSync(base)) {

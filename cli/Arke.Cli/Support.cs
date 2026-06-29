@@ -73,21 +73,57 @@ public static class Proc
         return Process.Start(psi) ?? throw new ArkeException($"failed to start: npm {npmArgs}");
     }
 
-    public static void Kill(int pid)
+    /// <summary>UTC start-time ticks of a process, used as a cheap identity check against PID reuse.</summary>
+    public static long StartTicks(Process p)
+    {
+        try { return p.StartTime.ToUniversalTime().Ticks; }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Kill the process tree only if the live PID still matches the identity we recorded — guards
+    /// against the OS having reused the PID for an unrelated process after a stale run handle.
+    /// </summary>
+    public static bool KillIfMatches(int pid, long? startTicks)
     {
         try
         {
-            Process.GetProcessById(pid).Kill(entireProcessTree: true);
+            var p = Process.GetProcessById(pid);
+            if (startTicks is long expected && expected != 0)
+            {
+                var actual = StartTicks(p);
+                if (actual != 0 && actual != expected) return false; // PID reused — not ours
+            }
+            p.Kill(entireProcessTree: true);
+            return true;
         }
         catch
         {
-            // already gone
+            return false; // already gone
         }
     }
 
     public static void OpenBrowser(string url)
     {
         Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+    }
+
+    /// <summary>Poll an HTTP URL until it answers (&lt;500) or the timeout elapses — client readiness.</summary>
+    public static async Task<bool> WaitForHttpAsync(string url, TimeSpan timeout)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                var res = await http.GetAsync(url);
+                if ((int)res.StatusCode < 500) return true;
+            }
+            catch { /* not up yet */ }
+            await Task.Delay(400);
+        }
+        return false;
     }
 }
 
@@ -96,6 +132,9 @@ public sealed class RunHandle
 {
     public int? CoordinatorPid { get; set; }
     public int? ClientPid { get; set; }
+    // Process start-time ticks recorded alongside each PID, so `down` can detect PID reuse.
+    public long? CoordinatorStart { get; set; }
+    public long? ClientStart { get; set; }
     public long StartedAt { get; set; }
 
     private static string Path(string root) => System.IO.Path.Combine(root, ".arke", "cli-run.json");
