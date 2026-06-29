@@ -43,7 +43,9 @@ Arke is made from their point of view:
 
 ## Three jobs, one tool
 
-The work, organised the way it actually runs.
+The work, organised the way it actually runs. _This is the product Arke is being built to
+be — the launch feature set. Items marked **(in progress)** / **(planned)** are not wired into
+the current build yet; see [Status](#status) for what works today._
 
 ### 01 · Author — the spec as source of truth
 - **Authoring cockpit** — co-author the spec with agents beside a live preview of the file in your repo.
@@ -52,14 +54,14 @@ The work, organised the way it actually runs.
 - **Open a folder and go** — greenfield or existing code, Arke inspects and adapts. It never assumes your setup.
 
 ### 02 · Orchestrate — direct the build
-- **Generation** — turn the approved spec into tickets, tests and pull requests on a *propose → approve → execute* pattern.
+- **Generation** _(in progress)_ — turn the approved spec into tickets, tests and pull requests on a *propose → approve → execute* pattern.
 - **Delivery board** — a live view of agents at work, computed from real execution. A card moves because the work moved — not a board you drag.
 - **Session detail** — watch and steer the agent building each task: transcript, todos, diff, restore checkpoint, open PR.
-- **Runs on your agent** — Claude Code, OpenCode or Codex, the coding agent you already use. Your keys never leave your machine.
+- **Runs on your agent** — **OpenCode today**; Claude Code and Codex are on the roadmap behind the same backend-agnostic adapter. Your keys never leave your machine.
 
 ### 03 · Keep the record — answer for what ships
 - **Audit & activity** — every agent action and every approval, on the record and queryable.
-- **Integrations** — connect GitHub, Jira and Azure DevOps; finish a task on the board and the matching ticket moves on its own. No double entry.
+- **Integrations** _(planned)_ — connect GitHub, Jira and Azure DevOps; finish a task on the board and the matching ticket moves on its own. No double entry.
 - **Governed by default** — supervised execution with approvals on the moments that matter; the spec drops back to review when intent changes.
 - **Your spec, your repo** — specifications live in `docs/specifications`, config in `.arke/`. Portable, reviewable, never hostage to the tool.
 
@@ -80,15 +82,16 @@ rent. Arke takes the other bet:
 ## How it fits
 
 Picture Arke as the **steering wheel and the dashboard**. The coding agent you already
-run — Claude Code, OpenCode or Codex — is the **engine**, working locally on your machine.
-You direct and watch; it does the building, and your keys stay with you.
+run is the **engine**, working locally on your machine (**OpenCode is the first supported
+harness; Claude Code and Codex are on the roadmap**). You direct and watch; it does the
+building, and your keys stay with you.
 
 A **backend-agnostic adapter** keeps the orchestration independent of any single harness, and
 a **thin local coordinator** normalises each harness's events into one schema-validated
 domain model, pushing ordered, sequenced state to the client over WebSocket — no cloud
 backend on the hot path, everything inside your trust boundary. Already use more than one
-agent? Point Arke at [Omnigent](docs/decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md)
-and it reaches them all, so you still drive from one place.
+agent? An _(experimental)_ [Omnigent](docs/decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md)
+substrate adapter is the path to reaching them all from one place.
 
 Three rules shape every part of it:
 
@@ -98,9 +101,9 @@ Three rules shape every part of it:
 
 ## What you need
 
-- The coding agent you already run — **Claude Code, OpenCode or Codex**
+- A supported coding agent — **OpenCode today**; Claude Code and Codex are on the roadmap behind the same backend-agnostic adapter
 - A **git repository** — greenfield or existing
-- A **browser**, or the desktop app
+- A **browser** (a desktop app is in progress)
 - **Your model access** — keys or subscription stay on your machine
 
 ## Getting started
@@ -143,12 +146,14 @@ Arke/
 
 ## Status
 
-Active development, built spec by spec. The orchestration spine is real: schema-first
-contracts, the local coordinator (read model, audit trace, multi-project workspaces), the
-OpenCode adapter against the live HTTP/SSE surface, the harness & model registry (tier →
-model → harness routing), the agent-image roster, and the CLI. The authoring, review,
-generation and record surfaces are being wired into the client spec by spec on top of that
-spine. See the [specifications](docs/specifications) and the
+Active development, built spec by spec. **Working today:** schema-first contracts, the local
+coordinator (read model, audit trace, multi-project workspaces), the OpenCode adapter against
+the live HTTP/SSE surface, the agent-image roster, the CLI, and the harness & model registry
+(tier → model **resolution** and a live registry projection rendered in the client).
+**Being wired now:** multi-instance harness routing through the registry, generation
+(spec → tickets/tests/PRs), and the system-of-record integrations (Jira/Azure/GitHub
+projections). **Single supported harness today: OpenCode** — the adapter seam is what makes
+Claude Code and Codex additive later. See the [specifications](docs/specifications) and the
 [delivery report](docs/analysis/delivery-report.html).
 
 ## The name
