@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { SpecStatus } from "./spec.js";
+import { ModelTier, SpecStatus } from "./spec.js";
+import { Capability } from "./adapter.js";
 
 /**
  * The canonical, normalized domain-event model (PRD §8.5, §21.1).
@@ -21,6 +22,7 @@ export const SessionStatus = z.enum([
   "waiting", // blocked on a human (permission/elicitation)
   "error",
   "done",
+  "interrupted", // its harness instance was lost mid-session; not migrated (SPEC-005, NFR-4)
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
@@ -193,9 +195,11 @@ export const RegistryUpdatedEvent = base.extend({
       driver: z.string(),
       endpoint: z.string(),
       reachable: z.boolean(),
-      caps: z.array(z.string()),
+      // Reuse the adapter Capability + ModelTier schemas so a malformed projection (e.g.
+      // caps: ["eventz"] or tier: "turbo") is rejected at the boundary, not rendered.
+      caps: z.array(Capability),
       // serves carries tier labels only — never a vendor model string or a credentialsRef.
-      serves: z.array(z.object({ tier: z.string(), label: z.string() })),
+      serves: z.array(z.object({ tier: ModelTier, label: z.string() })),
       /** True when the backend exposes no model catalog, so serves were trusted unvalidated. */
       catalogUnavailable: z.boolean().optional(),
     }),

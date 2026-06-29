@@ -108,6 +108,19 @@ test("registry.updated parses with tier labels only — no model strings (SPEC-0
   assert.equal(ev.instances[0]!.serves[0]!.label, "capable — opencode");
 });
 
+test("registry.updated rejects an unknown capability or tier (reuses Capability/ModelTier)", () => {
+  const withCaps = (caps: string[], tier = "capable") => ({
+    ...base,
+    type: "registry.updated",
+    instances: [
+      { id: "i", driver: "opencode", endpoint: "e", reachable: true, caps, serves: [{ tier, label: "l" }] },
+    ],
+  });
+  assert.equal(DomainEvent.safeParse(withCaps(["eventz"])).success, false); // bad capability
+  assert.equal(DomainEvent.safeParse(withCaps(["events"], "turbo")).success, false); // bad tier
+  assert.equal(DomainEvent.safeParse(withCaps(["events"], "fast")).success, true); // valid
+});
+
 test("registry.warning parses each reason incl. model-not-in-catalog (SPEC-005)", () => {
   for (const reason of [
     "reviewer-models-identical",

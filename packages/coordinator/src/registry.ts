@@ -116,16 +116,17 @@ export function parseModel(model: string): { provider?: string; name: string } {
 }
 
 /**
- * True when a configured `serves[].model` string is present in a backend's live catalog. A
- * `provider/name` form must match both fields; a bare name matches any catalog entry with that id
- * (operators are encouraged to qualify with a provider, but a bare match is not a config error).
+ * True when a configured `serves[].model` string is present in a backend's live catalog. Matching is
+ * provider-qualified: a `provider/name` form must match both fields, and a bare `name` resolves to
+ * the implicit `gateway` provider — the same default {@link SessionRouter} routing applies. A bare
+ * name therefore does NOT match a provider-qualified catalog entry (e.g. `gpt-5.5` does not match a
+ * `github-copilot/gpt-5.5` catalog), so a model that would dispatch as `gateway/gpt-5.5` is caught
+ * at config load rather than at first run.
  */
 export function modelMatchesCatalog(model: string, catalog: ModelInfo[]): boolean {
   const { provider, name } = parseModel(model);
-  return catalog.some((m) => {
-    if (provider !== undefined) return m.provider === provider && m.id === name;
-    return m.id === name || `${m.provider}/${m.id}` === model;
-  });
+  const effectiveProvider = provider ?? "gateway"; // matches SessionRouter.build's bare-name default
+  return catalog.some((m) => m.provider === effectiveProvider && m.id === name);
 }
 
 // ---- resolver ---------------------------------------------------------------
@@ -146,7 +147,16 @@ export class RegistryResolver {
   private readonly byId: Map<string, InstanceConfig>;
 
   constructor(private readonly config: RegistryConfig) {
-    this.byId = new Map(config.instances.map((i) => [i.id, i]));
+    // Duplicate ids would let the Map keep the last entry while unpinned resolution iterates the
+    // array and selects the first — routing one instance's model on another's adapter state. Reject
+    // the ambiguous registry deterministically instead.
+    this.byId = new Map();
+    for (const inst of config.instances) {
+      if (this.byId.has(inst.id)) {
+        throw new RegistryConfigError(`duplicate instance id '${inst.id}' in the registry`);
+      }
+      this.byId.set(inst.id, inst);
+    }
   }
 
   /**

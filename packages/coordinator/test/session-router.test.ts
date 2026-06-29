@@ -81,11 +81,15 @@ function adapters(): Map<string, HarnessAdapter> {
 class RecordingEmitter {
   warnings: Array<{ reason: RegistryWarningReason; detail: string }> = [];
   reach: Array<{ instanceId: string; reachable: boolean }> = [];
+  interrupted: string[] = [];
   warn(reason: RegistryWarningReason, detail: string) {
     this.warnings.push({ reason, detail });
   }
   reachability(instanceId: string, reachable: boolean) {
     this.reach.push({ instanceId, reachable });
+  }
+  sessionInterrupted(sessionId: string) {
+    this.interrupted.push(sessionId);
   }
 }
 
@@ -116,6 +120,7 @@ test("instance loss with a fallback: interrupts in-flight, emits failover, rerou
   const summary = router.markInstanceUnreachable("claude-local");
   assert.deepEqual(summary.interrupted, ["sess-1"]);
   assert.deepEqual(router.interruptedSessions(), ["sess-1"]);
+  assert.deepEqual(emitter.interrupted, ["sess-1"]); // emitted for client session.status
   assert.equal(summary.fallbackByTier["capable"], "opencode-local");
   assert.ok(emitter.warnings.some((w) => w.reason === "instance-failover"));
   assert.ok(emitter.reach.some((r) => r.instanceId === "claude-local" && r.reachable === false));

@@ -58,19 +58,27 @@ export class CredentialResolver {
   /** Resolve a ref to its secret value, or `undefined` when the source has no value configured. */
   async resolve(ref: string): Promise<string | undefined> {
     const colon = ref.indexOf(":");
-    const scheme = colon > 0 ? ref.slice(0, colon) : "";
-    const rest = colon > 0 ? ref.slice(colon + 1) : ref;
-    switch (scheme) {
-      case "env":
-        return this.env[rest];
-      case "file":
-        return this.readFile(rest);
-      case "keychain":
-        return this.readKeychain(rest);
-      default:
-        // No scheme → env backend with a normalised key.
-        return this.env[toEnvKey(ref)];
+    if (colon > 0) {
+      // A scheme is present: it must name a backend we support. An unknown scheme (`vault:…`) or a
+      // typo (`envr:…`) is a configuration error, not a bare env ref — fail clearly rather than
+      // silently reading the wrong variable.
+      const scheme = ref.slice(0, colon);
+      const rest = ref.slice(colon + 1);
+      switch (scheme) {
+        case "env":
+          return this.env[rest];
+        case "file":
+          return this.readFile(rest);
+        case "keychain":
+          return this.readKeychain(rest);
+        default:
+          throw new CredentialBackendError(
+            `unsupported credential backend '${scheme}:' — use env:, file:, or keychain:`,
+          );
+      }
     }
+    // No scheme → env backend with a normalised key.
+    return this.env[toEnvKey(ref)];
   }
 
   /** Read a file confined to the safe root; reject traversal before opening it. NFR-1. */

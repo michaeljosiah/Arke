@@ -306,12 +306,14 @@ export class OpenCodeAdapter implements HarnessAdapter {
    */
   async listModels(): Promise<ModelInfo[]> {
     const doc = await this.http.req<OpenCodeProvidersDoc>("GET", "/config/providers");
-    const providers = doc?.providers ?? [];
+    // Degrade to an empty catalog on any unexpected runtime shape (not just an absent field): a
+    // non-array `providers` would otherwise throw and fail registry loading rather than skip.
+    const providers = Array.isArray(doc?.providers) ? doc.providers : [];
     const out: ModelInfo[] = [];
     for (const p of providers) {
       const providerId = p.id ?? p.name;
       if (!providerId) continue;
-      const models = p.models ?? {};
+      const models = p.models && typeof p.models === "object" ? p.models : {};
       for (const [modelId, m] of Object.entries(models)) {
         const id = m?.id ?? modelId;
         if (!id) continue;

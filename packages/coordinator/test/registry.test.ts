@@ -117,6 +117,12 @@ test("listInstances projection carries tier labels — never credentialsRef or m
   assert.equal(proj[0]!.serves[0]!.label, "capable — claude-code");
 });
 
+test("a registry with duplicate instance ids is rejected at construction", () => {
+  const c = config();
+  c.instances.push({ ...c.instances[0]!, serves: [{ tier: "mid", model: "x/y" }] }); // same id, diff serves
+  assert.throws(() => new RegistryResolver(c), RegistryConfigError);
+});
+
 // ---- catalog validation -----------------------------------------------------
 
 const opencodeCatalog: ModelInfo[] = [
@@ -176,9 +182,14 @@ test("the catalog validation problem label leaks no vendor model id", () => {
   assert.ok(!res.problems[0]!.label.includes("secret-model"));
 });
 
-test("modelMatchesCatalog matches provider/name and bare ids", () => {
+test("modelMatchesCatalog is provider-qualified; a bare name resolves to gateway, not any provider", () => {
+  const gatewayCatalog: ModelInfo[] = [{ id: "gpt-5.5", provider: "gateway" }];
   assert.equal(modelMatchesCatalog("github-copilot/gpt-5.5", opencodeCatalog), true);
-  assert.equal(modelMatchesCatalog("gpt-5.5", opencodeCatalog), true); // bare id
+  // A bare name maps to the gateway provider (matching SessionRouter.build), so it does NOT match a
+  // provider-qualified catalog entry — it would dispatch as gateway/gpt-5.5, caught here at load.
+  assert.equal(modelMatchesCatalog("gpt-5.5", opencodeCatalog), false);
+  assert.equal(modelMatchesCatalog("gpt-5.5", gatewayCatalog), true); // bare ↔ gateway entry
+  assert.equal(modelMatchesCatalog("gateway/gpt-5.5", gatewayCatalog), true);
   assert.equal(modelMatchesCatalog("other/gpt-5.5", opencodeCatalog), false); // wrong provider
   assert.equal(modelMatchesCatalog("github-copilot/nope", opencodeCatalog), false);
 });

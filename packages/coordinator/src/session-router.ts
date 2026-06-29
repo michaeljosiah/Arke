@@ -52,6 +52,12 @@ export interface RouteResult {
 export interface RouterEmitter {
   warn(reason: RegistryWarningReason, detail: string): void;
   reachability(instanceId: string, reachable: boolean, reason?: string): void;
+  /**
+   * One session was interrupted by an instance loss (SPEC-005, NFR-4). The integration layer turns
+   * this into a `session.status` event with the `interrupted` status so the client can update the
+   * affected card — the router never migrates the session itself.
+   */
+  sessionInterrupted(sessionId: string): void;
 }
 
 export type RegistryWarningReason =
@@ -141,6 +147,7 @@ export class SessionRouter {
     for (const sid of this.sessionsByInstance.get(instanceId) ?? []) {
       this.interrupted.add(sid);
       interrupted.push(sid);
+      this.emit?.sessionInterrupted(sid); // → session.status 'interrupted' (never migrated)
     }
     this.emit?.reachability(instanceId, false, "instance became unreachable");
 

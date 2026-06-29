@@ -40,6 +40,13 @@ test("file: backend rejects an absolute path outside the safe root", async () =>
   await assert.rejects(() => r.resolve("file:/etc/passwd"), CredentialPathError);
 });
 
+test("an unknown scheme is rejected, not treated as a bare env ref", async () => {
+  const r = new CredentialResolver({ safeRoot: safeRoot(), env: { VAULT_PROD: "leak" } });
+  // Without this, `vault:prod` would normalise to env VAULT_PROD and silently read the wrong value.
+  await assert.rejects(() => r.resolve("vault:prod"), CredentialBackendError);
+  await assert.rejects(() => r.resolve("envr:TOKEN"), CredentialBackendError); // typo, not "env:"
+});
+
 test("keychain: backend errors clearly when no reader is configured", async () => {
   const r = new CredentialResolver({ safeRoot: safeRoot() });
   await assert.rejects(() => r.resolve("keychain:login"), CredentialBackendError);
