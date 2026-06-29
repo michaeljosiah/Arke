@@ -47,6 +47,7 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 013 | [Generation workspace: propose · decide · execute](013.generation-workspace.md) | FR-6, FR-17 | 1–2 | 8 |
 | 014 | [Deterministic projection & integrations registry](014.deterministic-projection-and-integrations.md) | FR-7, FR-21; §9/14 | 2 | 8 |
 | 015 | [Audit, activity trace & observability](015.audit-trace-and-observability.md) | NFR-7, NFR-2 | 1–2 | 8 |
+| 016 | [Managed harness lifecycle, richer approvals & portable agent images](016.harness-lifecycle-approvals-and-agent-images.md) | FR-4, FR-10; §12, §15; [ADR-0002](../decisions/0002-omnigent-as-candidate-harness-substrate.md) | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
@@ -62,6 +63,7 @@ central runners, managed roster sync — out of scope until Phase 3.
                 └─▶ 006 cockpit ─▶ 007 review ─▶ 008 lifecycle
                                                    └─▶ 009 fan-out ─▶ 013 generation ─▶ 014 projection
                     015 audit/observability spans every feature (build incrementally)
+                    016 harness lifecycle + approvals + agent images builds on 002/005/012 (Phase 2)
 ```
 
 Author each in the cockpit, run the review panel, and approve before implementation — Arke,
