@@ -26,7 +26,7 @@ Two corrections to earlier assumptions, both from source: Omnigent has **no "age
 | Sub-agents | **static** (recursive `agents/` in the image) | **static + dynamic** (`spawn:true` → runtime-authored sessions, inbox-linked, own worktree) |
 | Skills | declared `SkillRef{name,path}` — thin runtime | first-class `SKILL.md` procedures loaded by a `Skill` tool, governed by `block_skills` |
 | Sandbox/env | not modelled in the image | declarative `os_env`/`sandbox`/`terminals`/`params`/`timers` |
-| Distribution | none yet (materialised into the repo) | none (git-shared YAML); **neither has a registry** |
+| Distribution | none yet (materialised into the repo) | git-shared YAML bundles; an internal `AgentStore` (create/list/update/delete + **versioning**) backs `GET /v1/agents`, but there is **no public create-agent API** |
 | Maturity | one reference harness (OpenCode) | ~15 harnesses, cost advisor, model catalog |
 
 ## Better or worse?
@@ -46,10 +46,10 @@ Not a single winner — they optimise for different things, and the honest read 
 
 ## Decision
 
-1. **Keep Arke's agent abstraction. Do not adopt Omnigent's harness-bound, concrete-model model.** The harness-agnostic image + logical tier + risk-tier governance is the moat, and it is *more* defensible now that we know Omnigent has no tier layer and no agent registry.
+1. **Keep Arke's agent abstraction. Do not adopt Omnigent's harness-bound, concrete-model model.** The harness-agnostic image + logical tier + risk-tier governance is the moat, and it is *more* defensible now that we know Omnigent has no logical-tier layer (and no public agent-creation API). **Confirmed:** the **tier stays the only model knob on an agent** — agents reference `capable`/`mid`/`fast`, never a vendor model id; when finer control is needed the answer is *add a tier* (as we did with `fast`), not pin a model onto an agent. This keeps images portable and keeps vendor ids out of agent files and the client.
 2. **Do not copy wholesale; adopt selectively.** Pull in the runtime ideas Omnigent does better, expressed in *our* abstraction: dynamic sub-agent spawning with worktree/inbox isolation; a real skills runtime; declarative sandbox/env on the image; phase-based policies as a layer beneath the risk-tier gate. Each is its own future spec, not this ADR.
-3. **Bridge to Omnigent by projection, at the adapter boundary.** When Omnigent is the substrate, `@arke/adapter-omnigent` *generates* an Omnigent agent spec from an Arke image — filling in `executor.harness` (the project's harness) and `executor.model` (registry-resolved from the image's tier) — and provisions it onto the host (Omnigent has **no create-agent API**, so via an agent dir / `--agent` / `omnigent run <dir>`, or `PUT /v1/sessions/{id}/agent` to bind per session). Arke images stay the source of truth; Omnigent specs are a compiled artifact.
-4. **A genuine differentiator worth building: an agent registry + versioning.** Omnigent lacks one. An image registry (content-addressed, versioned, listable) would be ours to own, not a copy.
+3. **Bridge to Omnigent by projection, at the adapter boundary.** When Omnigent is the substrate, `@arke/adapter-omnigent` *generates* an Omnigent agent spec from an Arke image — filling in `executor.harness` (the project's harness) and `executor.model` (registry-resolved from the image's tier). Because Omnigent exposes **no public create-agent API**, provisioning is out-of-band: drop the spec into an agent dir loaded via `omnigent server --agent` / `omnigent run <dir>`, then bind it per session. *Binding correction (verified against live openapi):* rebinding a session to a registered agent is `POST /v1/sessions/{id}/switch-agent` (by `agent_id` from `GET /v1/agents`); `PUT /v1/sessions/{id}/agent` *replaces the uploaded bundle* of a session-scoped agent — not a generic bind. Arke images stay the source of truth; Omnigent specs are a compiled artifact.
+4. **A possible differentiator: a first-class agent-image registry.** *Correction:* Omnigent is not a blank slate here — it has an internal `AgentStore` with create/list/update/delete + versioning behind `GET /v1/agents`; what it lacks is a *public create-agent API* and any content-addressed, portable image-distribution story. So the differentiator is narrower than "they have no registry": a **harness-agnostic, tier-indirected, content-addressed image registry with push/pull** would be ours to own. Validate the gap against their `AgentStore` before committing a spec to it.
 
 ## Mapping design (Arke → Omnigent, substrate mode)
 
@@ -59,9 +59,9 @@ Not a single winner — they optimise for different things, and the honest read 
 | **Spec / task session** (`SessionKind`) | session + **sub_agent** sessions | adapter records identity per session (done) |
 | **Roster image** (harness-agnostic, tier) | **generated agent spec** (`executor.harness` + resolved `executor.model`) | projection at the boundary; provisioned out-of-band (no create-API) |
 | **Logical tier** → registry | `executor.model` / per-session `model_override` / `args.model` | tier resolution stays in Arke |
-| **Tools / skills / sub-agents** | `tools` (`mcp`/`function`/`agent`) / `skills/` / nested `agents/` | `ToolDecl.kind` maps 1:1 to Omnigent tool kinds |
+| **Tools / skills / sub-agents** | `tools` (`mcp`/`function`/`agent`) / `skills/` / nested `agents/` | `ToolDecl.kind` aligns with Omnigent's kinds but is **not** a 1:1 projection — Omnigent tools need kind-specific payloads (`callable`+`parameters` for `function`, `command`/`url`+headers for `mcp`, `prompt`/`executor`/`spec` for `agent`). Arke's `ToolDecl` (name/kind/description) lacks these; projection needs a manifest/inference step (open question) |
 | **Approval — low** | run in-band | unchanged |
-| **Approval — medium** | **elicitation** `POST …/elicitations/{id}/resolve` | Arke gate remains authoritative; elicitation is the transport |
+| **Approval — medium** | `POST /v1/sessions/{id}/events` with an **approval-type event** carrying the elicitation result | *Verified:* there is **no** `/elicitations/{id}/resolve` endpoint; the reply rides the events channel. Arke gate remains authoritative; this is the transport |
 | **Approval — high** (money/ledger) | **stays in Arke** — `Proposal` + dispatcher; never delegated to Omnigent policies | hard rule; Omnigent is execution, not the gate of record |
 
 ## Consequences
