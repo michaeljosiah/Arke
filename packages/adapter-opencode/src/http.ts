@@ -62,14 +62,20 @@ export class OpenCodeHttp {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  /** Open the SSE stream; the caller parses the body. */
+  /**
+   * Open the per-project SSE stream; the caller parses the body. We use `/event` (the
+   * project-scoped bus, events un-wrapped as `{ id, type, properties }`) — NOT `/global/event`,
+   * which is the multi-project firehose that wraps each event as `{ directory, project, payload }`
+   * (the nested `payload.type` is invisible to the normalizer → every frame dead-letters). The
+   * adapter already runs one OpenCode instance per project, so the project-scoped stream is correct.
+   */
   async openEventStream(signal?: AbortSignal): Promise<ReadableStream<Uint8Array>> {
-    const res = await fetch(this.url("/global/event"), {
+    const res = await fetch(this.url("/event"), {
       headers: this.headers({ Accept: "text/event-stream" }),
       signal,
     });
     if (!res.ok || !res.body) {
-      throw new OpenCodeError("GET", "/global/event", res.status, res.statusText);
+      throw new OpenCodeError("GET", "/event", res.status, res.statusText);
     }
     return res.body;
   }

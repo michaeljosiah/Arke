@@ -254,10 +254,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   private messageBody(input: SendMessageInput, correlationId: string) {
+    // OpenCode's /session/{id}/message expects `model: { providerID, modelID }` — NOT the
+    // `{ provider, name }` shape of our internal ResolvedModel. Map it here (a mismatch is a 400).
+    const m = this.resolveModel(input.tier);
     return {
       messageID: correlationId,
-      agent: input.agent,
-      model: this.resolveModel(input.tier),
+      ...(input.agent ? { agent: input.agent } : {}),
+      model: { providerID: m.provider, modelID: m.name },
       parts: input.parts.map((p) => ({ type: "text", text: p.text })),
     };
   }
