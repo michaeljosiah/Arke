@@ -145,8 +145,12 @@ export class Coordinator {
    * onboarding gate still reflects a usable harness. Updates the snapshot fields.
    */
   private async refreshReachability(): Promise<void> {
-    if (this.endpoints.length === 0) {
-      const r = this.adapter.readiness?.() ?? { ready: true };
+    // The adapter's own readiness is authoritative once it has initialised: init() performs a real
+    // capability probe of the live server, which is more reliable than a generic HTTP health ping
+    // (e.g. OpenCode exposes no `/health`). Only when the adapter reports NOT ready (or has no
+    // readiness, or there is nothing configured) do we fall to the endpoint probe for a reason.
+    const r = this.adapter.readiness?.() ?? { ready: true };
+    if (r.ready || this.endpoints.length === 0) {
       this.harnessReachable = r.ready;
       this.harnessReachabilityReason = r.ready ? undefined : (r.reason ?? "harness not ready");
       this.harnessPartial = false;
@@ -155,7 +159,7 @@ export class Coordinator {
         ts: 0,
         harness: this.adapter.id,
         type: "harness.reachability",
-        endpoint: this.adapter.id,
+        endpoint: this.endpoints[0] ?? this.adapter.id,
         reachable: r.ready,
         ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}),
       });
