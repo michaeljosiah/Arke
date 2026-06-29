@@ -1,5 +1,6 @@
 import { store, engine } from './store';
 import { ArkeTransport, type TransportState } from './transport';
+import { OutboundQueue } from './outbound-queue';
 
 /**
  * Live coordinator wiring (SPEC-003). Connects the client to the coordinator over
@@ -183,6 +184,12 @@ function applyEvent(ev: any) {
       applyRegistryInstances(ev.instances);
       break;
     }
+    case 'spec.approval-failed': {
+      // Surface an approval failure (branch guard, dirty tree, git error) in the cockpit (SPEC-006).
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval failed — ${ev.reason}` } }));
+      rail('spec.approval-failed', `spec.approval-failed · ${ev.specId} · ${ev.reason}`, ts);
+      break;
+    }
     case 'registry.warning': {
       // Surface unsolicited live warnings in the store (deduped by reason+detail); the snapshot /
       // re-probe path is authoritative and replaces the list.
@@ -359,8 +366,56 @@ export function startLive(): ArkeTransport {
     maxDelayMs: 8000,
   });
   store.set({ connection: transport.state });
-  transport.subscribe((state: TransportState) => store.set({ connection: state }));
+  transport.subscribe((state: TransportState) => {
+    store.set({ connection: state });
+    // On reconnect, drain the cockpit's outbound queue in order (SPEC-006). Each queued command is
+    // re-issued as a request so a stale-session rejection is still surfaced, not silently executed.
+    if (state === 'open' && outbound.size > 0) {
+      const drained = outbound.drain((cmd) => { void submitCockpitPrompt(cmd); });
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${drained.length} queued message${drained.length === 1 ? '' : 's'}` } }));
+    }
+  });
   return transport;
+}
+
+// ---- authoring cockpit (SPEC-006) ----
+const outbound = new OutboundQueue<any>(50);
+
+/** Issue a prompt.send request and surface a stale-session (or other) rejection in the cockpit. */
+async function submitCockpitPrompt(args: any): Promise<any> {
+  const res = await liveRequest('prompt.send', args);
+  if (!res?.ok) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `message rejected — ${res?.error ?? 'unknown error'}` } }));
+  return res;
+}
+
+/**
+ * Send a cockpit prompt (SPEC-006). When connected it goes straight through (returning the
+ * coordinator's response so a stale-session rejection is visible); when offline it is queued,
+ * bounded at 50 — a full queue is refused, never silently dropped.
+ */
+export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string }> {
+  if (transport && transport.state === 'open') {
+    const res = await submitCockpitPrompt(args);
+    return res?.ok ? { status: 'sent' } : { status: 'rejected', error: res?.error };
+  }
+  const accepted = outbound.enqueue(args);
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: accepted ? `offline — queued ${outbound.size} message${outbound.size === 1 ? '' : 's'}` : 'offline — queue full (50); message not queued' } }));
+  return { status: accepted ? 'queued' : 'full' };
+}
+
+/** Read the working specification file for the preview (SPEC-006). */
+export function fetchSpecFile(specId: string): Promise<any> {
+  return liveRequest('spec.file', { specId });
+}
+
+/** Approve the working draft: branch-guarded commit + status advance on the host (SPEC-006). */
+export function approveDraftLive(specId: string, branch?: string): Promise<any> {
+  return liveRequest('approveDraft', { specId, branch }, 30000);
+}
+
+/** Convene the review panel on the current draft — passes a reference, never file content (SPEC-006). */
+export function convenePanelLive(specId: string, branch?: string): Promise<any> {
+  return liveRequest('convenePanel', { specId, branch });
 }
 
 export function stopLive(): void {

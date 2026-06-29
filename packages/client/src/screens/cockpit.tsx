@@ -1,10 +1,178 @@
 import React from 'react';
+import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
 import { AgentMessage, Button, Textarea, Badge, StatusDot } from '../ds';
-import { store } from '../store';
+import { store, useStore } from '../store';
+import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest } from '../live';
 
 const e = React.createElement;
 
+// ============================ LIVE MODE (SPEC-006) ============================
+// The authoring agents surfaced in the composer (capable tier; the registry resolves the model).
+const LIVE_ROLES = ['spec-author', 'architect'];
+const PREVIEW_POLL_MS = 30000; // fallback re-poll guarding against a missed message.updated
+
+const DELTA_STYLE: Record<string, { border?: string; badge: string; color: string; strike?: boolean }> = {
+  ADDED: { border: 'var(--success)', badge: 'ADDED', color: 'var(--success)' },
+  MODIFIED: { border: 'var(--warning)', badge: 'MODIFIED', color: 'var(--warning)' },
+  REMOVED: { badge: 'REMOVED', color: 'var(--destructive)', strike: true },
+};
+
+function DeltaBadge({ kind }: any) {
+  const st = DELTA_STYLE[kind];
+  if (!st) return null;
+  return e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', color: st.color, border: `1px solid ${st.color}`, borderRadius: 999, padding: '1px 6px' } }, st.badge);
+}
+
+function RequirementBlock({ req }: any) {
+  const st = req.deltaKind ? DELTA_STYLE[req.deltaKind] : null;
+  return e('div', { style: { marginBottom: 12, paddingLeft: st?.border ? 10 : 0, borderLeft: st?.border ? `3px solid ${st.border}` : 'none' } },
+    e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 } },
+      e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)', textDecoration: st?.strike ? 'line-through' : 'none' } }, req.title),
+      req.deltaKind ? e(DeltaBadge, { kind: req.deltaKind }) : null,
+      req.capability ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)' } }, req.capability) : null),
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: st?.strike ? 'var(--muted-foreground)' : 'var(--foreground)', textDecoration: st?.strike ? 'line-through' : 'none', whiteSpace: 'pre-wrap' } }, requirementProse(req.body)));
+}
+
+/** The requirement prose minus the `capability:`/`delta:` metadata line (shown as a badge instead). */
+function requirementProse(body: string): string {
+  return body
+    .split('\n')
+    .filter((l) => !/^\s*`?capability:/.test(l) && !/delta:\s*`?(ADDED|MODIFIED|REMOVED)/i.test(l))
+    .join('\n')
+    .trim();
+}
+
+function PreviewSection({ section, requirements }: any) {
+  if (!section.present) {
+    return e('div', { style: { marginBottom: 22 } },
+      e('h3', { style: { margin: '0 0 6px', fontFamily: 'var(--font-sans)', fontSize: 14.5, fontWeight: 600, color: 'var(--foreground)' } }, section.title),
+      e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--neutral-400)', fontStyle: 'italic' } }, '— empty —'));
+  }
+  return e('div', { style: { marginBottom: 22 } },
+    e('h3', { style: { margin: '0 0 8px', fontFamily: 'var(--font-sans)', fontSize: 14.5, fontWeight: 600, color: 'var(--foreground)' } }, section.title),
+    section.key === 'requirements'
+      ? (requirements.length ? requirements.map((r, i) => e(RequirementBlock, { key: i, req: r })) : e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--neutral-400)' } }, 'no requirements yet'))
+      : e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--foreground)', whiteSpace: 'pre-wrap' } }, section.markdown));
+}
+
+function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: any) {
+  const fm = doc?.frontmatter ?? {};
+  const chip = (t: string, v?: string) => v ? e('span', { key: t, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `${t}: ${v}`) : null;
+  return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)', borderLeft: '1px solid var(--border)' } },
+    e('div', { style: { padding: '11px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
+      e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'fileText', size: 15 })),
+      e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--foreground)' } }, file?.path ?? 'specification'),
+      inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'writing…')) : null,
+      refreshed ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'refreshed') : null,
+      e('span', { style: { marginLeft: 'auto' } },
+        e(Button, { size: 'sm', disabled: inFlight || approving || !file?.exists, iconLeft: e(Icon, { name: 'check', size: 14 }), onClick: onApprove }, approving ? 'Approving…' : 'Approve & persist'))),
+    e('div', { style: { padding: '9px 20px', background: 'var(--secondary)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 16, flexWrap: 'wrap' } },
+      chip('spec', fm.spec_id || file?.specId), chip('status', fm.status || file?.status), chip('branch', fm.branch || file?.branch)),
+    e('div', { style: { padding: '20px 22px', overflowY: 'auto', flex: 1 } },
+      !file?.exists
+        ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)' } }, 'No working specification file found for this spec on the active project.')
+        : (doc?.sections ?? []).map((sec, i) => e(PreviewSection, { key: i, section: sec, requirements: doc.requirements }))),
+  );
+}
+
+function LiveCockpit() {
+  const { activeSpec, cards, cockpit } = useStore();
+  const specId = activeSpec || (cards.find((c: any) => c.kind === 'spec')?.specId) || null;
+  const [file, setFile] = React.useState<any>(null);
+  const [refreshed, setRefreshed] = React.useState(false);
+  const [draft, setDraft] = React.useState('');
+  const [role, setRole] = React.useState('spec-author');
+  const [tier, setTier] = React.useState('capable');
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const [humanMsgs, setHumanMsgs] = React.useState<any[]>([]);
+  const [approving, setApproving] = React.useState(false);
+  const scroller = React.useRef<any>(null);
+
+  const specCard = cards.find((c: any) => c.id === specId || (c.kind === 'spec' && c.specId === specId));
+  const inFlight = specCard?.status === 'running';
+  const transcript = specCard?.transcript ?? [];
+
+  // Load the working file on mount/spec change, after each transcript change (proxy for
+  // message.updated), and on a 30s fallback interval (SPEC-006).
+  const refresh = React.useCallback(async (markRefreshed = false) => {
+    if (!specId) return;
+    const res = await fetchSpecFile(specId);
+    if (res?.ok) {
+      setFile((prev: any) => {
+        if (markRefreshed && prev?.text !== res.result?.text) { setRefreshed(true); setTimeout(() => setRefreshed(false), 2500); }
+        return res.result;
+      });
+    }
+  }, [specId]);
+
+  React.useEffect(() => { void refresh(); }, [refresh]);
+  React.useEffect(() => { if (transcript.length) void refresh(true); }, [transcript.length, refresh]);
+  React.useEffect(() => {
+    const iv = setInterval(() => void refresh(true), PREVIEW_POLL_MS);
+    return () => clearInterval(iv);
+  }, [refresh]);
+
+  const doc = React.useMemo(() => (file?.text ? parseSpecDoc(file.text) : null), [file?.text]);
+
+  const send = async () => {
+    if (!draft.trim() || !specId) return;
+    const text = draft.trim();
+    setHumanMsgs((m) => [...m, { id: 'h' + Date.now(), role: 'human', text }]);
+    setDraft('');
+    let sid = sessionId;
+    if (!sid) {
+      const created = await liveRequest('session.create', { specId });
+      sid = created?.ok ? created.result?.sessionId : null;
+      if (sid) setSessionId(sid);
+    }
+    if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
+    await sendCockpitPrompt({ sessionId: sid, agent: role, tier, message: text });
+  };
+
+  const approve = async () => {
+    if (!specId) return;
+    setApproving(true);
+    const res = await approveDraftLive(specId, file?.branch);
+    setApproving(false);
+    if (res?.ok) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approved — ${specId} is now in-review` } })); void refresh(); }
+    // failure is surfaced via the spec.approval-failed event handler in live.ts
+  };
+
+  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [transcript.length, humanMsgs.length]);
+
+  // Interleave the live agent transcript with the engineer's own messages, in arrival order.
+  const turns = [
+    ...transcript.map((t: any) => ({ kind: 'agent', text: t.text, model: specCard?.model, agent: 'agent', streaming: t.isStreaming })),
+    ...humanMsgs.map((h: any) => ({ kind: 'human', text: h.text })),
+  ];
+
+  return e('div', { style: { display: 'flex', height: '100%' } },
+    e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
+      e('div', { style: { padding: '11px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 } },
+        e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Authoring'),
+        inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'agent writing')) : null,
+        e('div', { style: { flex: 1 } }),
+        e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId, onClick: () => { if (specId) void convenePanelLive(specId, file?.branch); } }, 'Convene review')),
+      cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
+      e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
+        turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
+          : turns.map((m: any, i: number) => e(AgentMessage, { key: i, role: m.kind, agent: m.kind === 'agent' ? role : undefined, model: m.model }, m.text || '…'))),
+      e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
+        e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
+          e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
+          e(MiniSelect, { value: tier, icon: 'cpu', options: ['capable', 'mid', 'fast'], onChange: setTier })),
+        e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
+        e('div', { style: { display: 'flex', alignItems: 'center', marginTop: 9 } },
+          e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
+          e('div', { style: { flex: 1 } }),
+          e(Button, { size: 'sm', disabled: !specId, onClick: () => void send() }, 'Send'))),
+    ),
+    e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve }),
+  );
+}
+
+// ============================ DEMO MODE (design baseline) ====================
 const ROLES = [
   { role: 'Product Owner', model: 'Opus', writes: 'requirements' },
   { role: 'Technical Architect', model: 'Opus', writes: 'design' },
@@ -43,14 +211,14 @@ const SEED_MSGS = [
 
 function MiniSelect({ value, options, onChange, icon }: any) {
   const [open, setOpen] = React.useState(false);
-  const ref = React.useRef(null);
-  React.useEffect(() => { const h = (ev) => { if (ref.current && !ref.current.contains(ev.target)) setOpen(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  const ref = React.useRef<any>(null);
+  React.useEffect(() => { const h = (ev: any) => { if (ref.current && !ref.current.contains(ev.target)) setOpen(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
   return e('div', { ref, style: { position: 'relative' } },
     e('button', { onClick: () => setOpen((o) => !o), style: { display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 500, color: 'var(--foreground)' } },
       icon ? e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: icon, size: 13 })) : null,
       value, e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'chevronDown', size: 12 }))),
     open ? e('div', { style: { position: 'absolute', bottom: 30, left: 0, minWidth: 150, background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)', zIndex: 40, padding: 4 } },
-      options.map((o) => e('button', { key: o, onClick: () => { onChange(o); setOpen(false); }, style: { display: 'block', width: '100%', textAlign: 'left', padding: '6px 9px', borderRadius: 'var(--radius-sm)', border: 'none', background: o === value ? 'var(--accent)' : 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--foreground)' } }, o))) : null,
+      options.map((o: any) => e('button', { key: o, onClick: () => { onChange(o); setOpen(false); }, style: { display: 'block', width: '100%', textAlign: 'left', padding: '6px 9px', borderRadius: 'var(--radius-sm)', border: 'none', background: o === value ? 'var(--accent)' : 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--foreground)' } }, o))) : null,
   );
 }
 
@@ -63,7 +231,7 @@ function Section({ title, children, editing }: any) {
 }
 
 function SpecPreview({ spec, editing }: any) {
-  const line = (it, i) => e('div', { key: i, style: { display: 'flex', gap: 8, marginBottom: 7, alignItems: 'flex-start' } },
+  const line = (it: any, i: number) => e('div', { key: i, style: { display: 'flex', gap: 8, marginBottom: 7, alignItems: 'flex-start' } },
     it.shall
       ? e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', color: 'var(--foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 6px', marginTop: 1 } }, 'SHALL')
       : it.open ? e('span', { style: { flex: 'none', color: 'var(--warning)', display: 'flex', marginTop: 2 } }, e(Icon, { name: 'alert', size: 13 }))
@@ -76,12 +244,12 @@ function SpecPreview({ spec, editing }: any) {
       e('span', { style: { marginLeft: 'auto', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, 'a view of the working file in the repo'),
       e(Button, { size: 'sm', iconLeft: e(Icon, { name: 'check', size: 14 }), onClick: () => store.set({ view: 'generation' }) }, 'Approve & persist')),
     e('div', { style: { padding: '9px 20px', background: 'var(--secondary)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 16, flexWrap: 'wrap' } },
-      spec.frontmatter.map((t, i) => e('span', { key: i, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, t))),
+      spec.frontmatter.map((t: string, i: number) => e('span', { key: i, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, t))),
     e('div', { style: { padding: '20px 22px', overflowY: 'auto', flex: 1 } },
       e(Section, { title: 'Requirements', editing: editing === 'requirements' }, spec.requirements.map(line)),
       e(Section, { title: 'Design', editing: editing === 'design' }, spec.design.map(line)),
       e(Section, { title: 'Tasks', editing: editing === 'tasks' },
-        spec.tasks.map((t, i) => e('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+        spec.tasks.map((t: any, i: number) => e('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
           e('span', { style: { flex: 'none', display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'commit', size: 14 })),
           e('span', { style: { flex: 1, fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)' } }, t.t),
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: t.tier === 'needs a human' ? 'var(--warning)' : 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 7px' } }, t.tier)))),
@@ -89,18 +257,18 @@ function SpecPreview({ spec, editing }: any) {
   );
 }
 
-export function Cockpit() {
+function DemoCockpit() {
   const [msgs, setMsgs] = React.useState(SEED_MSGS);
   const [spec, setSpec] = React.useState(seedSpec);
   const [draft, setDraft] = React.useState('');
   const [role, setRole] = React.useState('Technical Architect');
   const [model, setModel] = React.useState('Opus');
-  const [editing, setEditing] = React.useState(null);
+  const [editing, setEditing] = React.useState<any>(null);
   const [streaming, setStreaming] = React.useState(false);
-  const scroller = React.useRef(null);
+  const scroller = React.useRef<any>(null);
   React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [msgs]);
 
-  const streamReply = (fullText, opts) => {
+  const streamReply = (fullText: string, opts: any) => {
     const id = 'a' + Date.now();
     setStreaming(true);
     setMsgs((m) => [...m, { id, role: 'agent', agent: opts.agent, model: opts.model, text: '' }]);
@@ -129,11 +297,11 @@ export function Cockpit() {
       streamReply('Understood. Updating the ' + target + ' section now — ' + (target === 'tasks' ? 're-deriving the implementation plan and acceptance criteria to match.' : target === 'design' ? 'revising the data model and API contracts grounded in the codebase.' : 'tightening the SHALL statements and scenarios.') + ' The change is reflected in the preview.', {
         agent: role, model,
         onDone: () => {
-          setSpec((sp) => {
+          setSpec((sp: any) => {
             const next = { ...sp };
             if (target === 'tasks') next.tasks = [...sp.tasks.slice(0, 2), { t: 'Add retry-attempt metric', tier: 'mid-tier' }, ...sp.tasks.slice(2)];
             else if (target === 'design') next.design = [...sp.design, { t: 'Performance — index on (tenant_id, idempotency_key) keeps lookups O(log n).', shall: false }];
-            else next.requirements = sp.requirements.map((x) => x.shall ? { ...x, t: x.t + ' Processed keys retained 30 days.' } : x);
+            else next.requirements = sp.requirements.map((x: any) => x.shall ? { ...x, t: x.t + ' Processed keys retained 30 days.' } : x);
             return next;
           });
           setTimeout(() => setEditing(null), 1200);
@@ -150,12 +318,12 @@ export function Cockpit() {
         e('div', { style: { flex: 1 } }),
         e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), onClick: () => store.set({ view: 'review' }) }, 'Convene review')),
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
-        msgs.map((m) => e(AgentMessage, { key: m.id, role: m.role, agent: m.agent, model: m.model }, m.text || '…'))),
+        msgs.map((m: any) => e(AgentMessage, { key: m.id, role: m.role, agent: m.agent, model: m.model }, m.text || '…'))),
       e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
         e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
-          e(MiniSelect, { value: role, icon: 'bot', options: ROLES.map((r) => r.role), onChange: (v) => { setRole(v); const r = ROLES.find((x) => x.role === v); if (r) setModel(r.model); } }),
+          e(MiniSelect, { value: role, icon: 'bot', options: ROLES.map((r) => r.role), onChange: (v: any) => { setRole(v); const r = ROLES.find((x) => x.role === v); if (r) setModel(r.model); } }),
           e(MiniSelect, { value: model, icon: 'cpu', options: ['Opus', 'Sonnet', 'GPT-5.5', 'mid-tier'], onChange: setModel })),
-        e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev) => setDraft(ev.target.value), onKeyDown: (ev) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) send(); } }),
+        e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) send(); } }),
         e('div', { style: { display: 'flex', alignItems: 'center', marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
           e('div', { style: { flex: 1 } }),
@@ -163,4 +331,10 @@ export function Cockpit() {
     ),
     e(SpecPreview, { spec, editing }),
   );
+}
+
+/** The cockpit renders live (wired to the coordinator) once a snapshot has arrived, else the demo. */
+export function Cockpit() {
+  const live = useStore((s: any) => s.live);
+  return live ? e(LiveCockpit) : e(DemoCockpit);
 }

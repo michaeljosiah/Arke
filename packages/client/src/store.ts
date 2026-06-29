@@ -125,6 +125,8 @@ export const store = createStore({
   roster: [],
   // Registry config/health warnings from the live registry projection (SPEC-005).
   registryWarnings: [],
+  // Authoring cockpit transient state (SPEC-006): outbound queue depth + a reconnect/queue notice.
+  cockpit: { queued: 0, notice: null },
   permission: null,
   entryFolder: null,
   theme: 'light',
