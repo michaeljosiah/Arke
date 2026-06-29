@@ -125,14 +125,22 @@ Built a recon-grounded adapter (8 src files, 14 unit tests) and ran it against a
 | `streamEvents` | `GET /v1/sessions/{id}/stream` SSE — real frames (`session.heartbeat`, `session.presence`, `session.changed_files.invalidated`) parse cleanly; unmapped types ignored, not dead-lettered | ✅ verified |
 | `respondToPermission` | elicitations `POST /v1/sessions/{id}/elicitations/{id}/resolve` | ⏳ not exercised live (no elicitation without a turn) |
 
-**Verdict: exit GREEN — a real OpenCode turn ran end-to-end through the adapter's event path.**
+**Verdict: exit GREEN on the substrate thesis — with one honest caveat on the adapter's normalize.**
 After registering a runner/host (`omni host --server …`) and installing the OpenCode harness with the
 operator's existing credentials (github-copilot/openai, mounted read-only), a full turn completed:
 `POST /v1/sessions/{id}/events` → 202 → stream `response.in_progress` → `response.output_item.done`
 (assistant `content:[{type:"output_text",text:"PONG"}]`, model `openai/gpt-5.5-fast`) →
-`response.completed` — the exact OpenAI-Responses shapes the adapter normalises. The control plane
-(auth boundary, session create, event-stream parsing, send-event shape) and the full
-runner-bound turn are both confirmed against the live server.
+`response.completed`. The control plane (auth boundary, session create, event-stream parsing,
+send-event shape) and the full runner-bound turn are confirmed against the live server.
+
+**Caveat (PR #11 review):** that live turn was observed by reading the raw SSE stream directly — the
+adapter's `normalize` was **not** in the live path. Real Omnigent frames are **flat**
+(`{type, delta, …}` / `{type, item:{…}}`), but the spike normalizer reads a nested `properties.data.*`
+shape (its unit fixtures were written nested, so they passed while not matching reality). So: the
+*substrate + transport* are proven; the *adapter's normalize needs a real-frame rewrite* (flat
+payloads, `session.status`/`input.consumed` coverage, completion-aware `sendMessage`, event-confirmed
+approvals via the events channel). That rewrite + fixtures-from-captured-frames is the follow-up
+hardening spec — the adapter must not be wired in until then.
 
 Architecture note: Omnigent enforces a **server/runner split** — `omnigent server` is the control
 plane; a turn only executes once a runner/host is bound (`omni host`), which carries the harness +
