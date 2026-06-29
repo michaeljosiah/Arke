@@ -21,6 +21,7 @@ export interface EventIdentity {
 
 export type NormalizeOutcome =
   | { kind: "event"; event: DomainEvent }
+  | { kind: "events"; events: DomainEvent[] } // one frame fanning to several (e.g. idle → finalize + quiescent)
   | { kind: "graph"; record: SessionRecord }
   | { kind: "ignore" }
   | { kind: "unknown-session"; sessionId: string }
@@ -29,12 +30,29 @@ export type NormalizeOutcome =
 /** Synchronous lookup of a session's canonical identity from the graph cache. */
 export type IdentityLookup = (sessionId: string) => EventIdentity | undefined;
 
+/**
+ * Mutable correlation state the (otherwise pure) normaliser needs for OpenCode's split transcript
+ * model: a message's role arrives on `message.updated` (`properties.info.role`) while its text
+ * arrives on the `message.part.updated` frames — so we remember role per messageID, and the
+ * last message per session so `session.idle` can finalise it (close streaming) and emit a
+ * `turn.quiescent` receipt. Held by the adapter; tests pass a fresh one.
+ */
+export interface NormalizeState {
+  roleByMessage: Map<string, "user" | "assistant" | "tool">;
+  lastBySession: Map<string, { messageId: string; text: string; role: "user" | "assistant" | "tool" }>;
+}
+
+export function createNormalizeState(): NormalizeState {
+  return { roleByMessage: new Map(), lastBySession: new Map() };
+}
+
 /** Known event types the adapter recognises but deliberately does not map (yet). */
 const IGNORED_TYPES = new Set([
   "server.connected",
   "session.deleted",
   "session.compacted",
   "session.diff", // carries no counts; coordinator pairs with GET /diff → diff.finalized
+  "message.part.delta", // incremental text; the message.part.updated snapshot carries the full text
   "message.removed",
   "question.asked",
   "question.replied",
@@ -60,7 +78,12 @@ function blankEnvelope(harness: string) {
   return { seq: 0, ts: 0, harness } as const;
 }
 
-export function normalize(raw: unknown, lookup: IdentityLookup, harness: string): NormalizeOutcome {
+export function normalize(
+  raw: unknown,
+  lookup: IdentityLookup,
+  harness: string,
+  state: NormalizeState = createNormalizeState(),
+): NormalizeOutcome {
   if (typeof raw !== "object" || raw === null) {
     return { kind: "dead-letter", reason: "frame is not an object" };
   }
@@ -111,17 +134,43 @@ export function normalize(raw: unknown, lookup: IdentityLookup, harness: string)
         status = raw === "idle" ? "idle" : raw === "error" ? "error" : "running";
       }
 
-      return {
-        kind: "event",
-        event: {
-          ...env,
-          type: "session.status",
-          sessionId: sid,
-          specId: identity.specId,
-          kind: identity.kind,
-          status,
-        },
+      const statusEvent: DomainEvent = {
+        ...env,
+        type: "session.status",
+        sessionId: sid,
+        specId: identity.specId,
+        kind: identity.kind,
+        status,
       };
+      // session.idle is the turn-completion signal in OpenCode (no message.updated isStreaming:false
+      // arrives): finalise the last message (close streaming) and emit the turn.quiescent receipt.
+      if (e.type === "session.idle") {
+        const events: DomainEvent[] = [statusEvent];
+        const last = state.lastBySession.get(sid);
+        if (last) {
+          events.push({
+            ...env,
+            correlationId: last.messageId,
+            type: "message.updated",
+            sessionId: sid,
+            messageId: last.messageId,
+            role: last.role,
+            text: last.text,
+            toolCalls: [],
+            isStreaming: false,
+          });
+        }
+        events.push({
+          ...env,
+          ...(last ? { correlationId: last.messageId } : {}),
+          type: "turn.quiescent",
+          sessionId: sid,
+          turnId: last?.messageId ?? sid,
+        });
+        state.lastBySession.delete(sid);
+        return { kind: "events", events };
+      }
+      return { kind: "event", event: statusEvent };
     }
 
     // ---- todos (session id only) ----
@@ -190,44 +239,40 @@ export function normalize(raw: unknown, lookup: IdentityLookup, harness: string)
 
     // ---- streaming transcript (SPEC-003) ----
     case "message.part.updated": {
+      // OpenCode 1.17.11: properties = { sessionID, part: { type, text, messageID } }, where `text`
+      // is the message's FULL current text (a snapshot). We map it to a message.updated (replace) so
+      // the read model re-converges on the latest text; the role lives on message.updated.info,
+      // remembered in state (assistant if unseen).
+      //
+      // Older OpenCode builds stream this frame as an incremental DELTA (`part.delta` / top-level
+      // `delta`) with no full `text`. We still support that: accumulate the delta onto the prior
+      // text for the message so those servers don't lose transcript content. A frame carrying
+      // neither text nor delta is ignored, never coerced to "" (which would wipe the transcript).
       const sid = sessionIdOf(p);
-      const messageId = (p.message_id ?? p.messageID ?? p.messageId) as string | undefined;
+      const part = (p.part ?? {}) as { text?: string; delta?: string; type?: string; messageID?: string };
+      const messageId = (part.messageID ?? p.message_id ?? p.messageID ?? p.messageId) as
+        | string
+        | undefined;
       if (!sid || !messageId) {
         return { kind: "dead-letter", reason: "message.part.updated without session/message id" };
       }
-      const part = (p.part ?? {}) as { delta?: string; text?: string; type?: string; done?: boolean };
-      const delta = String(p.delta ?? part.delta ?? part.text ?? "");
-      const partIndex = Number(p.part_index ?? p.partIndex ?? 0);
-      const role = part.type === "tool" ? "tool" : "assistant";
-      return {
-        kind: "event",
-        event: {
-          ...env,
-          correlationId: messageId, // correlation = the OpenCode messageID
-          type: "message.part",
-          sessionId: sid,
-          messageId,
-          partIndex: Number.isFinite(partIndex) ? partIndex : 0,
-          delta,
-          role,
-          done: Boolean(p.done ?? part.done ?? false),
-        },
-      };
-    }
-    case "message.updated": {
-      const sid = sessionIdOf(p);
-      const message = (p.message ?? {}) as {
-        id?: string;
-        role?: string;
-        text?: string;
-        isStreaming?: boolean;
-      };
-      const messageId = (p.message_id ?? p.messageID ?? message.id) as string | undefined;
-      if (!sid || !messageId) {
-        return { kind: "dead-letter", reason: "message.updated without session/message id" };
+      if (part.type && part.type !== "text") return { kind: "ignore" }; // tool / reasoning parts
+      const role = state.roleByMessage.get(messageId) ?? "assistant";
+      let text: string;
+      if (typeof part.text === "string") {
+        text = part.text; // 1.17.11 full snapshot (an empty string is a valid snapshot)
+      } else {
+        const delta =
+          typeof part.delta === "string"
+            ? part.delta
+            : typeof p.delta === "string"
+              ? (p.delta as string)
+              : undefined;
+        if (delta === undefined) return { kind: "ignore" }; // nothing to add — don't clobber
+        const prior = state.lastBySession.get(sid);
+        text = (prior?.messageId === messageId ? prior.text : "") + delta; // older delta shape
       }
-      const role =
-        message.role === "user" || message.role === "tool" ? message.role : "assistant";
+      state.lastBySession.set(sid, { messageId, text, role });
       return {
         kind: "event",
         event: {
@@ -237,9 +282,48 @@ export function normalize(raw: unknown, lookup: IdentityLookup, harness: string)
           sessionId: sid,
           messageId,
           role,
-          text: String(message.text ?? p.text ?? ""),
+          text,
           toolCalls: [],
-          isStreaming: Boolean(message.isStreaming ?? false),
+          isStreaming: role === "assistant", // closed by session.idle's finalising frame
+        },
+      };
+    }
+    case "message.updated": {
+      // OpenCode 1.17.11: properties = { sessionID, info: { id, role, … } } — identity/role only,
+      // NO text (text streams via the parts). Record the role so the part frames attribute correctly.
+      //
+      // Older OpenCode builds carry the message's full text + isStreaming on the message itself
+      // (`properties.message.text` / `.isStreaming`). When the frame already carries text, emit a
+      // message.updated so that completed snapshot and its stream-close still reach the read model.
+      const sid = sessionIdOf(p);
+      const info = (p.info ?? p.message ?? {}) as {
+        id?: string;
+        role?: string;
+        text?: string;
+        isStreaming?: boolean;
+      };
+      const messageId = (info.id ?? p.message_id ?? p.messageID ?? p.messageId) as string | undefined;
+      if (!sid || !messageId) {
+        return { kind: "dead-letter", reason: "message.updated without session/message id" };
+      }
+      const role = info.role === "user" || info.role === "tool" ? info.role : "assistant";
+      state.roleByMessage.set(messageId, role);
+      if (typeof info.text !== "string") return { kind: "ignore" }; // 1.17.11: text comes via parts
+      const text = info.text;
+      const isStreaming = info.isStreaming === true; // older completed snapshots set this false
+      state.lastBySession.set(sid, { messageId, text, role });
+      return {
+        kind: "event",
+        event: {
+          ...env,
+          correlationId: messageId,
+          type: "message.updated",
+          sessionId: sid,
+          messageId,
+          role,
+          text,
+          toolCalls: [],
+          isStreaming,
         },
       };
     }

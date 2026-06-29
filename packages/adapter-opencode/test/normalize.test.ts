@@ -11,20 +11,22 @@ const identities: Record<string, EventIdentity> = {
 };
 const lookup = (sid: string): EventIdentity | undefined => identities[sid];
 
-test("session.idle maps to session.status idle with resolved identity", () => {
+test("session.idle emits session.status idle + a turn.quiescent receipt (with resolved identity)", () => {
   const out = normalize(
     { type: "session.idle", properties: { session_id: "ses_spec" } },
     lookup,
     HARNESS,
   );
-  assert.equal(out.kind, "event");
-  if (out.kind !== "event") return;
-  assert.deepEqual(
-    { type: out.event.type, ...("status" in out.event ? { status: out.event.status } : {}) },
-    { type: "session.status", status: "idle" },
-  );
-  assert.equal((out.event as { specId: string }).specId, "SPEC-2026-06-28-x");
-  assert.equal((out.event as { kind: string }).kind, "spec");
+  // session.idle now fans out: status(idle) + turn.quiescent (and a finalise frame when a message
+  // was in flight). With no prior message in state here, it's status + quiescent.
+  assert.equal(out.kind, "events");
+  if (out.kind !== "events") return;
+  const status = out.events.find((e) => e.type === "session.status");
+  if (!status || status.type !== "session.status") return assert.fail("expected a session.status");
+  assert.equal(status.status, "idle");
+  assert.equal(status.specId, "SPEC-2026-06-28-x");
+  assert.equal(status.kind, "spec");
+  assert.ok(out.events.some((e) => e.type === "turn.quiescent"), "expected a turn.quiescent receipt");
 });
 
 test("session.error maps to session.status error", () => {

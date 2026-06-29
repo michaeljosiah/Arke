@@ -112,6 +112,34 @@ test("events produced during a dispatched turn carry its correlation id", async 
   ac.abort();
 });
 
+test("an idle-only turn (no message parts) still tags turn.quiescent with the dispatched correlation", async () => {
+  // PR #8 review: session.idle fans out to [status, turn.quiescent]; observing the status clears the
+  // in-flight correlation, so the receipt must be stamped from a snapshot taken before that clear.
+  const { adapter } = makeAdapter();
+  await adapter.init();
+  const spec = await adapter.createSession({ specId: "SPEC-A" });
+
+  const ac = new AbortController();
+  const collector = new EventCollector(adapter.streamEvents(ac.signal));
+  await waitUntil(() => server.sseClientCount > 0);
+
+  await adapter.dispatchAsync({
+    sessionId: spec.sessionId,
+    agent: "implementer",
+    tier: "mid",
+    correlationId: "corr_idle",
+    parts: [{ type: "text", text: "go" }],
+  });
+  // turn completes with no message.* frames at all (empty response / older server)
+  server.push({ type: "session.idle", properties: { session_id: spec.sessionId } });
+
+  const quiescent = await collector.waitFor(
+    (e) => e.type === "turn.quiescent" && "sessionId" in e && e.sessionId === spec.sessionId,
+  );
+  assert.equal(quiescent.correlationId, "corr_idle");
+  ac.abort();
+});
+
 test("streamEvents enriches a live event with the owning spec identity", async () => {
   const { adapter } = makeAdapter();
   await adapter.init();

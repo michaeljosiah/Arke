@@ -35,7 +35,7 @@ import {
   type SessionStore,
 } from "./session-graph.js";
 import { ArrayDeadLetterSink, type DeadLetterSink } from "./dead-letter.js";
-import { type EventIdentity, normalize } from "./normalize.js";
+import { type EventIdentity, type NormalizeState, createNormalizeState, normalize } from "./normalize.js";
 import { PermissionCoordinator, type PermissionClient } from "./permissions.js";
 import { parseSse } from "./sse.js";
 
@@ -77,6 +77,8 @@ export class OpenCodeAdapter implements HarnessAdapter {
   private deadLetterCount = 0;
   /** sessionId → correlationId of the in-flight turn, so emitted events attribute to it. */
   private readonly activeTurn = new Map<string, string>();
+  // Correlation state for the split transcript model (role on message.updated, text on the parts).
+  private readonly normState: NormalizeState = createNormalizeState();
 
   constructor(config: OpenCodeConfig, deps: OpenCodeAdapterDeps = {}) {
     this.http = new OpenCodeHttp(config);
@@ -329,7 +331,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
   /** Map → enrich → validate one raw frame; resolve unknown sessions; dead-letter the rest. */
   private async process(raw: unknown): Promise<DomainEvent[]> {
-    let outcome = normalize(raw, (sid) => this.identityOf(sid), this.id);
+    let outcome = normalize(raw, (sid) => this.identityOf(sid), this.id, this.normState);
 
     if (outcome.kind === "unknown-session") {
       const resolved = await this.resolveSession(outcome.sessionId);
@@ -337,7 +339,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
         this.deadLetter(`unresolved session ownership: ${outcome.sessionId}`, raw);
         return [];
       }
-      outcome = normalize(raw, (sid) => this.identityOf(sid), this.id);
+      outcome = normalize(raw, (sid) => this.identityOf(sid), this.id, this.normState);
     }
 
     switch (outcome.kind) {
@@ -358,6 +360,27 @@ export class OpenCodeAdapter implements HarnessAdapter {
         const finished = this.finishEvent(outcome.event, raw);
         return finished ? [finished] : [];
       }
+      case "events": {
+        // One frame fanning to several (e.g. session.idle → finalise + turn.quiescent). Snapshot
+        // the in-flight turn correlations BEFORE observe() runs: session.status idle clears
+        // activeTurn (the turn closes), so without this the fanned-out turn.quiescent — which on the
+        // idle-only / empty-response path carries no correlationId of its own — would lose the
+        // dispatched id, and an async caller couldn't match the receipt back to its request.
+        const corrFallback = new Map<string, string>();
+        for (const ev of outcome.events) {
+          if ("sessionId" in ev && !ev.correlationId && !corrFallback.has(ev.sessionId)) {
+            const corr = this.activeTurn.get(ev.sessionId);
+            if (corr) corrFallback.set(ev.sessionId, corr);
+          }
+        }
+        const out: DomainEvent[] = [];
+        for (const ev of outcome.events) {
+          this.observe(ev);
+          const finished = this.finishEvent(ev, raw, corrFallback);
+          if (finished) out.push(finished);
+        }
+        return out;
+      }
     }
   }
 
@@ -371,12 +394,17 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   /** Attach correlation id (where applicable) and validate at the boundary before emission. */
-  private finishEvent(event: DomainEvent, raw: unknown): DomainEvent | null {
+  private finishEvent(
+    event: DomainEvent,
+    raw: unknown,
+    corrFallback?: Map<string, string>,
+  ): DomainEvent | null {
     let candidate: DomainEvent = event;
     // Attach the in-flight turn's correlation id, unless the event already carries one
-    // (message.* events derive it from their own messageID in the normaliser).
+    // (message.* events derive it from their own messageID in the normaliser). The fallback map
+    // preserves the correlation across a fan-out whose earlier event (idle) already cleared activeTurn.
     if ("sessionId" in event && !event.correlationId) {
-      const corr = this.activeTurn.get(event.sessionId);
+      const corr = this.activeTurn.get(event.sessionId) ?? corrFallback?.get(event.sessionId);
       if (corr) candidate = { ...event, correlationId: corr };
     }
     const parsed = DomainEvent.safeParse(candidate);
@@ -516,7 +544,7 @@ export {
   FileSessionStore,
 } from "./session-graph.js";
 export { type DeadLetter, type DeadLetterSink, ArrayDeadLetterSink } from "./dead-letter.js";
-export { type EventIdentity, type NormalizeOutcome, normalize } from "./normalize.js";
+export { type EventIdentity, type NormalizeOutcome, type NormalizeState, createNormalizeState, normalize } from "./normalize.js";
 export { probeCapabilities, type ProbeResult, type ProbeClient } from "./capabilities.js";
 export { PermissionCoordinator, type PermissionClient } from "./permissions.js";
 export { parseSse } from "./sse.js";
