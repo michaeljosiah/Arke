@@ -98,21 +98,29 @@ const TIERS = [
   { tier: 'fast', label: 'Fast tier', model: 'claude-haiku-4', note: 'routine, classification & projection drafts' },
 ];
 
+// Demo/mock data is OFF by default — the client shows real coordinator data (empty until a
+// project is scaffolded and agents run). Opt in with `VITE_ARKE_DEMO=1` to load the seeded
+// prototype fixtures for design work. Pairs with the coordinator's `ARKE_MOCK` flag.
+const DEMO = (() => {
+  const v = ((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ARKE_DEMO ?? '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+})();
+
 export const store = createStore({
   project: null,
   view: 'picker',
-  activeSpec: 'SPEC-014',
+  activeSpec: DEMO ? 'SPEC-014' : null,
   activeCard: null,
-  specs: SPECS,
-  cards: CARDS,
-  events: EVENTS,
-  audit: AUDIT,
-  notifs: NOTIFS,
-  projections: PROJECTIONS,
-  agents: AGENTS,
-  harnesses: HARNESSES,
-  integrations: INTEGRATIONS,
-  tiers: TIERS,
+  specs: DEMO ? SPECS : [],
+  cards: DEMO ? CARDS : [],
+  events: DEMO ? EVENTS : [],
+  audit: DEMO ? AUDIT : [],
+  notifs: DEMO ? NOTIFS : [],
+  projections: DEMO ? PROJECTIONS : [],
+  agents: DEMO ? AGENTS : [],
+  harnesses: DEMO ? HARNESSES : [],
+  integrations: DEMO ? INTEGRATIONS : [],
+  tiers: DEMO ? TIERS : [],
   permission: null,
   entryFolder: null,
   theme: 'light',
@@ -126,6 +134,22 @@ export const store = createStore({
   // `live` flips true once a snapshot arrives, at which point the mock engine stands down.
   connection: 'offline',
   live: false,
+  // The single project the connected coordinator serves (SPEC-004). Null until a snapshot arrives.
+  // The coordinator is single-project; there is no multi-project list.
+  connectedProject: null,
+  // The coordinator-relative path the initialisation screen should scaffold. Defaults to the
+  // project root ('.'); the clone flow sets it to the cloned subdirectory so scaffolding targets
+  // the freshly cloned repo, not the coordinator root.
+  entryPath: '.',
+  // Onboarding state (SPEC-004), folded from the coordinator snapshot + events. Defaults assume a
+  // reachable harness so the mock-only prototype shows the picker directly.
+  harnessReachable: true,
+  harnessReachabilityReason: null,
+  harnessReachabilityPartial: false,
+  projectState: null,
+  missingSentinels: [],
+  tierDefaults: null,
+  scaffold: null,
 });
 
 // ---------- helpers to mutate ----------
@@ -223,7 +247,8 @@ function tick() {
   }
 }
 
-function start() { if (!timer) timer = setInterval(tick, 2600); }
+// The fabricating engine runs only in demo mode; by default the client shows real data only.
+function start() { if (DEMO && !timer) timer = setInterval(tick, 2600); }
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
 
 function acceptDiff(id) {

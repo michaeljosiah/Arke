@@ -34,6 +34,7 @@ interface LiveCard {
 let transport: ArkeTransport | null = null;
 const cards = new Map<string, LiveCard>();
 const specStatus = new Map<string, string>();
+const reachByEndpoint = new Map<string, { reachable: boolean; reason?: string; partial?: boolean }>();
 let evSeq = 0;
 
 function deriveColumn(card: LiveCard, ss?: string): Col {
@@ -144,6 +145,47 @@ function applyEvent(ev: any) {
       rail('turn.quiescent', `turn.quiescent · ${ev.sessionId}`, ts);
       break;
     }
+    case 'scaffold.step': {
+      // Fold scaffold progress for the initialisation screen's terminal panel (SPEC-004).
+      store.set((s: any) => ({
+        scaffold: {
+          ...(s.scaffold ?? { steps: {}, log: [], running: true, done: false }),
+          // An error step is terminal: ScaffoldRunner stops and emits no scaffold.done, so clear
+          // `running` (and flag `error`) — otherwise the init screen stays stuck on "Scaffolding…"
+          // and the retry path is unreachable.
+          running: ev.status === 'error' ? false : (ev.status === 'running' ? true : (s.scaffold?.running ?? true)),
+          error: ev.status === 'error' ? (ev.detail || ev.step) : (s.scaffold?.error ?? null),
+          steps: { ...(s.scaffold?.steps ?? {}), [ev.step]: ev.status },
+          log: [
+            ...((s.scaffold?.log ?? [])),
+            { t: ev.status === 'error' ? 'err' : ev.status === 'skipped' ? 'skip' : ev.status === 'done' ? 'file' : 'run', m: `${ev.step}: ${ev.status}${ev.detail ? ' — ' + ev.detail : ''}` },
+          ].slice(-80),
+        },
+      }));
+      rail('scaffold.step', `scaffold.step · ${ev.step} · ${ev.status}`, ts);
+      break;
+    }
+    case 'scaffold.done': {
+      store.set((s: any) => ({
+        scaffold: { ...(s.scaffold ?? { steps: {}, log: [] }), running: false, done: true },
+      }));
+      rail('scaffold.done', `scaffold.done · ${(ev.stepsRun || []).join(', ')}`, ts);
+      break;
+    }
+    case 'harness.reachability': {
+      // Per-endpoint probe result. Track each endpoint and recompute the aggregate (any reachable
+      // → reachable) so a live "Retry connection" updates the gate without a reconnect (SPEC-004).
+      reachByEndpoint.set(ev.endpoint, { reachable: ev.reachable, reason: ev.reason, partial: ev.partial });
+      const all = [...reachByEndpoint.values()];
+      const reachable = all.some((r) => r.reachable);
+      const failed = all.find((r) => !r.reachable);
+      store.set({
+        harnessReachable: reachable,
+        harnessReachabilityReason: reachable ? null : (failed?.reason ?? null),
+        harnessReachabilityPartial: reachable ? false : (failed?.partial ?? false),
+      });
+      break;
+    }
     default:
       break;
   }
@@ -154,8 +196,9 @@ function publish() {
   store.set({ cards: [...cards.values()] });
 }
 
-/** Seed the local read model from a coordinator snapshot of computed CardState[]. */
-function applySnapshot(snapCards: any[]) {
+/** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */
+function applySnapshot(snap: any) {
+  const snapCards: any[] = Array.isArray(snap?.cards) ? snap.cards : [];
   cards.clear();
   specStatus.clear();
   const SPEC_COL_TO_STATUS: Record<string, string> = { authoring: 'draft', review: 'in-review', approved: 'approved', merged: 'merged' };
@@ -168,15 +211,33 @@ function applySnapshot(snapCards: any[]) {
     });
     if (c.kind === 'spec' && SPEC_COL_TO_STATUS[col]) specStatus.set(c.specId, SPEC_COL_TO_STATUS[col]);
   }
-  // Snapshot is authoritative; switch the UI to live and let the mock engine stand down.
-  store.set({ cards: [...cards.values()], live: true, events: [] });
+  // Snapshot is authoritative; switch the UI to live and let the mock engine stand down. It also
+  // carries the onboarding state (SPEC-004): harness reachability + the project classification.
+  reachByEndpoint.clear();
+  store.set({
+    cards: [...cards.values()],
+    live: true,
+    events: [],
+    connectedProject: snap?.projectName ? { name: snap.projectName, path: snap.projectPath ?? null, harness: snap.harness ?? null, endpoint: snap.harnessEndpoint ?? null } : null,
+    harnessReachable: snap?.harnessReachable ?? true,
+    harnessReachabilityReason: snap?.harnessReachabilityReason ?? null,
+    harnessReachabilityPartial: snap?.harnessReachabilityPartial ?? false,
+    projectState: snap?.projectState ?? null,
+    missingSentinels: snap?.missingSentinels ?? [],
+    tierDefaults: snap?.tierDefaults ?? null,
+  });
   engine.stop();
 }
 
 function onFrame(frame: any) {
   if (!frame || typeof frame !== 'object') return;
-  if (frame.type === 'snapshot' && Array.isArray(frame.cards)) applySnapshot(frame.cards);
+  if (frame.type === 'snapshot' && Array.isArray(frame.cards)) applySnapshot(frame);
   else if (frame.type === 'event' && frame.event) applyEvent(frame.event);
+  else if (frame.type === 'folder.inspected') {
+    // Result of folder.inspect / repo.clone (SPEC-004): refresh the onboarding classification so
+    // the initialisation screen can explain exactly what is present and what will be added.
+    store.set({ projectState: frame.state ?? null, missingSentinels: frame.missingSentinels ?? [] });
+  }
 }
 
 /** Start (idempotently) the live link to the coordinator. */

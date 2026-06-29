@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
@@ -8,6 +8,7 @@ import {
   type HarnessAdapter,
   type PermissionAck,
   type PermissionDecision,
+  type ScaffoldStep,
 } from "@arke/contracts";
 import {
   OpenCodeAdapter,
@@ -20,9 +21,17 @@ import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { Trace } from "./trace.js";
 import { MockAdapter } from "./mock-adapter.js";
+import { NullAdapter } from "./null-adapter.js";
 import { ClientConnection } from "./client-connection.js";
 import { CoordinatorSessionStore } from "./session-store.js";
 import { GrantStore } from "./grant-store.js";
+import { InputValidator, ValidationError } from "./input-validator.js";
+import { FolderInspector, type FolderState } from "./folder-inspector.js";
+import { HarnessReachabilityProbe } from "./reachability.js";
+import { ScaffoldRunner, type ScaffoldTiers } from "./scaffold.js";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 
 /**
  * Coordinator entry point (PRD §8.5; SPEC-003).
@@ -58,11 +67,37 @@ export class Coordinator {
   /** permissionId → { sessionId, actionClass } for pending asks (so `always` can be keyed). */
   private readonly pendingPerms = new Map<string, { sessionId: string; actionClass: string }>();
 
-  constructor(adapter: HarnessAdapter, trace: Trace, grants: GrantStore, port: number = PORT) {
+  // ---- onboarding state (SPEC-004), folded into every connection's snapshot frame ----
+  private readonly projectRoot: string; // the safe root all client paths are validated against
+  private readonly endpoints: string[]; // harness endpoints to probe (empty → adapter readiness)
+  private readonly probe: HarnessReachabilityProbe;
+  private readonly tierDefaults: ScaffoldTiers; // pre-filled tier→model, from the registry
+  private harnessReachable = true;
+  private harnessReachabilityReason?: string;
+  private harnessPartial = false;
+  private projectState: FolderState | null = null;
+  private missingSentinels: string[] = [];
+
+  constructor(
+    adapter: HarnessAdapter,
+    trace: Trace,
+    grants: GrantStore,
+    port: number = PORT,
+    opts: {
+      projectRoot?: string;
+      endpoints?: string[];
+      probe?: HarnessReachabilityProbe;
+      tierDefaults?: ScaffoldTiers;
+    } = {},
+  ) {
     this.adapter = adapter;
     this.trace = trace;
     this.grants = grants;
     this.port = port;
+    this.projectRoot = opts.projectRoot ?? REPO_ROOT;
+    this.endpoints = opts.endpoints ?? [];
+    this.probe = opts.probe ?? new HarnessReachabilityProbe();
+    this.tierDefaults = opts.tierDefaults ?? {};
   }
 
   /** Start listening; resolves with the actual bound port (supports ephemeral port 0). */
@@ -77,6 +112,11 @@ export class Coordinator {
     console.log(
       `[coordinator] adapter=${this.adapter.id} caps=${[...this.adapter.capabilities()].join(",") || "(none)"}`,
     );
+    // Classify the project folder and probe harness reachability once at startup; both fold into
+    // the snapshot every client receives, so the onboarding gate has its state before any frame.
+    this.classifyProject();
+    await this.refreshReachability();
+
     const readiness = this.adapter.readiness?.();
     if (readiness && !readiness.ready) {
       console.error(`[coordinator] adapter not ready: ${readiness.reason}`);
@@ -85,6 +125,51 @@ export class Coordinator {
     }
     void this.pump();
     return actual;
+  }
+
+  /** Inspect a folder (default the project root) and remember its classification (SPEC-004). */
+  private classifyProject(target: string = this.projectRoot): void {
+    try {
+      const cls = FolderInspector.classify(target);
+      this.projectState = cls.state;
+      this.missingSentinels = cls.missingSentinels;
+    } catch {
+      this.projectState = null;
+      this.missingSentinels = [];
+    }
+  }
+
+  /**
+   * Probe harness reachability and push a `harness.reachability` event per endpoint (SPEC-004).
+   * With no explicit endpoints (e.g. the mock), fall back to the adapter's own readiness so the
+   * onboarding gate still reflects a usable harness. Updates the snapshot fields.
+   */
+  private async refreshReachability(): Promise<void> {
+    // The adapter's own readiness is AUTHORITATIVE for the gate: init() performs the real capability
+    // probe of the live server (it confirms the events endpoint exists), so a harness that answers
+    // a health ping but can't stream events is correctly reported unreachable — the gate must never
+    // open on a raw health 200 alone. The standalone HTTP probe is consulted only to enrich the
+    // failure *reason* when the adapter is not ready; it can never flip reachable to true.
+    const r = this.adapter.readiness?.() ?? { ready: true };
+    this.harnessReachable = r.ready;
+    this.harnessReachabilityReason = r.ready ? undefined : (r.reason ?? "harness not ready");
+    this.harnessPartial = false;
+    if (!r.ready && this.endpoints.length > 0) {
+      const { results } = await this.probe.anyReachable(this.endpoints);
+      const failed = results.find((res) => !res.reachable);
+      if (failed?.reason) this.harnessReachabilityReason = failed.reason;
+      this.harnessPartial = failed?.partial ?? false;
+    }
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "harness.reachability",
+      endpoint: this.endpoints[0] ?? this.adapter.id,
+      reachable: this.harnessReachable,
+      ...(this.harnessPartial ? { partial: true } : {}),
+      ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}),
+    });
   }
 
   /** Stop the pump and listener, close client connections, and stop any managed harness. */
@@ -111,7 +196,28 @@ export class Coordinator {
     ws.on("message", (raw) => void this.onClientMessage(ws, raw.toString()));
     const cards = this.read.snapshot();
     await this.trace.write({ kind: "snapshot", cardCount: cards.length });
-    conn.sendSnapshot(JSON.stringify({ type: "snapshot", cards }));
+    // The snapshot also carries the onboarding state (SPEC-004): harness reachability and the
+    // project's method-ready classification, so the client can render the gate before any project
+    // action. No credential value, raw path, or file content is ever included (NFR-1).
+    conn.sendSnapshot(
+      JSON.stringify({
+        type: "snapshot",
+        cards,
+        // The single project this coordinator serves — name + canonical path are display-safe
+        // (NFR-1 permits the project name and folder path). The coordinator is single-project;
+        // there is no multi-project list.
+        projectName: basename(this.projectRoot),
+        projectPath: this.projectRoot,
+        harness: this.adapter.id,
+        ...(this.endpoints[0] ? { harnessEndpoint: this.endpoints[0] } : {}),
+        harnessReachable: this.harnessReachable,
+        ...(this.harnessReachabilityReason ? { harnessReachabilityReason: this.harnessReachabilityReason } : {}),
+        ...(this.harnessPartial ? { harnessReachabilityPartial: true } : {}),
+        projectState: this.projectState,
+        missingSentinels: this.missingSentinels,
+        tierDefaults: this.tierDefaults,
+      }),
+    );
   }
 
   private async onClientMessage(ws: WebSocket, raw: string): Promise<void> {
@@ -121,11 +227,32 @@ export class Coordinator {
     } catch {
       return; // ignore malformed client input
     }
-    await this.trace.write({ kind: "client.request", request: msg });
+    // Redact any embedded URL credentials before the request becomes durable in the trace
+    // (a credentialed clone URL is rejected downstream, but must never reach the trace either).
+    await this.trace.write({ kind: "client.request", request: redactRequest(msg) });
 
     // SPEC-017: request/response command surface (CLI + any client) over the same WS.
     if (msg.type === "request") {
       await this.handleRequest(ws, msg);
+      return;
+    }
+
+    // SPEC-004 onboarding messages (browser client). Every path/URL is validated and
+    // canonicalised before any filesystem or git access; failures reply `validation-error`.
+    if (msg.type === "harness.probe") {
+      await this.refreshReachability();
+      return;
+    }
+    if (msg.type === "folder.inspect") {
+      await this.onFolderInspect(ws, msg);
+      return;
+    }
+    if (msg.type === "repo.clone") {
+      await this.onRepoClone(ws, msg);
+      return;
+    }
+    if (msg.type === "scaffold.run") {
+      await this.onScaffoldRun(ws, msg);
       return;
     }
 
@@ -263,6 +390,19 @@ export class Coordinator {
         for (const img of images) await this.adapter.materializeAgent(img);
         return { materialized: images.map((i) => i.name) };
       }
+      // SPEC-004 onboarding, exposed on the op surface so the CLI and agents can drive
+      // setup end-to-end (paths/URLs validated identically to the typed-message path).
+      case "harness.probe":
+        await this.refreshReachability();
+        return { reachable: this.harnessReachable, ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}) };
+      case "folder.inspect":
+        return this.inspectFolder(a.path);
+      case "repo.clone":
+        return this.cloneRepo(a.url, a.targetPath);
+      case "scaffold.run": {
+        const result = await this.runScaffold(a.path, a.tiers, a.resumeFrom);
+        return { ok: result.ok, stepsRun: result.stepsRun, steps: result.steps };
+      }
       default:
         throw new Error(`unknown op: ${op}`);
     }
@@ -289,6 +429,141 @@ export class Coordinator {
       if (isImage) out.push(loadAgentImage(d)); // throws on a malformed image → fails the command
     }
     return out;
+  }
+
+  // ---- SPEC-004 onboarding core (shared by typed messages and the op surface) ----------
+
+  /** Validate + classify a folder; updates the remembered project state. Throws on bad input. */
+  private inspectFolder(rawPath: unknown): {
+    state: FolderState;
+    missingSentinels: string[];
+    projectPath: string;
+  } {
+    const path = InputValidator.canonicalisePath(String(rawPath ?? ""), this.projectRoot);
+    const cls = FolderInspector.classify(path);
+    this.projectState = cls.state;
+    this.missingSentinels = cls.missingSentinels;
+    return { state: cls.state, missingSentinels: cls.missingSentinels, projectPath: path };
+  }
+
+  /** Validate a clone URL + target, run `git clone`, then classify the cloned result. */
+  private async cloneRepo(
+    rawUrl: unknown,
+    rawTarget: unknown,
+  ): Promise<{ state: FolderState; missingSentinels: string[]; projectPath: string }> {
+    const url = InputValidator.validateCloneUrl(String(rawUrl ?? ""));
+    const target = InputValidator.canonicalisePath(String(rawTarget ?? ""), this.projectRoot);
+    if (!gitAvailable()) throw new Error("git not found on PATH; cannot clone");
+    // Async + time-bounded: a slow remote or an SSH URL that prompts must not block the event loop
+    // (and thus every other client's messages, permissions, and progress). url is validated (no
+    // shell-special chars) and passed as an arg array — no shell, no injection. GIT_TERMINAL_PROMPT=0
+    // makes a credential/host prompt fail fast instead of hanging.
+    await gitCloneAsync(url, target, CLONE_TIMEOUT_MS);
+    const cls = FolderInspector.classify(target);
+    return { state: cls.state, missingSentinels: cls.missingSentinels, projectPath: target };
+  }
+
+  /** Validate the path, resolve tier defaults, run the scaffold, then kick off grounding. */
+  private async runScaffold(rawPath: unknown, rawTiers: unknown, rawResumeFrom: unknown) {
+    const path = InputValidator.canonicalisePath(String(rawPath ?? ""), this.projectRoot);
+    const supplied = (rawTiers ?? {}) as Record<string, unknown>;
+    const tiers: ScaffoldTiers = {
+      capable: typeof supplied.capable === "string" ? supplied.capable : this.tierDefaults.capable,
+      mid: typeof supplied.mid === "string" ? supplied.mid : this.tierDefaults.mid,
+    };
+    const resumeFrom =
+      typeof rawResumeFrom === "string" ? (rawResumeFrom as ScaffoldStep) : undefined;
+    const runner = new ScaffoldRunner({
+      root: path,
+      harness: this.adapter.id,
+      emit: (e) => this.emit(e),
+      trace: this.trace,
+    });
+    const result = await runner.run({ tiers, ...(resumeFrom ? { resumeFrom } : {}) });
+    // Re-classify the path that was actually scaffolded (not always the coordinator root — e.g. a
+    // cloned subdir or a CLI/op target) so a subsequent snapshot reflects its now method-ready state.
+    this.classifyProject(path);
+    if (result.ok) void this.runGrounding(path); // best-effort; never blocks the scaffold response
+    return result;
+  }
+
+  /**
+   * Grounding session (SPEC-004): run the researcher role to analyse the repo and (re)write
+   * AGENTS.md, recording full provenance in the trace. Uses the SYNCHRONOUS `sendMessage` (not
+   * fire-and-watch `dispatchAsync`) so the turn has completed — and AGENTS.md has actually been
+   * rewritten — before we read its hash and stamp `completedAt`; otherwise provenance would record
+   * the scaffold stub's hash and a misleading time. Best-effort: any failure is traced, never thrown
+   * into the scaffold path. Absent a git commit we anchor provenance on the AGENTS.md content hash.
+   */
+  private async runGrounding(projectPath: string): Promise<void> {
+    try {
+      const agentsMdPath = resolve(projectPath, "AGENTS.md");
+      const previousSha = fileSha(agentsMdPath);
+      const session = await this.adapter.createSession({ specId: "grounding" });
+      await this.adapter.sendMessage({
+        sessionId: session.sessionId,
+        agent: "researcher",
+        tier: "mid",
+        parts: [
+          {
+            type: "text",
+            text: "Analyse this repository and rewrite AGENTS.md with module structure, key entry points, and conventions.",
+          },
+        ],
+      });
+      const newSha = fileSha(agentsMdPath);
+      await this.trace.write({
+        kind: "grounding.session",
+        sessionId: session.sessionId,
+        role: "researcher",
+        completedAt: new Date().toISOString(),
+        agentsMdSha: newSha,
+        ...(previousSha && previousSha !== newSha ? { previousAgentsMdSha: previousSha } : {}),
+      });
+    } catch (err) {
+      await this.trace.write({
+        kind: "grounding.session",
+        role: "researcher",
+        status: "error",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private sendValidationError(ws: WebSocket, err: unknown): void {
+    if (ws.readyState !== ws.OPEN) return;
+    if (err instanceof ValidationError) {
+      ws.send(JSON.stringify({ type: "validation-error", field: err.field, reason: err.message }));
+    } else {
+      ws.send(JSON.stringify({ type: "error", reason: err instanceof Error ? err.message : String(err) }));
+    }
+  }
+
+  private async onFolderInspect(ws: WebSocket, msg: { [k: string]: unknown }): Promise<void> {
+    try {
+      const r = this.inspectFolder(msg.path);
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "folder.inspected", ...r }));
+    } catch (err) {
+      this.sendValidationError(ws, err);
+    }
+  }
+
+  private async onRepoClone(ws: WebSocket, msg: { [k: string]: unknown }): Promise<void> {
+    try {
+      const r = await this.cloneRepo(msg.url, msg.targetPath);
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "folder.inspected", ...r }));
+    } catch (err) {
+      this.sendValidationError(ws, err);
+    }
+  }
+
+  private async onScaffoldRun(ws: WebSocket, msg: { [k: string]: unknown }): Promise<void> {
+    try {
+      // Validation happens before any filesystem access; scaffold.step/done events stream as it runs.
+      await this.runScaffold(msg.path, msg.tiers, msg.resumeFrom);
+    } catch (err) {
+      this.sendValidationError(ws, err);
+    }
   }
 
   /**
@@ -376,12 +651,99 @@ export class Coordinator {
   }
 }
 
-/** Build the harness adapter from config, falling back to the mock when unconfigured. */
-async function buildAdapter(trace: Trace): Promise<HarnessAdapter> {
+/** Strip `user:pass@` userinfo from a `scheme://…` URL so credentials never reach the trace. */
+function redactUrlCreds(s: string): string {
+  return s.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1");
+}
+
+/** Deep-copy a client request, redacting URL credentials from every string value. */
+function redactRequest(msg: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(msg), (_k, v) => (typeof v === "string" ? redactUrlCreds(v) : v));
+  } catch {
+    return msg;
+  }
+}
+
+/** Whether git is on PATH (clone + advisory vendored-repos step depend on it). */
+function gitAvailable(): boolean {
+  try {
+    return spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Hard ceiling on a clone so a slow/hanging remote can't pin a context indefinitely. */
+const CLONE_TIMEOUT_MS = Number(process.env.ARKE_CLONE_TIMEOUT_MS ?? 120_000);
+
+/**
+ * Run `git clone <url> <target>` asynchronously with a timeout — never `spawnSync`, which would
+ * block the Node event loop (and every other client) until the remote responds. Args are passed as
+ * an array (no shell); `GIT_TERMINAL_PROMPT=0` turns an interactive credential/host prompt into a
+ * fast failure rather than a hang.
+ */
+function gitCloneAsync(url: string, target: string, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolvePromise, reject) => {
+    const child = spawn("git", ["clone", url, target], {
+      stdio: "ignore",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`git clone timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolvePromise();
+      else reject(new Error(`git clone failed (exit ${code ?? "signal"})`));
+    });
+  });
+}
+
+/** sha256 of a file's contents, or undefined if it does not exist — a provenance anchor. */
+function fileSha(path: string): string | undefined {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+/** The adapter plus the onboarding metadata derived from config (endpoints, tier defaults). */
+interface BuiltAdapter {
+  adapter: HarnessAdapter;
+  endpoints: string[];
+  tierDefaults: ScaffoldTiers;
+}
+
+/** True only when mock data is explicitly opted into (ARKE_MOCK=1|true|yes). Off by default. */
+function mockEnabled(): boolean {
+  const v = (process.env.ARKE_MOCK ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * Build the harness adapter. Real by default: the MockAdapter (fabricated demo data) is used ONLY
+ * when `ARKE_MOCK` is explicitly set. With no harness configured we serve the honest {@link
+ * NullAdapter} — a real, empty state behind the reachability gate — never fabricated data.
+ */
+async function buildAdapter(trace: Trace): Promise<BuiltAdapter> {
+  if (mockEnabled()) {
+    console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
+    return { adapter: new MockAdapter(), endpoints: [], tierDefaults: { capable: "capable-tier", mid: "mid-tier" } };
+  }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
-    console.log("[coordinator] no OpenCode instance in .arke/config.json — using MockAdapter");
-    return new MockAdapter();
+    console.log(
+      "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
+        "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
+    );
+    return { adapter: new NullAdapter(), endpoints: [], tierDefaults: {} };
   }
 
   const deadLetterSink: DeadLetterSink = {
@@ -397,22 +759,32 @@ async function buildAdapter(trace: Trace): Promise<HarnessAdapter> {
     `[coordinator] ${config.manageHarness ? "starting & probing" : "probing"} OpenCode at ${config.baseUrl} …`,
   );
   await adapter.init();
-  return adapter;
+  // Tier labels are the registry-resolved model names — the single place vendor ids live (FR-4).
+  const tierDefaults: ScaffoldTiers = {
+    capable: config.resolveModel?.("capable").name,
+    mid: config.resolveModel?.("mid").name,
+  };
+  return { adapter, endpoints: [config.baseUrl], tierDefaults };
 }
 
 async function bootstrap(): Promise<void> {
   const trace = new Trace(TRACE_PATH);
   const grants = new GrantStore(GRANT_STORE_PATH);
   grants.load(); // restore remembered grants across restarts (SPEC-016)
-  let adapter: HarnessAdapter;
+  let built: BuiltAdapter;
   try {
-    adapter = await buildAdapter(trace);
+    built = await buildAdapter(trace);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[coordinator] adapter init failed (${reason}); falling back to MockAdapter`);
-    adapter = new MockAdapter();
+    // Never fall back to fabricated data on failure — that is exactly how mock data leaks in.
+    // Serve the honest empty state with the failure reason behind the reachability gate.
+    console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
+    built = { adapter: new NullAdapter(`harness init failed: ${reason}`), endpoints: [], tierDefaults: {} };
   }
-  await new Coordinator(adapter, trace, grants).start();
+  await new Coordinator(built.adapter, trace, grants, PORT, {
+    endpoints: built.endpoints,
+    tierDefaults: built.tierDefaults,
+  }).start();
 }
 
 // Only auto-start when run directly (not when imported by a test).
