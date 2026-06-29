@@ -3,10 +3,17 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Switch } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
+import { liveSend } from '../live';
 
 const e = React.createElement;
 
-const ALL_CAPS = ['events', 'todos', 'diff', 'permissions', 'commands'];
+const ALL_CAPS = ['events', 'todos', 'diff', 'permissions', 'commands', 'models'];
+
+/** Tier-label chips for an instance: live `serves` labels, falling back to demo `models`. */
+function harnessChips(h: any): string[] {
+  if (Array.isArray(h.serves) && h.serves.length) return h.serves.map((s: any) => s.label);
+  return h.models || [];
+}
 
 function Seg({ value, options, onChange }: any) {
   return e('div', { style: { display: 'inline-flex', padding: 3, background: 'var(--secondary)', borderRadius: 'var(--radius-md)', gap: 3 } },
@@ -14,29 +21,35 @@ function Seg({ value, options, onChange }: any) {
 }
 
 export function Harnesses() {
-  const { harnesses, tiers } = useStore();
+  const { harnesses, tiers, roster } = useStore();
+  const eyebrowLabel = (s: string) => e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, s);
   return e(Page, { max: 1020 },
     e(SectionHead, { eyebrow: 'Project', title: 'Harnesses & models',
-      sub: 'A registry of connected harnesses with their capabilities and models. You choose a role and a model; a routing layer chooses the harness — tier → model → harness. Capability flags absorb the differences.',
-      action: e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'plus', size: 15 }) }, 'Connect harness') }),
-    e('div', { style: { display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 26 } },
+      sub: 'A live registry of configured harness instances, their capabilities, and the logical tiers they serve. You choose a role and a tier; a routing layer chooses the harness — tier → model → harness. Model ids live host-side in .arke/config.json and never reach this screen.',
+      action: e('div', { style: { display: 'flex', gap: 8 } },
+        e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => liveSend({ type: 'registry.probe' }) }, 'Re-probe'),
+        e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'plus', size: 15 }) }, 'Connect harness')) }),
+    harnesses.length === 0
+      ? e(Callout, { variant: 'default', label: 'No harnesses configured' }, 'This project has no registry instances yet. Scaffold the project or add instances to .arke/config.json (registry.instances), then re-probe.')
+      : e('div', { style: { display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 26 } },
       harnesses.map((h) => e(Card, { key: h.id, padding: 0 },
         e('div', { style: { display: 'flex', alignItems: 'center', gap: 14, padding: '15px 18px' } },
           e('span', { style: { flex: 'none', width: 40, height: 40, borderRadius: 'var(--radius-md)', background: h.status === 'connected' ? 'var(--primary)' : 'var(--secondary)', color: h.status === 'connected' ? 'var(--primary-foreground)' : 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: 'server', size: 19 })),
           e('div', { style: { flex: 1, minWidth: 0 } },
             e('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
               e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, h.name),
-              h.primary ? e(Badge, { variant: 'secondary' }, 'primary') : null,
-              e('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 11, color: h.status === 'connected' ? 'var(--success)' : 'var(--muted-foreground)' } }, e(StatusDot, { status: h.status === 'connected' ? 'agree' : 'idle', pulse: h.status === 'connected' }), h.status)),
+              h.driver ? e(Badge, { variant: 'secondary' }, h.driver) : (h.primary ? e(Badge, { variant: 'secondary' }, 'primary') : null),
+              e('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 11, color: h.status === 'connected' ? 'var(--success)' : 'var(--muted-foreground)' } }, e(StatusDot, { status: h.status === 'connected' ? 'agree' : 'idle', pulse: h.status === 'connected' }), h.status === 'connected' ? 'reachable' : 'not connected')),
             e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--muted-foreground)', marginTop: 3 } }, h.endpoint)),
-          e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, maxWidth: 260, justifyContent: 'flex-end' } },
-            h.models.map((m) => e('span', { key: m, style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--foreground)', background: 'var(--secondary)', padding: '2px 7px', borderRadius: 'var(--radius-sm)' } }, m)))),
+          e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, maxWidth: 280, justifyContent: 'flex-end' } },
+            harnessChips(h).map((m) => e('span', { key: m, style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--foreground)', background: 'var(--secondary)', padding: '2px 7px', borderRadius: 'var(--radius-sm)' } }, m)),
+            h.catalogUnavailable ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'catalog unavailable') : null)),
         e('div', { style: { display: 'flex', gap: 8, padding: '11px 18px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexWrap: 'wrap' } },
-          ALL_CAPS.map((cap) => { const on = h.caps.includes(cap); return e('span', { key: cap, style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 11, color: on ? 'var(--foreground)' : 'var(--neutral-400)' } },
+          ALL_CAPS.map((cap) => { const on = (h.caps || []).includes(cap); return e('span', { key: cap, style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 11, color: on ? 'var(--foreground)' : 'var(--neutral-400)' } },
             e('span', { style: { display: 'flex', color: on ? 'var(--success)' : 'var(--neutral-400)' } }, e(Icon, { name: on ? 'check' : 'minus', size: 12 })), cap); })),
       ))),
-    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, 'Model tiering — logical tier → concrete model'),
-    e('div', { style: { display: 'flex', gap: 12, marginBottom: 18 } },
+    tiers.length > 0 ? eyebrowLabel('Model tiering — logical tier → resolved instance') : null,
+    tiers.length > 0 ? e('div', { style: { display: 'flex', gap: 12, marginBottom: 18 } },
       tiers.map((t) => e(Card, { key: t.tier, padding: 16, style: { flex: 1 } },
         e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
           e('div', null,
@@ -44,7 +57,14 @@ export function Harnesses() {
             e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 } }, t.note)),
           e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'arrowRight', size: 16 }))),
         e('div', { style: { marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--foreground)', background: 'var(--secondary)', padding: '8px 11px', borderRadius: 'var(--radius-sm)' } }, t.model))),
-    ),
+    ) : null,
+    (roster && roster.length > 0) ? eyebrowLabel('Roster resolution — role → instance → tier') : null,
+    (roster && roster.length > 0) ? e(Card, { padding: 0, style: { marginBottom: 18 } },
+      roster.map((r, i) => e('div', { key: r.role, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderTop: i === 0 ? 'none' : '1px solid var(--line-soft)' } },
+        e('span', { style: { flex: 1, fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 500 } }, r.role),
+        e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: r.unresolved ? 'var(--destructive)' : 'var(--muted-foreground)' } }, r.unresolved ? 'unresolved' : (r.instanceId || '—')),
+        e('span', { style: { flex: 'none', width: 150, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--foreground)' } }, r.label || '—')))
+    ) : null,
     e(Callout, { variant: 'default', label: 'Continuity lives in git, not the harness' }, 'A harness session is ephemeral and disposable — the specification and the code are on the feature branch. Switching harnesses loses nothing durable; you start a fresh session against the same branch.'),
   );
 }

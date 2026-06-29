@@ -6,12 +6,19 @@ import {
   DomainEvent,
   type AgentImage,
   type HarnessAdapter,
+  type ModelInfo,
   type ModelTier,
   type PermissionAck,
   type PermissionDecision,
   type ScaffoldStep,
 } from "@arke/contracts";
 import { resolveDirectory } from "@arke/adapter-opencode";
+import {
+  RegistryResolver,
+  type RegistryConfig,
+  type RegistryInstanceStatus,
+  type RegistrySnapshot,
+} from "./registry.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import type { Trace } from "./trace.js";
@@ -38,6 +45,10 @@ export interface ProjectContextInit {
   endpoints: string[];
   tierDefaults: ScaffoldTiers;
   registry: ProjectRegistry;
+  /** The harness/model registry parsed from this project's `.arke/config.json` (SPEC-005). */
+  registryConfig?: RegistryConfig;
+  /** The configured instance the live adapter serves (first `opencode` driver), if any. */
+  connectedInstanceId?: string;
   /** Fan a stamped event out to this context's active client connections (supervisor-supplied). */
   publish: (event: DomainEvent) => void;
   probe?: HarnessReachabilityProbe;
@@ -55,6 +66,9 @@ export class ProjectContext {
   private readonly registry: ProjectRegistry;
   private readonly probe: HarnessReachabilityProbe;
   private readonly publish: (event: DomainEvent) => void;
+  private readonly registryResolver?: RegistryResolver;
+  private readonly connectedInstanceId?: string;
+  private registrySnapshot: RegistrySnapshot | null = null;
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -83,6 +97,20 @@ export class ProjectContext {
     this.registry = init.registry;
     this.publish = init.publish;
     this.probe = init.probe ?? new HarnessReachabilityProbe();
+    if (init.connectedInstanceId) this.connectedInstanceId = init.connectedInstanceId;
+    if (init.registryConfig && init.registryConfig.instances.length > 0) {
+      try {
+        this.registryResolver = new RegistryResolver(init.registryConfig);
+      } catch (err) {
+        // A structurally invalid registry (e.g. duplicate instance ids) leaves the projection empty;
+        // record why rather than crashing context startup. The screen then shows no harnesses.
+        void this.trace.write({
+          kind: "registry.config-error",
+          projectId: this.projectId,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   /** Classify the folder, register it as a recent, probe reachability, and start the pump if ready. */
@@ -90,6 +118,9 @@ export class ProjectContext {
     this.classify();
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
+    // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
+    // instance is a real, useful state for the harnesses screen (SPEC-005).
+    await this.refreshRegistry();
     const readiness = this.adapter.readiness?.();
     if (readiness && !readiness.ready) return; // serve snapshot only; no stream
     void this.pump();
@@ -124,11 +155,118 @@ export class ProjectContext {
       projectState: this.projectState,
       missingSentinels: this.missingSentinels,
       tierDefaults: this.tierDefaults,
+      ...(this.registrySnapshot ? { registry: this.registrySnapshot } : {}),
     };
   }
 
   cardCount(): number {
     return this.read.snapshot().length;
+  }
+
+  // ---- registry projection (SPEC-005) -------------------------------------
+
+  /**
+   * Recompute the client-safe registry projection from this project's config + the live adapter, and
+   * emit `registry.updated` (and any `registry.warning`). The connected instance is enriched with its
+   * real reachability, capabilities, and model catalog; other configured instances are surfaced as
+   * configured-but-not-connected (multi-instance adapters are a follow-up). Never includes a model
+   * string or a credentialsRef — tier labels only.
+   */
+  async refreshRegistry(): Promise<void> {
+    const resolver = this.registryResolver;
+    if (!resolver) {
+      this.registrySnapshot = null;
+      return;
+    }
+    const catalogs = new Map<string, ModelInfo[] | null>();
+    const instances: RegistryInstanceStatus[] = [];
+    for (const inst of resolver.listInstances()) {
+      const connected = inst.id === this.connectedInstanceId;
+      let reachable = false;
+      let caps: string[] = [];
+      let catalogUnavailable = true;
+      let endpoint = inst.host;
+      if (connected) {
+        const r = this.adapter.readiness?.() ?? { ready: true };
+        reachable = r.ready;
+        caps = [...this.adapter.capabilities()];
+        endpoint = this.endpoints[0] ?? this.adapter.id;
+        if (caps.includes("models") && this.adapter.listModels) {
+          try {
+            catalogs.set(inst.id, await this.adapter.listModels());
+            catalogUnavailable = false;
+          } catch {
+            catalogs.set(inst.id, null);
+          }
+        } else {
+          catalogs.set(inst.id, null);
+        }
+      } else {
+        catalogs.set(inst.id, null); // no adapter wired for non-connected instances yet
+      }
+      instances.push({
+        id: inst.id,
+        driver: inst.driver,
+        endpoint,
+        reachable,
+        caps,
+        serves: inst.serves,
+        ...(catalogUnavailable ? { catalogUnavailable: true } : {}),
+      });
+    }
+
+    // Validate configured serves against the live catalog(s) and surface config problems as warnings
+    // (labels only — no vendor model string leaks into the detail).
+    const validation = resolver.validateServesAgainstCatalog(catalogs);
+    for (const p of validation.problems) {
+      await this.emitRegistryWarning(
+        "model-not-in-catalog",
+        `instance '${p.instanceId}' has a model absent from its live catalog for tier '${p.tier}' (${p.label})`,
+      );
+    }
+    try {
+      resolver.assertReviewersDistinct();
+    } catch (err) {
+      await this.emitRegistryWarning(
+        "reviewer-models-identical",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    this.registrySnapshot = {
+      instances,
+      tierResolution: resolver.tierResolution(),
+      roster: resolver.rosterResolution(),
+    };
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "registry.updated",
+      instances: instances.map((s) => ({
+        id: s.id,
+        driver: s.driver,
+        endpoint: s.endpoint,
+        reachable: s.reachable,
+        caps: s.caps,
+        serves: s.serves,
+        ...(s.catalogUnavailable ? { catalogUnavailable: true } : {}),
+      })),
+    } as DomainEvent);
+  }
+
+  private emitRegistryWarning(
+    reason: "model-not-in-catalog" | "reviewer-models-identical" | "no-instance-for-tier" | "credential-missing" | "instance-failover",
+    detail: string,
+  ): Promise<void> {
+    return this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "registry.warning",
+      reason,
+      detail,
+    } as DomainEvent);
   }
 
   // ---- classification + reachability --------------------------------------
@@ -253,6 +391,9 @@ export class ProjectContext {
       case "harness.probe":
         await this.refreshReachability();
         return this.reachableSummary();
+      case "registry.probe":
+        await this.refreshRegistry();
+        return this.registrySnapshot;
       case "folder.inspect":
         return this.inspectFolder(a.path);
       case "repo.clone":

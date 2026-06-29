@@ -121,6 +121,8 @@ export const store = createStore({
   harnesses: DEMO ? HARNESSES : [],
   integrations: DEMO ? INTEGRATIONS : [],
   tiers: DEMO ? TIERS : [],
+  // Roster resolution table (role → instance → tier label) from the live registry (SPEC-005).
+  roster: [],
   permission: null,
   entryFolder: null,
   theme: 'light',

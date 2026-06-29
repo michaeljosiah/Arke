@@ -177,6 +177,16 @@ function applyEvent(ev: any) {
       rail('scaffold.done', `scaffold.done · ${(ev.stepsRun || []).join(', ')}`, ts);
       break;
     }
+    case 'registry.updated': {
+      // Live registry projection (SPEC-005): refresh the harness list with current reachability,
+      // capabilities and catalog state. Tier labels only — no model strings cross the wire.
+      applyRegistryInstances(ev.instances);
+      break;
+    }
+    case 'registry.warning': {
+      rail('registry.warning', `registry.warning · ${ev.reason}${ev.detail ? ' · ' + ev.detail : ''}`, ts);
+      break;
+    }
     case 'harness.reachability': {
       // Per-endpoint probe result. Track each endpoint and recompute the aggregate (any reachable
       // → reachable) so a live "Retry connection" updates the gate without a reconnect (SPEC-004).
@@ -199,6 +209,47 @@ function applyEvent(ev: any) {
 
 function publish() {
   store.set({ cards: [...cards.values()] });
+}
+
+// ---- registry projection (SPEC-005) ----
+const TIER_META: Record<string, { label: string; note: string }> = {
+  capable: { label: 'Capable tier', note: 'authoring & review' },
+  mid: { label: 'Standard tier', note: 'implementation' },
+  fast: { label: 'Fast tier', note: 'routine, classification & projection drafts' },
+};
+
+/** Map registry instance projections to the harnesses-screen shape (tier labels only, no models). */
+function applyRegistryInstances(instances: any[]) {
+  store.set({
+    harnesses: (instances || []).map((i) => ({
+      id: i.id,
+      name: i.id,
+      driver: i.driver,
+      endpoint: i.endpoint,
+      status: i.reachable ? 'connected' : 'idle',
+      caps: i.caps || [],
+      serves: i.serves || [],
+      catalogUnavailable: !!i.catalogUnavailable,
+    })),
+  });
+}
+
+/** Fold the whole registry projection (instances + tier resolution + roster) from a snapshot. */
+function applyRegistrySnapshot(reg: any) {
+  if (!reg) {
+    store.set({ harnesses: [], tiers: [], roster: [] });
+    return;
+  }
+  applyRegistryInstances(reg.instances || []);
+  store.set({
+    tiers: (reg.tierResolution || []).map((t) => ({
+      tier: t.tier,
+      label: TIER_META[t.tier]?.label ?? t.tier,
+      note: TIER_META[t.tier]?.note ?? '',
+      model: t.label, // a leak-free resolution label (e.g. "capable — opencode"), never a model id
+    })),
+    roster: reg.roster || [],
+  });
 }
 
 /** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */
@@ -231,6 +282,7 @@ function applySnapshot(snap: any) {
     missingSentinels: snap?.missingSentinels ?? [],
     tierDefaults: snap?.tierDefaults ?? null,
   });
+  applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();
   void refreshRecents(); // SPEC-018: populate the picker's real recents
 }
