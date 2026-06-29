@@ -114,6 +114,25 @@ test("scaffold.run over the op surface returns a structured result", async () =>
   ws.close();
 });
 
+test("scaffolding a subdirectory registers THAT project, not the context root (SPEC-018)", async () => {
+  const { c, port, dir } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  // scaffold a child folder (as the clone flow does) — it is a distinct project from the root
+  ws.send(JSON.stringify({ type: "request", id: "sc", op: "scaffold.run", args: { path: "beta" } }));
+  await waitFor((f) => f.type === "response" && f.id === "sc" && f.ok === true);
+  ws.send(JSON.stringify({ type: "request", id: "pl", op: "project.list" }));
+  const list = await waitFor((f) => f.type === "response" && f.id === "pl");
+  const roots = list.result.map((p: { root: string }) => p.root);
+  assert.ok(roots.includes(resolve(dir)), "the context root stays registered");
+  assert.ok(roots.includes(resolve(dir, "beta")), "the scaffolded subdir is registered as its own project");
+  // the scaffolded child is method-ready; the parent root's entry is not overwritten by it
+  const beta = list.result.find((p: { root: string }) => p.root === resolve(dir, "beta"));
+  assert.equal(beta.lastState, "method-ready");
+  ws.close();
+});
+
 test("the snapshot carries a projectId (SPEC-018)", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());

@@ -7,17 +7,34 @@ namespace Arke.Cli.Commands;
 /// <summary>Shared op-call pattern: send to the coordinator, render the result, map errors to exit codes.</summary>
 internal static class Ops
 {
-    public static async Task<int> RunAsync(GlobalSettings s, string op, object? args)
+    /// <summary>
+    /// Run an op. When <paramref name="activate"/> (the default, for per-project ops), the project
+    /// is resolved per invocation and opened on the op's own connection first (SPEC-018) —
+    /// precedence `--project` &gt; the CLI-local recorded default (`arke project open`) &gt; none.
+    /// Global ops (project.list/close/forget, which manage projects themselves) pass activate:false.
+    /// </summary>
+    public static async Task<int> RunAsync(GlobalSettings s, string op, object? args, bool activate = true)
     {
         try
         {
-            var res = await CoordinatorClient.RequestAsync(s.Config().CoordinatorUrl, op, args);
+            var url = s.Config().CoordinatorUrl;
+            var res = await CoordinatorClient.RequestWithActivationAsync(url, activate ? ResolveActivation(s) : null, op, args);
             return Output.Render(s, res);
         }
         catch (Exception e)
         {
             return Output.Error(e.Message, s.Json);
         }
+    }
+
+    /// <summary>Resolve the project to activate for an op: `--project` &gt; CLI-local default &gt; none.</summary>
+    private static object? ResolveActivation(GlobalSettings s)
+    {
+        if (!string.IsNullOrWhiteSpace(s.Project)) return new { path = System.IO.Path.GetFullPath(s.Project) };
+        var active = CliActive.Load(s.Config().ProjectRoot);
+        if (!string.IsNullOrWhiteSpace(active?.ProjectId)) return new { projectId = active!.ProjectId };
+        if (!string.IsNullOrWhiteSpace(active?.Path)) return new { path = active!.Path };
+        return null; // no recorded selection → the coordinator's default project
     }
 }
 
@@ -26,7 +43,7 @@ public sealed class ProjectListCommand : AsyncCommand<ProjectListCommand.Setting
     public sealed class Settings : GlobalSettings { }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "project.list", null);
+        Ops.RunAsync(s, "project.list", null, activate: false);
 }
 
 /// <summary>`arke project open` — activate a project by --path or a positional project id (SPEC-018).</summary>
@@ -46,8 +63,24 @@ public sealed class ProjectOpenCommand : AsyncCommand<ProjectOpenCommand.Setting
                 : ValidationResult.Success();
     }
 
-    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "project.open", new { projectId = s.ProjectId, path = s.Path });
+    protected override async Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct)
+    {
+        // Send an ABSOLUTE path: a relative --path would otherwise be resolved in the coordinator's
+        // cwd, not the CLI caller's, opening the wrong directory.
+        var absPath = string.IsNullOrWhiteSpace(s.Path) ? null : System.IO.Path.GetFullPath(s.Path);
+        try
+        {
+            var res = await CoordinatorClient.RequestAsync(s.Config().CoordinatorUrl, "project.open", new { projectId = s.ProjectId, path = absPath });
+            // Persist the selection locally so subsequent (separate-process) commands re-activate it.
+            var pid = res.ValueKind == JsonValueKind.Object && res.TryGetProperty("projectId", out var p) ? p.GetString() : null;
+            CliActive.Save(s.Config().ProjectRoot, pid, absPath);
+            return Output.Render(s, res);
+        }
+        catch (Exception e)
+        {
+            return Output.Error(e.Message, s.Json);
+        }
+    }
 }
 
 public sealed class ProjectCloseCommand : AsyncCommand<ProjectCloseCommand.Settings>
@@ -59,7 +92,7 @@ public sealed class ProjectCloseCommand : AsyncCommand<ProjectCloseCommand.Setti
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "project.close", new { projectId = s.ProjectId });
+        Ops.RunAsync(s, "project.close", new { projectId = s.ProjectId }, activate: false);
 }
 
 public sealed class ProjectForgetCommand : AsyncCommand<ProjectForgetCommand.Settings>
@@ -71,7 +104,7 @@ public sealed class ProjectForgetCommand : AsyncCommand<ProjectForgetCommand.Set
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "project.forget", new { projectId = s.ProjectId });
+        Ops.RunAsync(s, "project.forget", new { projectId = s.ProjectId }, activate: false);
 }
 
 public sealed class SessionCreateCommand : AsyncCommand<SessionCreateCommand.Settings>

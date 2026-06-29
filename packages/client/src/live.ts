@@ -83,6 +83,11 @@ function rail(kind: string, text: string, ts: number) {
 }
 
 function applyEvent(ev: any) {
+  // Discard events from a project other than the active one (SPEC-018). On a slow connection,
+  // frames queued for project A can arrive after we've switched to B; the coordinator stamps
+  // every event with projectId so we can drop the stale ones rather than fold them into B's board.
+  const activeId = (store.get() as any).connectedProject?.projectId;
+  if (ev.projectId && activeId && ev.projectId !== activeId) return;
   const ts = ev.ts || Date.now();
   switch (ev.type) {
     case 'spec.status': {
@@ -235,13 +240,13 @@ let reqSeq = 0;
 const pending = new Map<string, (r: any) => void>();
 
 /** Send a coordinator op and resolve with its `{ ok, result | error }` response. */
-export function liveRequest(op: string, args?: unknown): Promise<any> {
+export function liveRequest(op: string, args?: unknown, timeoutMs = 8000): Promise<any> {
   return new Promise((resolve) => {
     if (!transport) return resolve({ ok: false, error: 'not connected' });
     const id = 'c' + ++reqSeq;
     pending.set(id, resolve);
     transport.send({ type: 'request', id, op, args });
-    setTimeout(() => { if (pending.delete(id)) resolve({ ok: false, error: 'timeout' }); }, 8000);
+    setTimeout(() => { if (pending.delete(id)) resolve({ ok: false, error: 'timeout' }); }, timeoutMs);
   });
 }
 
@@ -253,7 +258,9 @@ export async function refreshRecents(): Promise<void> {
 
 /** Open/switch the active project; the coordinator re-snapshots. Returns the open result. */
 export async function openProjectLive(target: { projectId?: string; path?: string }): Promise<any> {
-  const res = await liveRequest('project.open', target);
+  // A cold open may spawn + health-check a managed harness, which can take much longer than the
+  // default request window; allow 90s so the UI doesn't report a still-in-progress open as failed.
+  const res = await liveRequest('project.open', target, 90000);
   if (res?.ok) void refreshRecents();
   return res;
 }

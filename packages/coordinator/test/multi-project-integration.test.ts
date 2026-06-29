@@ -130,6 +130,27 @@ test("project.close stops a non-active project but never the default", async () 
   ws.close();
 });
 
+test("pushed events carry the project id (SPEC-018, stale-frame guard)", async () => {
+  const { c, port } = await supervisor();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  const evt = await waitFor((f) => f.type === "event");
+  assert.equal(evt.event.projectId, snap.projectId);
+  ws.close();
+});
+
+test("project.open refuses a path that does not exist (no phantom project on disk)", async () => {
+  const { c, port } = await supervisor();
+  after(() => c.stop());
+  const { ws, request, waitFor } = await connect(port);
+  await waitFor((f) => f.type === "snapshot");
+  const res = await request("project.open", { path: join(tmpdir(), "arke-nope-zzz-does-not-exist") });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /does not exist/);
+  ws.close();
+});
+
 test("the concurrency bound refuses opening beyond the maximum", async () => {
   const { c, port, dirB } = await supervisor({ maxProjects: 1 });
   after(() => c.stop());

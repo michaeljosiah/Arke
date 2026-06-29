@@ -1,3 +1,4 @@
+import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -185,6 +186,12 @@ export class Coordinator {
       root = entry.root;
     } else {
       throw new Error("project.open requires a projectId or path");
+    }
+    // Refuse a path that doesn't exist: otherwise context startup would create `.arke/` (and a
+    // trace) under a typo'd root, registering a phantom empty project on disk. Opening only ever
+    // attaches to an existing folder; new projects are created via clone/scaffold, not project.open.
+    if (!existsSync(root) || !statSync(root).isDirectory()) {
+      throw new Error(`project path does not exist or is not a directory: ${root}`);
     }
     const projectId = projectIdForRoot(root);
     const existing = this.contexts.get(projectId);

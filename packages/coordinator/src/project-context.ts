@@ -320,8 +320,16 @@ export class ProjectContext {
       trace: this.trace,
     });
     const result = await runner.run({ tiers, ...(resumeFrom ? { resumeFrom } : {}) });
-    this.classify(path);
-    this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
+    // Register the project that was ACTUALLY scaffolded — which may be a cloned subdirectory
+    // (entryPath), a distinct project from this context's root. Only adopt the classification as
+    // this context's own state when the scaffold target IS this context's root; otherwise we would
+    // overwrite the parent's state and leave the scaffolded repo absent from project.list.
+    const cls = FolderInspector.classify(path);
+    if (path === this.root) {
+      this.projectState = cls.state;
+      this.missingSentinels = cls.missingSentinels;
+    }
+    this.registry.upsert({ root: path, name: basename(path), state: cls.state });
     if (result.ok) void this.runGrounding(path);
     return result;
   }
@@ -437,9 +445,14 @@ export class ProjectContext {
     }
   }
 
-  /** Stamp ingest seq + ts, fold into the read model, trace (before push), then publish. */
+  /** Stamp ingest seq + ts + projectId, fold into the read model, trace (before push), publish. */
   private async emit(event: DomainEvent): Promise<void> {
-    const stamped: DomainEvent = { ...event, seq: ++this.ingestSeq, ts: Date.now() };
+    // Stamp `projectId` on the pushed event so a client can discard stale frames: on a slow
+    // connection, events queued for project A can arrive after a `project.open` snapshot for B —
+    // without the id the client could fold A's events into B's board (SPEC-018).
+    const stamped = { ...event, seq: ++this.ingestSeq, ts: Date.now(), projectId: this.projectId } as DomainEvent & {
+      projectId: string;
+    };
     this.read.apply(stamped);
     await this.trace.write({ kind: "event", projectId: this.projectId, event: stamped });
     this.publish(stamped);
