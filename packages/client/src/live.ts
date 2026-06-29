@@ -368,22 +368,38 @@ export function startLive(): ArkeTransport {
   store.set({ connection: transport.state });
   transport.subscribe((state: TransportState) => {
     store.set({ connection: state });
-    // On reconnect, drain the cockpit's outbound queue in order (SPEC-006). Each queued command is
-    // re-issued as a request so a stale-session rejection is still surfaced, not silently executed.
-    if (state === 'open' && outbound.size > 0) {
-      const drained = outbound.drain((cmd) => { void submitCockpitPrompt(cmd); });
-      store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${drained.length} queued message${drained.length === 1 ? '' : 's'}` } }));
-    }
+    // On reconnect, drain the cockpit's outbound queue (SPEC-006) — but only AFTER re-binding this
+    // connection to the active project, since a fresh socket starts on the coordinator's default
+    // project. Draining on raw 'open' could otherwise dispatch a queued prompt (which carries only a
+    // sessionId) against the wrong project/repo (PR #18 review).
+    if (state === 'open' && outbound.size > 0) void drainCockpitQueue();
   });
   return transport;
 }
 
 // ---- authoring cockpit (SPEC-006) ----
 const outbound = new OutboundQueue<any>(50);
+// prompt.send resolves only when the agent's turn completes, which routinely exceeds the default
+// request window — use a long ceiling so a normal turn is not reported as a spurious timeout.
+const PROMPT_TIMEOUT_MS = 10 * 60_000;
+
+/** True when the coordinator socket is connected (used to decide send-now vs. queue). */
+export function isCoordinatorConnected(): boolean {
+  return !!transport && transport.state === 'open';
+}
+
+/** Re-activate the stored active project, then drain queued prompts in order against it. */
+async function drainCockpitQueue(): Promise<void> {
+  if (outbound.size === 0) return;
+  const active = (store.get() as any).connectedProject?.projectId;
+  if (active) await liveRequest('project.open', { projectId: active }, 90000); // re-bind before sending
+  const drained = outbound.drain((cmd) => { void submitCockpitPrompt(cmd); });
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${drained.length} queued message${drained.length === 1 ? '' : 's'}` } }));
+}
 
 /** Issue a prompt.send request and surface a stale-session (or other) rejection in the cockpit. */
 async function submitCockpitPrompt(args: any): Promise<any> {
-  const res = await liveRequest('prompt.send', args);
+  const res = await liveRequest('prompt.send', args, PROMPT_TIMEOUT_MS);
   if (!res?.ok) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `message rejected — ${res?.error ?? 'unknown error'}` } }));
   return res;
 }

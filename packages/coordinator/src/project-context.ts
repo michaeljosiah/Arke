@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,7 +15,7 @@ import {
   type PermissionDecision,
   type ScaffoldStep,
 } from "@arke/contracts";
-import { resolveDirectory } from "@arke/adapter-opencode";
+import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
   RegistryResolver,
   type RegistryConfig,
@@ -307,18 +307,29 @@ export class ProjectContext {
     }
     for (const f of entries) {
       const absPath = resolve(dir, f);
-      // Defence-in-depth: never read outside the project root even via an odd entry name.
-      if (relative(this.root, absPath).startsWith("..")) continue;
+      // Confine reads to the project root — and resolve symlinks first, so a planted entry like
+      // `docs/specifications/secret.md -> /etc/passwd` cannot exfiltrate a file outside the root
+      // (PR #18 review). The lexical path AND the realpath must both stay within the root.
+      if (!isWithinRoot(this.root, absPath)) continue;
+      let real: string;
+      try {
+        real = realpathSync.native(absPath);
+      } catch {
+        continue;
+      }
+      if (!isWithinRoot(this.root, real)) continue;
       let text: string;
       try {
-        text = readFileSync(absPath, "utf8");
+        text = readFileSync(real, "utf8");
       } catch {
         continue;
       }
       const { data } = parseFrontmatter(text);
       const stem = f.replace(/\.md$/, "");
-      if (data.spec_id === specId || data.slug === specId || data.title === specId || stem === specId) {
-        return { relPath: relative(this.root, absPath).replaceAll("\\", "/"), absPath, text, frontmatter: data };
+      // Match either frontmatter convention: `spec_id` (the spec files' YAML) or `specId` (the
+      // SpecFrontmatter contract shape), plus slug / title / filename stem.
+      if (data.spec_id === specId || data.specId === specId || data.slug === specId || data.title === specId || stem === specId) {
+        return { relPath: relative(this.root, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data };
       }
     }
     return null;
@@ -361,6 +372,12 @@ export class ProjectContext {
 
     const found = this.findSpecFile(specId);
     if (!found) return fail(`no specification file found for '${specId}' under docs/specifications`);
+    // Only a draft may be approved into review — never regress an already-approved/merged spec back
+    // to in-review (PR #18 review). A spec with no status is treated as a draft.
+    const current = found.frontmatter.status;
+    if (current && current !== "draft") {
+      return fail(`cannot approve: specification '${specId}' is '${current}', expected 'draft'`);
+    }
     const fmBranch = found.frontmatter.branch;
     if (!fmBranch) return fail(`specification '${specId}' has no 'branch' in its frontmatter`);
     if (clientBranch && clientBranch !== fmBranch) {
@@ -814,7 +831,13 @@ export function gitCommit(cwd: string, relPath: string, message: string): { ok: 
     const add = spawnSync("git", ["add", "--", relPath], { cwd, encoding: "utf8" });
     if (add.status !== 0) return { ok: false, error: (add.stderr || "git add failed").trim() };
     const commit = spawnSync("git", ["commit", "-m", message, "--", relPath], { cwd, encoding: "utf8" });
-    if (commit.status !== 0) return { ok: false, error: (commit.stderr || commit.stdout || "git commit failed").trim() };
+    if (commit.status !== 0) {
+      // Unstage what `git add` staged so a commit failure leaves the index clean too — otherwise the
+      // approval change sits staged and a later commit could include it (PR #18 review). The caller
+      // restores the working-tree file; this restores the index.
+      spawnSync("git", ["reset", "-q", "--", relPath], { cwd, encoding: "utf8" });
+      return { ok: false, error: (commit.stderr || commit.stdout || "git commit failed").trim() };
+    }
     const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
     return { ok: true, sha: (sha.stdout ?? "").trim() };
   } catch (err) {

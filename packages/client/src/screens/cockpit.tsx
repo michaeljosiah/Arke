@@ -3,7 +3,7 @@ import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
 import { AgentMessage, Button, Textarea, Badge, StatusDot } from '../ds';
 import { store, useStore } from '../store';
-import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest } from '../live';
+import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected } from '../live';
 
 const e = React.createElement;
 
@@ -89,12 +89,20 @@ function LiveCockpit() {
   const [approving, setApproving] = React.useState(false);
   const scroller = React.useRef<any>(null);
 
+  // Prefer the actual authoring session card (once we've created one) over the spec card, so the
+  // in-flight indicator and model reflect the running authoring session, not a sibling spec card
+  // (PR #18 review).
   const specCard = cards.find((c: any) => c.id === specId || (c.kind === 'spec' && c.specId === specId));
-  const inFlight = specCard?.status === 'running';
-  const transcript = specCard?.transcript ?? [];
+  const authoringCard = sessionId ? cards.find((c: any) => c.id === sessionId) : null;
+  const liveCard = authoringCard ?? specCard;
+  const inFlight = liveCard?.status === 'running';
+  const transcript = liveCard?.transcript ?? [];
+  // A signature that also changes when a streamed turn is finalised via message.updated (same entry,
+  // so transcript.length is unchanged) — this is what makes the preview re-poll after the final
+  // update, not only after the first part (PR #18 review).
+  const transcriptSig = transcript.map((t: any) => `${t.messageId}:${(t.text ?? '').length}:${t.isStreaming ? 1 : 0}`).join('|');
 
-  // Load the working file on mount/spec change, after each transcript change (proxy for
-  // message.updated), and on a 30s fallback interval (SPEC-006).
+  // Load the working file on mount/spec change, after each transcript change, and on a 30s fallback.
   const refresh = React.useCallback(async (markRefreshed = false) => {
     if (!specId) return;
     const res = await fetchSpecFile(specId);
@@ -107,7 +115,7 @@ function LiveCockpit() {
   }, [specId]);
 
   React.useEffect(() => { void refresh(); }, [refresh]);
-  React.useEffect(() => { if (transcript.length) void refresh(true); }, [transcript.length, refresh]);
+  React.useEffect(() => { if (transcriptSig) void refresh(true); }, [transcriptSig, refresh]);
   React.useEffect(() => {
     const iv = setInterval(() => void refresh(true), PREVIEW_POLL_MS);
     return () => clearInterval(iv);
@@ -118,15 +126,22 @@ function LiveCockpit() {
   const send = async () => {
     if (!draft.trim() || !specId) return;
     const text = draft.trim();
-    setHumanMsgs((m) => [...m, { id: 'h' + Date.now(), role: 'human', text }]);
-    setDraft('');
     let sid = sessionId;
     if (!sid) {
+      // Don't attempt session.create while offline — it would time out and the message would be
+      // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).
+      if (!isCoordinatorConnected()) {
+        store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'offline — reconnect to begin a session for this spec' } }));
+        return;
+      }
       const created = await liveRequest('session.create', { specId });
       sid = created?.ok ? created.result?.sessionId : null;
       if (sid) setSessionId(sid);
     }
     if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
+    // A session exists — now it's safe to clear the composer and dispatch/queue the prompt.
+    setHumanMsgs((m) => [...m, { id: 'h' + Date.now(), role: 'human', text }]);
+    setDraft('');
     await sendCockpitPrompt({ sessionId: sid, agent: role, tier, message: text });
   };
 
@@ -143,7 +158,7 @@ function LiveCockpit() {
 
   // Interleave the live agent transcript with the engineer's own messages, in arrival order.
   const turns = [
-    ...transcript.map((t: any) => ({ kind: 'agent', text: t.text, model: specCard?.model, agent: 'agent', streaming: t.isStreaming })),
+    ...transcript.map((t: any) => ({ kind: 'agent', text: t.text, model: liveCard?.model, agent: 'agent', streaming: t.isStreaming })),
     ...humanMsgs.map((h: any) => ({ kind: 'human', text: h.text })),
   ];
 

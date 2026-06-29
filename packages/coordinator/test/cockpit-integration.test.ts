@@ -170,6 +170,46 @@ test("approveDraft with a mismatched branch fails, emits spec.approval-failed, l
   ws.close();
 });
 
+test("approveDraft refuses a spec that is not still a draft (no lifecycle regression)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "arke-cockpit-"));
+  git(dir, "init", "-q");
+  git(dir, "config", "user.email", "t@example.com");
+  git(dir, "config", "user.name", "Tester");
+  git(dir, "config", "commit.gpgsign", "false");
+  git(dir, "checkout", "-q", "-b", BRANCH);
+  mkdirSync(resolve(dir, "docs", "specifications"), { recursive: true });
+  writeFileSync(resolve(dir, "docs", "specifications", "test.md"), specDoc(BRANCH, "approved"), "utf8"); // already approved
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "init");
+  const { c, port } = await coordinatorAt(dir);
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+  const res = await request("approveDraft", { specId: "SPEC-TEST" });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /expected 'draft'/);
+  ws.close();
+});
+
+test("approveDraft rolls back the working tree AND the index when the commit fails", async () => {
+  const dir = repoWith(BRANCH);
+  // Force `git commit` to fail deterministically by signing with a non-existent gpg program.
+  git(dir, "config", "commit.gpgsign", "true");
+  git(dir, "config", "gpg.program", "definitely-not-a-real-gpg-binary-xyz");
+  const { c, port } = await coordinatorAt(dir);
+  after(() => c.stop());
+  const { ws, ready, request, waitFor } = connect(port);
+  await ready;
+  const res = await request("approveDraft", { specId: "SPEC-TEST" });
+  assert.equal(res.ok, false);
+  await waitFor((f) => f.type === "event" && f.event?.type === "spec.approval-failed");
+  // status unchanged on disk AND nothing left staged/modified for the spec file (index + tree clean)
+  const onDisk = readFileSync(resolve(dir, "docs", "specifications", "test.md"), "utf8");
+  assert.ok(/status:\s*draft/.test(onDisk));
+  assert.equal(git(dir, "status", "--porcelain", "--", "docs/specifications/test.md").trim(), "");
+  ws.close();
+});
+
 test("convenePanel acks with the resolved branch reference (no file content)", async () => {
   const { c, port } = await coordinatorAt(repoWith(BRANCH));
   after(() => c.stop());
