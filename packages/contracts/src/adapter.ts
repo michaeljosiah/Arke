@@ -19,6 +19,7 @@ export const Capability = z.enum([
   "diff", // getDiff()
   "permissions", // respondToPermission()
   "commands", // runCommand()
+  "models", // listModels() — the backend exposes a model catalog (SPEC-005)
 ]);
 export type Capability = z.infer<typeof Capability>;
 
@@ -128,6 +129,21 @@ export interface Readiness {
 }
 
 /**
+ * One model in a harness backend's live catalog (SPEC-005, capability `models`). Public catalog
+ * metadata only — never a credential, an endpoint secret, or a host path. The registry validates
+ * configured `serves[].model` entries against the `{provider, id}` pairs `listModels` returns, so a
+ * typo or an unsupported model is caught at config load, not at first dispatch.
+ */
+export interface ModelInfo {
+  /** The model identifier the backend serves, e.g. "claude-opus-4.8". */
+  id: string;
+  /** Provider namespace, e.g. "anthropic", "github-copilot". */
+  provider: string;
+  /** Optional human-readable label from the catalog. */
+  displayName?: string;
+}
+
+/**
  * One interface, many harnesses, honest about differences. Methods beyond the `core`
  * set are gated by the capabilities the adapter reports from {@link capabilities}.
  */
@@ -166,6 +182,12 @@ export interface HarnessAdapter {
   // ---- events ----
   /** Async iterator of normalized, validated domain events (capability: events). */
   streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent>;
+
+  /**
+   * The live model catalog the connected backend can serve (capability: models, SPEC-005). Present
+   * only when the backend exposes a catalog; absent adapters degrade to trusting configured `serves`.
+   */
+  listModels?(): Promise<ModelInfo[]>;
 
   // ---- todos / diff / permissions / commands ----
   getTodos?(ref: SessionRef): Promise<TodoItem[]>;
