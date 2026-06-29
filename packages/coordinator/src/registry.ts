@@ -85,11 +85,25 @@ export interface RosterResolution {
   unresolved?: boolean;
 }
 
+/** A registry health/config warning carried on the snapshot (SPEC-005). Leak-free `detail`. */
+export type RegistryWarningReason =
+  | "reviewer-models-identical"
+  | "no-instance-for-tier"
+  | "credential-missing"
+  | "instance-failover"
+  | "model-not-in-catalog";
+export interface RegistryWarning {
+  reason: RegistryWarningReason;
+  detail?: string;
+}
+
 /** The full client-safe registry projection carried on the snapshot (SPEC-005). */
 export interface RegistrySnapshot {
   instances: RegistryInstanceStatus[];
   tierResolution: { tier: ModelTier; label: string }[];
   roster: RosterResolution[];
+  /** Config/health warnings from the last refresh, so the opening client sees them on connect. */
+  warnings: RegistryWarning[];
 }
 
 /** One configured model that is absent from its instance's live catalog (SPEC-005). */

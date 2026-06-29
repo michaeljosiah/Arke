@@ -341,7 +341,7 @@ export class Coordinator {
     }
     if (msg.type === "registry.probe") {
       try {
-        await this.activeCtx(conn).refreshRegistry();
+        await this.activeCtx(conn).refreshRegistry(true);
       } catch {
         /* no active project — ignore */
       }

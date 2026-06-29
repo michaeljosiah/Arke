@@ -26,7 +26,7 @@ function registryConfig(): RegistryConfig {
   };
 }
 
-async function start() {
+async function start(cfg: RegistryConfig = registryConfig()) {
   const dir = mkdtempSync(join(tmpdir(), "arke-reg-"));
   const c = new Coordinator(
     new MockAdapter(),
@@ -36,7 +36,7 @@ async function start() {
     {
       projectRoot: dir,
       registry: new ProjectRegistry({ persist: false }),
-      registryConfig: registryConfig(),
+      registryConfig: cfg,
       connectedInstanceId: "mock-local",
       idleTtlMs: 0,
     },
@@ -97,6 +97,23 @@ test("the snapshot carries a live registry projection (connected + configured in
   assert.ok(reg.tierResolution.some((t: any) => t.tier === "capable"));
   const reviewer = reg.roster.find((r: any) => r.role === "reviewer-a");
   assert.equal(reviewer.instanceId, "claude-local");
+  assert.deepEqual(reg.warnings, []); // a clean config carries no warnings
+  ws.close();
+});
+
+test("a bad registry surfaces warnings in the opening snapshot (not only as events)", async () => {
+  // Both reviewers pinned to the same instance + tier → identical model → reviewer-distinct fails.
+  // The opening client must see this in snapshot.registry.warnings, since the warning events fire
+  // before it has subscribed (PR #15 review).
+  const cfg = registryConfig();
+  cfg.roster["reviewer-a"] = { tier: "capable", instance: "mock-local" };
+  cfg.roster["reviewer-b"] = { tier: "capable", instance: "mock-local" };
+  const { c, port } = await start(cfg);
+  after(() => c.stop());
+  const { ws, ready, waitFor } = connect(port);
+  await ready;
+  const snap = await waitFor((f) => f.type === "snapshot");
+  assert.ok(snap.registry.warnings.some((w: any) => w.reason === "reviewer-models-identical"));
   ws.close();
 });
 

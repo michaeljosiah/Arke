@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Switch } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend } from '../live';
+import { reprobeRegistry } from '../live';
 
 const e = React.createElement;
 
@@ -21,14 +21,18 @@ function Seg({ value, options, onChange }: any) {
 }
 
 export function Harnesses() {
-  const { harnesses, tiers, roster } = useStore();
+  const { harnesses, tiers, roster, registryWarnings } = useStore();
   const eyebrowLabel = (s: string) => e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, s);
+  const warnings = registryWarnings || [];
   return e(Page, { max: 1020 },
     e(SectionHead, { eyebrow: 'Project', title: 'Harnesses & models',
       sub: 'A live registry of configured harness instances, their capabilities, and the logical tiers they serve. You choose a role and a tier; a routing layer chooses the harness — tier → model → harness. Model ids live host-side in .arke/config.json and never reach this screen.',
       action: e('div', { style: { display: 'flex', gap: 8 } },
-        e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => liveSend({ type: 'registry.probe' }) }, 'Re-probe'),
+        e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => { void reprobeRegistry(); } }, 'Re-probe'),
         e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'plus', size: 15 }) }, 'Connect harness')) }),
+    warnings.length > 0 ? e('div', { style: { marginBottom: 18 } },
+      e(Callout, { label: `Registry ${warnings.length === 1 ? 'warning' : 'warnings'}`, style: { borderColor: 'var(--destructive)', background: 'color-mix(in srgb, var(--destructive) 8%, var(--secondary))' } },
+        warnings.map((w: any, i: number) => e('div', { key: i, style: { fontFamily: 'var(--font-mono)', fontSize: 12, marginTop: i ? 4 : 0 } }, `${w.reason}${w.detail ? ' — ' + w.detail : ''}`)))) : null,
     harnesses.length === 0
       ? e(Callout, { variant: 'default', label: 'No harnesses configured' }, 'This project has no registry instances yet. Scaffold the project or add instances to .arke/config.json (registry.instances), then re-probe.')
       : e('div', { style: { display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 26 } },

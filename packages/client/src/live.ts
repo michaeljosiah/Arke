@@ -184,6 +184,13 @@ function applyEvent(ev: any) {
       break;
     }
     case 'registry.warning': {
+      // Surface unsolicited live warnings in the store (deduped by reason+detail); the snapshot /
+      // re-probe path is authoritative and replaces the list.
+      store.set((s: any) => {
+        const w = { reason: ev.reason, detail: ev.detail };
+        const exists = (s.registryWarnings || []).some((x: any) => x.reason === w.reason && x.detail === w.detail);
+        return exists ? {} : { registryWarnings: [...(s.registryWarnings || []), w] };
+      });
       rail('registry.warning', `registry.warning · ${ev.reason}${ev.detail ? ' · ' + ev.detail : ''}`, ts);
       break;
     }
@@ -234,10 +241,10 @@ function applyRegistryInstances(instances: any[]) {
   });
 }
 
-/** Fold the whole registry projection (instances + tier resolution + roster) from a snapshot. */
+/** Fold the whole registry projection (instances + tier resolution + roster + warnings). */
 function applyRegistrySnapshot(reg: any) {
   if (!reg) {
-    store.set({ harnesses: [], tiers: [], roster: [] });
+    store.set({ harnesses: [], tiers: [], roster: [], registryWarnings: [] });
     return;
   }
   applyRegistryInstances(reg.instances || []);
@@ -249,7 +256,18 @@ function applyRegistrySnapshot(reg: any) {
       model: t.label, // a leak-free resolution label (e.g. "capable — opencode"), never a model id
     })),
     roster: reg.roster || [],
+    registryWarnings: reg.warnings || [], // authoritative snapshot of warnings (replaces, not appends)
   });
+}
+
+/**
+ * Re-probe the live registry on demand (SPEC-005). Uses the request path so the coordinator
+ * re-runs the adapter probe and returns a fresh, authoritative projection — replacing stale
+ * reachability/caps/catalog and clearing resolved warnings rather than appending forever.
+ */
+export async function reprobeRegistry(): Promise<void> {
+  const res = await liveRequest('registry.probe');
+  if (res?.ok && res.result) applyRegistrySnapshot(res.result);
 }
 
 /** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */

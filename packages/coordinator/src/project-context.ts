@@ -18,6 +18,8 @@ import {
   type RegistryConfig,
   type RegistryInstanceStatus,
   type RegistrySnapshot,
+  type RegistryWarning,
+  type RegistryWarningReason,
 } from "./registry.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
@@ -172,11 +174,22 @@ export class ProjectContext {
    * configured-but-not-connected (multi-instance adapters are a follow-up). Never includes a model
    * string or a credentialsRef — tier labels only.
    */
-  async refreshRegistry(): Promise<void> {
+  async refreshRegistry(reprobe = false): Promise<void> {
     const resolver = this.registryResolver;
     if (!resolver) {
       this.registrySnapshot = null;
       return;
+    }
+    // On an explicit Re-probe, re-run the adapter's startup probe so readiness/caps/catalog reflect
+    // the server's CURRENT state — OpenCodeAdapter caches them at init(), so without this the
+    // Re-probe button could never recover a server that was down at startup. init() is idempotent;
+    // guard it so a still-down server yields reachable:false rather than throwing here.
+    if (reprobe && this.adapter.init) {
+      try {
+        await this.adapter.init();
+      } catch {
+        /* readiness()/capabilities() now reflect the failed probe */
+      }
     }
     const catalogs = new Map<string, ModelInfo[] | null>();
     const instances: RegistryInstanceStatus[] = [];
@@ -215,29 +228,35 @@ export class ProjectContext {
       });
     }
 
-    // Validate configured serves against the live catalog(s) and surface config problems as warnings
-    // (labels only — no vendor model string leaks into the detail).
+    // Validate configured serves against the live catalog(s) and collect config problems as warnings
+    // (labels only — no vendor model string leaks into the detail). Warnings are stored ON the
+    // snapshot so a client opening a project with a bad registry sees them immediately, even though
+    // the emitted `registry.warning` events fire before it has subscribed (PR #15 review).
+    const warnings: RegistryWarning[] = [];
     const validation = resolver.validateServesAgainstCatalog(catalogs);
     for (const p of validation.problems) {
-      await this.emitRegistryWarning(
-        "model-not-in-catalog",
-        `instance '${p.instanceId}' has a model absent from its live catalog for tier '${p.tier}' (${p.label})`,
-      );
+      warnings.push({
+        reason: "model-not-in-catalog",
+        detail: `instance '${p.instanceId}' has a model absent from its live catalog for tier '${p.tier}' (${p.label})`,
+      });
     }
     try {
       resolver.assertReviewersDistinct();
     } catch (err) {
-      await this.emitRegistryWarning(
-        "reviewer-models-identical",
-        err instanceof Error ? err.message : String(err),
-      );
+      warnings.push({
+        reason: "reviewer-models-identical",
+        detail: err instanceof Error ? err.message : String(err),
+      });
     }
 
     this.registrySnapshot = {
       instances,
       tierResolution: resolver.tierResolution(),
       roster: resolver.rosterResolution(),
+      warnings,
     };
+    // Emit the warning events too, for clients already subscribed to a live context.
+    for (const w of warnings) await this.emitRegistryWarning(w.reason, w.detail ?? "");
     await this.emit({
       seq: 0,
       ts: 0,
@@ -255,10 +274,7 @@ export class ProjectContext {
     } as DomainEvent);
   }
 
-  private emitRegistryWarning(
-    reason: "model-not-in-catalog" | "reviewer-models-identical" | "no-instance-for-tier" | "credential-missing" | "instance-failover",
-    detail: string,
-  ): Promise<void> {
+  private emitRegistryWarning(reason: RegistryWarningReason, detail: string): Promise<void> {
     return this.emit({
       seq: 0,
       ts: 0,
@@ -392,7 +408,7 @@ export class ProjectContext {
         await this.refreshReachability();
         return this.reachableSummary();
       case "registry.probe":
-        await this.refreshRegistry();
+        await this.refreshRegistry(true); // explicit user action → re-probe the live adapter
         return this.registrySnapshot;
       case "folder.inspect":
         return this.inspectFolder(a.path);
