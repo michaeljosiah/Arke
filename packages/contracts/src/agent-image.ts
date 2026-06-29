@@ -64,4 +64,7 @@ export const AgentImage: z.ZodType<AgentImage, z.ZodTypeDef, unknown> = z.lazy((
     permission: z.record(z.string(), AgentPermission).default({}),
     subAgents: z.array(AgentImage).default([]),
   }),
-);
+  // The lazy ZodObject (with `.default()`ed fields) infers an input/output shape that does not
+  // structurally unify with the AgentImage interface under every inference order; the cast pins it
+  // to the declared recursive type. Runtime behaviour is unchanged — this is a types-only assertion.
+) as unknown as z.ZodType<AgentImage, z.ZodTypeDef, unknown>;

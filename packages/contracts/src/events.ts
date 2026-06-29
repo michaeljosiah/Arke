@@ -222,6 +222,17 @@ export const RegistryWarningEvent = base.extend({
   detail: z.string().optional(),
 });
 
+/**
+ * An approval commit failed (SPEC-006). Emitted by the coordinator when `approveDraft` cannot
+ * complete — a branch-guard mismatch, a dirty tree, or a git failure — so the cockpit can surface
+ * the reason and keep the action available for retry. The status is NOT advanced on failure.
+ */
+export const SpecApprovalFailedEvent = base.extend({
+  type: z.literal("spec.approval-failed"),
+  specId: z.string(),
+  reason: z.string(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -239,6 +250,7 @@ export const DomainEvent = z.discriminatedUnion("type", [
   HarnessReachabilityEvent,
   RegistryUpdatedEvent,
   RegistryWarningEvent,
+  SpecApprovalFailedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
