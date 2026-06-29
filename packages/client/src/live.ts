@@ -177,6 +177,23 @@ function applyEvent(ev: any) {
       rail('scaffold.done', `scaffold.done · ${(ev.stepsRun || []).join(', ')}`, ts);
       break;
     }
+    case 'registry.updated': {
+      // Live registry projection (SPEC-005): refresh the harness list with current reachability,
+      // capabilities and catalog state. Tier labels only — no model strings cross the wire.
+      applyRegistryInstances(ev.instances);
+      break;
+    }
+    case 'registry.warning': {
+      // Surface unsolicited live warnings in the store (deduped by reason+detail); the snapshot /
+      // re-probe path is authoritative and replaces the list.
+      store.set((s: any) => {
+        const w = { reason: ev.reason, detail: ev.detail };
+        const exists = (s.registryWarnings || []).some((x: any) => x.reason === w.reason && x.detail === w.detail);
+        return exists ? {} : { registryWarnings: [...(s.registryWarnings || []), w] };
+      });
+      rail('registry.warning', `registry.warning · ${ev.reason}${ev.detail ? ' · ' + ev.detail : ''}`, ts);
+      break;
+    }
     case 'harness.reachability': {
       // Per-endpoint probe result. Track each endpoint and recompute the aggregate (any reachable
       // → reachable) so a live "Retry connection" updates the gate without a reconnect (SPEC-004).
@@ -199,6 +216,58 @@ function applyEvent(ev: any) {
 
 function publish() {
   store.set({ cards: [...cards.values()] });
+}
+
+// ---- registry projection (SPEC-005) ----
+const TIER_META: Record<string, { label: string; note: string }> = {
+  capable: { label: 'Capable tier', note: 'authoring & review' },
+  mid: { label: 'Standard tier', note: 'implementation' },
+  fast: { label: 'Fast tier', note: 'routine, classification & projection drafts' },
+};
+
+/** Map registry instance projections to the harnesses-screen shape (tier labels only, no models). */
+function applyRegistryInstances(instances: any[]) {
+  store.set({
+    harnesses: (instances || []).map((i) => ({
+      id: i.id,
+      name: i.id,
+      driver: i.driver,
+      endpoint: i.endpoint,
+      status: i.reachable ? 'connected' : 'idle',
+      caps: i.caps || [],
+      serves: i.serves || [],
+      catalogUnavailable: !!i.catalogUnavailable,
+    })),
+  });
+}
+
+/** Fold the whole registry projection (instances + tier resolution + roster + warnings). */
+function applyRegistrySnapshot(reg: any) {
+  if (!reg) {
+    store.set({ harnesses: [], tiers: [], roster: [], registryWarnings: [] });
+    return;
+  }
+  applyRegistryInstances(reg.instances || []);
+  store.set({
+    tiers: (reg.tierResolution || []).map((t) => ({
+      tier: t.tier,
+      label: TIER_META[t.tier]?.label ?? t.tier,
+      note: TIER_META[t.tier]?.note ?? '',
+      model: t.label, // a leak-free resolution label (e.g. "capable — opencode"), never a model id
+    })),
+    roster: reg.roster || [],
+    registryWarnings: reg.warnings || [], // authoritative snapshot of warnings (replaces, not appends)
+  });
+}
+
+/**
+ * Re-probe the live registry on demand (SPEC-005). Uses the request path so the coordinator
+ * re-runs the adapter probe and returns a fresh, authoritative projection — replacing stale
+ * reachability/caps/catalog and clearing resolved warnings rather than appending forever.
+ */
+export async function reprobeRegistry(): Promise<void> {
+  const res = await liveRequest('registry.probe');
+  if (res?.ok && res.result) applyRegistrySnapshot(res.result);
 }
 
 /** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */
@@ -231,6 +300,7 @@ function applySnapshot(snap: any) {
     missingSentinels: snap?.missingSentinels ?? [],
     tierDefaults: snap?.tierDefaults ?? null,
   });
+  applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();
   void refreshRecents(); // SPEC-018: populate the picker's real recents
 }

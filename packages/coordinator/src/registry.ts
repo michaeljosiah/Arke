@@ -59,6 +59,53 @@ export interface InstanceProjection {
   serves: { tier: ModelTier; label: string }[];
 }
 
+/**
+ * A client-facing instance projection enriched with runtime state (SPEC-005). Built by the
+ * integration layer from {@link InstanceProjection} + the live adapter; still leak-free (tier
+ * labels only, no model strings, no credentialsRef). Mirrors the `registry.updated` event shape.
+ */
+export interface RegistryInstanceStatus {
+  id: string;
+  driver: string;
+  endpoint: string;
+  reachable: boolean;
+  caps: string[];
+  serves: { tier: ModelTier; label: string }[];
+  /** True when the backend exposes no catalog, so its serves were trusted unvalidated. */
+  catalogUnavailable?: boolean;
+}
+
+/** One role's resolution for the harnesses screen's roster table (no model string). */
+export interface RosterResolution {
+  role: string;
+  instanceId?: string;
+  tier?: ModelTier;
+  label?: string;
+  /** True when no instance serves the role's tier (the registry is incomplete for this role). */
+  unresolved?: boolean;
+}
+
+/** A registry health/config warning carried on the snapshot (SPEC-005). Leak-free `detail`. */
+export type RegistryWarningReason =
+  | "reviewer-models-identical"
+  | "no-instance-for-tier"
+  | "credential-missing"
+  | "instance-failover"
+  | "model-not-in-catalog";
+export interface RegistryWarning {
+  reason: RegistryWarningReason;
+  detail?: string;
+}
+
+/** The full client-safe registry projection carried on the snapshot (SPEC-005). */
+export interface RegistrySnapshot {
+  instances: RegistryInstanceStatus[];
+  tierResolution: { tier: ModelTier; label: string }[];
+  roster: RosterResolution[];
+  /** Config/health warnings from the last refresh, so the opening client sees them on connect. */
+  warnings: RegistryWarning[];
+}
+
 /** One configured model that is absent from its instance's live catalog (SPEC-005). */
 export interface CatalogValidationProblem {
   instanceId: string;
@@ -251,6 +298,35 @@ export class RegistryResolver {
       host: inst.host,
       serves: inst.serves.map((s) => ({ tier: s.tier, label: tierLabelFor(s.tier, inst.driver) })),
     }));
+  }
+
+  /**
+   * The default tier → label resolution for the UI (SPEC-005): for each tier any instance serves,
+   * the label of the first instance (config order) serving it. Labels only — no model string.
+   */
+  tierResolution(): { tier: ModelTier; label: string }[] {
+    const seen = new Map<ModelTier, string>();
+    for (const inst of this.config.instances) {
+      for (const s of inst.serves) {
+        if (!seen.has(s.tier)) seen.set(s.tier, tierLabelFor(s.tier, inst.driver));
+      }
+    }
+    return [...seen].map(([tier, label]) => ({ tier, label }));
+  }
+
+  /**
+   * Resolve every roster role for the harnesses screen's roster table (SPEC-005). A role whose tier
+   * no instance serves is returned `unresolved` rather than throwing. No model string is included.
+   */
+  rosterResolution(): RosterResolution[] {
+    return Object.keys(this.config.roster).map((role) => {
+      try {
+        const sel = this.resolve(role);
+        return { role, instanceId: sel.instanceId, tier: sel.tier, label: this.labelFor(sel) };
+      } catch {
+        return { role, unresolved: true };
+      }
+    });
   }
 
   /** The roster binding for a role (its tier + optional instance pin), or undefined if absent. */

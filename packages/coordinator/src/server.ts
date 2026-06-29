@@ -22,6 +22,8 @@ import { HarnessReachabilityProbe } from "./reachability.js";
 import type { ScaffoldTiers } from "./scaffold.js";
 import { ProjectRegistry, projectIdForRoot } from "./project-registry.js";
 import { ProjectContext, buildDecision, type ProjectContextInit } from "./project-context.js";
+import { loadRegistryConfig } from "./registry-config.js";
+import type { RegistryConfig } from "./registry.js";
 
 /**
  * Coordinator = the single control plane (PRD §8.5; SPEC-003/018). It owns ONE WebSocket server
@@ -51,6 +53,10 @@ export interface ContextDeps {
   grants: GrantStore;
   endpoints: string[];
   tierDefaults: ScaffoldTiers;
+  /** Full harness/model registry from the project's `.arke/config.json` (SPEC-005). */
+  registryConfig?: RegistryConfig;
+  /** The instance the live adapter serves (first `opencode` driver), if any (SPEC-005). */
+  connectedInstanceId?: string;
 }
 
 /** Builds the dependencies for a project rooted at `root` (used to open projects at runtime). */
@@ -87,6 +93,8 @@ export class Coordinator {
       probe?: HarnessReachabilityProbe;
       tierDefaults?: ScaffoldTiers;
       registry?: ProjectRegistry;
+      registryConfig?: RegistryConfig;
+      connectedInstanceId?: string;
       contextFactory?: ContextFactory;
       maxProjects?: number;
       idleTtlMs?: number;
@@ -100,6 +108,8 @@ export class Coordinator {
       grants,
       endpoints: opts.endpoints ?? [],
       tierDefaults: opts.tierDefaults ?? {},
+      ...(opts.registryConfig ? { registryConfig: opts.registryConfig } : {}),
+      ...(opts.connectedInstanceId ? { connectedInstanceId: opts.connectedInstanceId } : {}),
     };
     this.supervisorTrace = trace;
     this.registry = opts.registry ?? new ProjectRegistry({ persist: false });
@@ -169,6 +179,8 @@ export class Coordinator {
       endpoints: deps.endpoints,
       tierDefaults: deps.tierDefaults,
       registry: this.registry,
+      ...(deps.registryConfig ? { registryConfig: deps.registryConfig } : {}),
+      ...(deps.connectedInstanceId ? { connectedInstanceId: deps.connectedInstanceId } : {}),
       probe: this.probe,
       publish: (event) => this.fanOut(projectId, event),
     };
@@ -322,6 +334,14 @@ export class Coordinator {
     if (msg.type === "harness.probe") {
       try {
         await this.activeCtx(conn).refreshReachability();
+      } catch {
+        /* no active project — ignore */
+      }
+      return;
+    }
+    if (msg.type === "registry.probe") {
+      try {
+        await this.activeCtx(conn).refreshRegistry(true);
       } catch {
         /* no active project — ignore */
       }
@@ -491,10 +511,14 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const trace = new Trace(resolve(arke, "trace.ndjson"));
   const grants = new GrantStore(resolve(arke, "grants.ndjson"));
   grants.load();
-  if (mockEnabled()) {
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
-  }
   const configPath = resolve(arke, "config.json");
+  const loadedRegistry = loadRegistryConfig(configPath);
+  const registryDeps = loadedRegistry
+    ? { registryConfig: loadedRegistry.config, ...(loadedRegistry.connectedInstanceId ? { connectedInstanceId: loadedRegistry.connectedInstanceId } : {}) }
+    : {};
+  if (mockEnabled()) {
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
+  }
   const config = loadOpenCodeConfig({ configPath, baseDir: root });
   if (!config) {
     // Absent config → genuine greenfield (the scaffold `config` step writes the real one). A config
@@ -504,7 +528,7 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
     const reason = existsSync(configPath)
       ? ".arke/config.json is present but invalid or has no OpenCode instance — fix or remove it to re-scaffold"
       : undefined;
-    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
+    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
@@ -517,16 +541,20 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     // The config parsed fine; only the harness server failed — its tier mapping is still known.
-    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: tierDefaultsFrom(config) };
+    return { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: tierDefaultsFrom(config), ...registryDeps };
   }
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config), ...registryDeps };
 }
 
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
+  const loadedRegistry = loadRegistryConfig(CONFIG_PATH);
+  const registryDeps = loadedRegistry
+    ? { registryConfig: loadedRegistry.config, ...(loadedRegistry.connectedInstanceId ? { connectedInstanceId: loadedRegistry.connectedInstanceId } : {}) }
+    : {};
   if (mockEnabled()) {
     console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
+    return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
   if (!config) {
@@ -543,7 +571,7 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
     const reason = present
       ? ".arke/config.json is present but invalid or has no OpenCode instance — fix or remove it to re-scaffold"
       : undefined;
-    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
+    return { adapter: new NullAdapter(reason), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
   const deadLetterSink: DeadLetterSink = { write: (dl: DeadLetter) => trace.write({ ...dl }) };
   const adapter = new OpenCodeAdapter(config, {
@@ -567,9 +595,10 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
       grants,
       endpoints: [config.baseUrl],
       tierDefaults: tierDefaultsFrom(config),
+      ...registryDeps,
     };
   }
-  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config) };
+  return { adapter, trace, grants, endpoints: [config.baseUrl], tierDefaults: tierDefaultsFrom(config), ...registryDeps };
 }
 
 async function bootstrap(): Promise<void> {
@@ -587,6 +616,8 @@ async function bootstrap(): Promise<void> {
   await new Coordinator(deps.adapter, deps.trace, deps.grants, PORT, {
     endpoints: deps.endpoints,
     tierDefaults: deps.tierDefaults,
+    ...(deps.registryConfig ? { registryConfig: deps.registryConfig } : {}),
+    ...(deps.connectedInstanceId ? { connectedInstanceId: deps.connectedInstanceId } : {}),
     registry: new ProjectRegistry(), // the real global recents (SPEC-018)
   }).start();
 }
