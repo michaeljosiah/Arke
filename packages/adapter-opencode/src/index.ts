@@ -289,7 +289,9 @@ export class OpenCodeAdapter implements HarnessAdapter {
   /** Attach correlation id (where applicable) and validate at the boundary before emission. */
   private finishEvent(event: DomainEvent, raw: unknown): DomainEvent | null {
     let candidate: DomainEvent = event;
-    if ("sessionId" in event) {
+    // Attach the in-flight turn's correlation id, unless the event already carries one
+    // (message.* events derive it from their own messageID in the normaliser).
+    if ("sessionId" in event && !event.correlationId) {
       const corr = this.activeTurn.get(event.sessionId);
       if (corr) candidate = { ...event, correlationId: corr };
     }

@@ -140,7 +140,7 @@ test("an event for an unknown session signals unknown-session, not a guess", () 
 });
 
 test("a deliberately-unmapped known event is ignored, not dead-lettered", () => {
-  for (const type of ["message.part.updated", "file.edited", "server.connected", "session.diff"]) {
+  for (const type of ["message.removed", "file.edited", "server.connected", "session.diff"]) {
     const out = normalize({ type, properties: {} }, lookup, HARNESS);
     assert.equal(out.kind, "ignore", `${type} should be ignored`);
   }

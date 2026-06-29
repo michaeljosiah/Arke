@@ -156,7 +156,10 @@ export function Session() {
       e(Tabs, { tabs: [{ id: 'transcript', label: 'Transcript' }, { id: 'todos', label: 'Todos', count: TODOS.length }, { id: 'diff', label: 'Diff' }], value: tab, onChange: setTab })),
     e('div', { style: { flex: 1, minHeight: 0, overflow: 'hidden' } },
       tab === 'transcript' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 760 } },
-        TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text)),
+        // Live transcript from the coordinator when present (SPEC-003); otherwise the sample.
+        (card.transcript && card.transcript.length
+          ? card.transcript.map((m, i) => e(AgentMessage, { key: m.messageId || i, role: 'agent', agent: m.role === 'tool' ? 'Tool' : 'Implementation', model: card.model || 'mid-tier' }, m.text + (m.isStreaming ? ' ▍' : '')))
+          : TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text))),
         e(Callout, { variant: 'default', label: 'Runtime receipts' }, 'The board reacts to typed receipts — turn quiescence, diff finalisation — captured around each agent turn, with automatic git checkpoints for rescue and audit.')) : null,
       tab === 'todos' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, maxWidth: 620 } },
         TODOS.map((t, i) => e('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', marginBottom: 8, background: 'var(--card)' } },

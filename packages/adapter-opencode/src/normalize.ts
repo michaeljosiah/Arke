@@ -35,9 +35,7 @@ const IGNORED_TYPES = new Set([
   "session.deleted",
   "session.compacted",
   "session.diff", // carries no counts; coordinator pairs with GET /diff → diff.finalized
-  "message.updated",
   "message.removed",
-  "message.part.updated",
   "question.asked",
   "question.replied",
   "question.rejected",
@@ -186,6 +184,62 @@ export function normalize(raw: unknown, lookup: IdentityLookup, harness: string)
           sessionId: sid,
           permissionId: permId,
           granted,
+        },
+      };
+    }
+
+    // ---- streaming transcript (SPEC-003) ----
+    case "message.part.updated": {
+      const sid = sessionIdOf(p);
+      const messageId = (p.message_id ?? p.messageID ?? p.messageId) as string | undefined;
+      if (!sid || !messageId) {
+        return { kind: "dead-letter", reason: "message.part.updated without session/message id" };
+      }
+      const part = (p.part ?? {}) as { delta?: string; text?: string; type?: string; done?: boolean };
+      const delta = String(p.delta ?? part.delta ?? part.text ?? "");
+      const partIndex = Number(p.part_index ?? p.partIndex ?? 0);
+      const role = part.type === "tool" ? "tool" : "assistant";
+      return {
+        kind: "event",
+        event: {
+          ...env,
+          correlationId: messageId, // correlation = the OpenCode messageID
+          type: "message.part",
+          sessionId: sid,
+          messageId,
+          partIndex: Number.isFinite(partIndex) ? partIndex : 0,
+          delta,
+          role,
+          done: Boolean(p.done ?? part.done ?? false),
+        },
+      };
+    }
+    case "message.updated": {
+      const sid = sessionIdOf(p);
+      const message = (p.message ?? {}) as {
+        id?: string;
+        role?: string;
+        text?: string;
+        isStreaming?: boolean;
+      };
+      const messageId = (p.message_id ?? p.messageID ?? message.id) as string | undefined;
+      if (!sid || !messageId) {
+        return { kind: "dead-letter", reason: "message.updated without session/message id" };
+      }
+      const role =
+        message.role === "user" || message.role === "tool" ? message.role : "assistant";
+      return {
+        kind: "event",
+        event: {
+          ...env,
+          correlationId: messageId,
+          type: "message.updated",
+          sessionId: sid,
+          messageId,
+          role,
+          text: String(message.text ?? p.text ?? ""),
+          toolCalls: [],
+          isStreaming: Boolean(message.isStreaming ?? false),
         },
       };
     }
