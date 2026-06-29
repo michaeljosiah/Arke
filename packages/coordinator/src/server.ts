@@ -221,6 +221,7 @@ export class Coordinator {
         projectName: basename(this.projectRoot),
         projectPath: this.projectRoot,
         harness: this.adapter.id,
+        ...(this.endpoints[0] ? { harnessEndpoint: this.endpoints[0] } : {}),
         harnessReachable: this.harnessReachable,
         ...(this.harnessReachabilityReason ? { harnessReachabilityReason: this.harnessReachabilityReason } : {}),
         ...(this.harnessPartial ? { harnessReachabilityPartial: true } : {}),

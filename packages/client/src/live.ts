@@ -214,7 +214,7 @@ function applySnapshot(snap: any) {
     cards: [...cards.values()],
     live: true,
     events: [],
-    connectedProject: snap?.projectName ? { name: snap.projectName, path: snap.projectPath ?? null, harness: snap.harness ?? null } : null,
+    connectedProject: snap?.projectName ? { name: snap.projectName, path: snap.projectPath ?? null, harness: snap.harness ?? null, endpoint: snap.harnessEndpoint ?? null } : null,
     harnessReachable: snap?.harnessReachable ?? true,
     harnessReachabilityReason: snap?.harnessReachabilityReason ?? null,
     harnessReachabilityPartial: snap?.harnessReachabilityPartial ?? false,
