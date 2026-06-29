@@ -69,6 +69,11 @@ test("scaffold.done parses with projectPath + stepsRun (SPEC-004)", () => {
   assert.equal(ev.type, "scaffold.done");
 });
 
+test("scaffold.done rejects a bogus step in stepsRun", () => {
+  const bad = { ...base, type: "scaffold.done", projectPath: "/p", stepsRun: ["agents", "bogus"] };
+  assert.equal(DomainEvent.safeParse(bad).success, false);
+});
+
 test("harness.reachability parses with reason + partial (SPEC-004)", () => {
   const ev = DomainEvent.parse({
     ...base,

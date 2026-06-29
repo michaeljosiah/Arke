@@ -77,9 +77,15 @@ export class HarnessReachabilityProbe {
     }
   }
 
-  /** OpenCode (and the other drivers) expose readiness at `/health`; normalise the base URL. */
+  /**
+   * OpenCode exposes readiness at `/global/health` (the same path the adapter's capability probe
+   * and the repo's stub server use) — not `/health`. Normalise the base URL to that path so a
+   * configured OpenCode instance is not reported unreachable. NOTE: the coordinator treats the
+   * adapter's own `readiness()` (which performs the real capability probe) as authoritative for the
+   * gate; this raw probe is only consulted for a failure *reason* when the adapter is not ready.
+   */
   private healthUrl(endpoint: string): string {
     const trimmed = endpoint.replace(/\/+$/, "");
-    return `${trimmed}/health`;
+    return `${trimmed}/global/health`;
   }
 }

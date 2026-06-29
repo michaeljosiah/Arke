@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -58,4 +58,29 @@ test("validateCloneUrl rejects a bare path string", () => {
 
 test("validateCloneUrl rejects an http (non-tls) url", () => {
   assert.throws(() => InputValidator.validateCloneUrl("http://github.com/acme/repo"), ValidationError);
+});
+
+test("validateCloneUrl rejects an https url with an embedded token (credential boundary)", () => {
+  assert.throws(() => InputValidator.validateCloneUrl("https://ghp_tokenABC@github.com/acme/repo.git"), ValidationError);
+});
+
+test("validateCloneUrl rejects an embedded password", () => {
+  assert.throws(() => InputValidator.validateCloneUrl("https://user:secret@github.com/acme/repo.git"), ValidationError);
+});
+
+test("validateCloneUrl still accepts ssh git@host (login user, not a credential)", () => {
+  const url = "ssh://git@github.com/acme/repo.git";
+  assert.equal(InputValidator.validateCloneUrl(url), url);
+});
+
+test("canonicalisePath rejects a target whose existing ancestor symlinks out of the root", () => {
+  // safeRoot/out -> /tmp (outside); target 'out/repo' does not exist yet but its parent escapes.
+  const outside = mkdtempSync(join(tmpdir(), "arke-iv-outside-"));
+  const link = join(root, "out");
+  try {
+    symlinkSync(outside, link, "dir");
+  } catch {
+    return; // symlink creation may be unavailable (e.g. Windows without privilege) — skip
+  }
+  assert.throws(() => InputValidator.canonicalisePath("out/repo", root), ValidationError);
 });

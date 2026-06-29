@@ -137,6 +137,10 @@ export const store = createStore({
   // The single project the connected coordinator serves (SPEC-004). Null until a snapshot arrives.
   // The coordinator is single-project; there is no multi-project list.
   connectedProject: null,
+  // The coordinator-relative path the initialisation screen should scaffold. Defaults to the
+  // project root ('.'); the clone flow sets it to the cloned subdirectory so scaffolding targets
+  // the freshly cloned repo, not the coordinator root.
+  entryPath: '.',
   // Onboarding state (SPEC-004), folded from the coordinator snapshot + events. Defaults assume a
   // reachable harness so the mock-only prototype shows the picker directly.
   harnessReachable: true,

@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 
 /**
@@ -26,6 +26,28 @@ function isWithinRoot(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/**
+ * Resolve symlinks on the longest existing ancestor of `p`, re-appending the not-yet-existing
+ * tail literally. A plain `realpathSync` throws when the target is absent, which would let a
+ * symlinked *parent* (e.g. `safeRoot/out -> /tmp/outside`) escape the root on a later write; this
+ * resolves that parent so the escape is caught.
+ */
+function realpathWithAncestors(p: string): string {
+  const suffix: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      const real = realpathSync.native(cur);
+      return suffix.length ? resolve(real, ...suffix) : real;
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return p; // reached the filesystem root with nothing resolvable
+      suffix.unshift(basename(cur));
+      cur = parent;
+    }
+  }
+}
+
 // A clone URL must be a well-formed git remote over https or ssh. Anything else — file://,
 // a bare path, or a string carrying shell metacharacters — is rejected before git is invoked.
 const SHELL_SPECIAL = /[;&|`$(){}<>\n\r\t\\"']/;
@@ -50,13 +72,9 @@ export const InputValidator = {
     if (!isWithinRoot(root, resolved)) {
       throw new ValidationError("path", `path '${raw}' resolves outside the safe root`);
     }
-    // Then follow symlinks where the path already exists, to catch a link that escapes the root.
-    let real = resolved;
-    try {
-      real = realpathSync.native(resolved);
-    } catch {
-      // not yet on disk — the lexical check above is authoritative
-    }
+    // Then follow symlinks — including on existing *ancestors* of an absent target — to catch a
+    // link that escapes the root before a later git clone / scaffold write follows it.
+    const real = realpathWithAncestors(resolved);
     if (!isWithinRoot(root, real)) {
       throw new ValidationError("path", `path '${raw}' resolves (via symlink) outside the safe root`);
     }
@@ -90,6 +108,13 @@ export const InputValidator = {
     }
     if (!parsed.hostname) {
       throw new ValidationError("url", "clone url is missing a host");
+    }
+    // Refuse embedded credentials: they would otherwise become durable in the trace and cross the
+    // credential boundary to the client (NFR-1). A password is always a secret; an https username
+    // is the PAT/token pattern (`https://token@github.com/…`). SSH's `git@host` is the normal login
+    // user (key-based auth), so a bare ssh username is allowed — but an ssh password is not.
+    if (parsed.password || (parsed.username && parsed.protocol === "https:")) {
+      throw new ValidationError("url", "clone url must not embed credentials; use SSH or a host credential helper");
     }
     return url;
   },

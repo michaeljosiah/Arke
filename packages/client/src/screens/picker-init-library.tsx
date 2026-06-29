@@ -34,14 +34,16 @@ export function Picker() {
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
   const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
-  const toInit = (name: string) => store.set({ project: { name, specs: 0 }, view: 'init' });
-  const openProject = () => { if (cp) store.set({ project: { name: cp.name, specs: 0 }, view: projectState === 'method-ready' ? 'library' : 'init' }); };
+  // entryPath is the coordinator-relative path the init screen scaffolds. Open/New target the
+  // project root ('.'); Clone targets the freshly cloned subdirectory so scaffolding writes there.
+  const toInit = (name: string, path: string) => store.set({ project: { name, specs: 0 }, entryPath: path, view: 'init' });
+  const openProject = () => { if (cp) store.set({ project: { name: cp.name, specs: 0 }, entryPath: '.', view: projectState === 'method-ready' ? 'library' : 'init' }); };
   const clone = () => {
     const url = cloneUrl.trim();
     if (!url) return;
     const name = (url.split('/').pop() || 'repo').replace(/\.git$/, '');
     liveSend({ type: 'repo.clone', url, targetPath: name });
-    toInit(name);
+    toInit(name, name); // scaffold the cloned dir, not the coordinator root
   };
 
   const linkBtn = { background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } as const;
@@ -98,7 +100,7 @@ export function Picker() {
         e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9, marginBottom: cloneOpen ? 10 : 18 } },
           e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Open the connected project — Arke detects and adapts', primary: true, onClick: openProject }),
           e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a new working folder', onClick: () => setCloneOpen((o) => !o) }),
-          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', onClick: () => toInit((cp && cp.name) || 'new-service') })),
+          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', onClick: () => toInit((cp && cp.name) || 'new-service', '.') })),
         cloneOpen ? e('div', { style: { display: 'flex', gap: 8, marginBottom: 18 } },
           e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
           e(Button, { style: { flex: 'none' }, disabled: !ready || !cloneUrl.trim(), onClick: clone }, 'Clone')) : null,
@@ -137,6 +139,7 @@ export function Initialisation() {
   const projectState = useStore((s) => s.projectState);
   const missingSentinels = useStore((s) => s.missingSentinels);
   const scaffold = useStore((s) => s.scaffold);
+  const entryPath = useStore((s) => s.entryPath);
   const [repo, setRepo] = React.useState('github.com/acme/new-service');
   const [running, setRunning] = React.useState(false);
   const [done, setDone] = React.useState({});
@@ -165,7 +168,9 @@ export function Initialisation() {
     if (tiersBlocked) return;
     if (live) {
       store.set({ scaffold: { steps: {}, log: [], running: true, done: false } });
-      liveSend({ type: 'scaffold.run', path: '.' });
+      // Scaffold the path the picker selected (the cloned subdir for a clone, '.' otherwise) so a
+      // cloned repo is made method-ready in place rather than writing into the coordinator root.
+      liveSend({ type: 'scaffold.run', path: entryPath || '.' });
       return;
     }
     setRunning(true); setDone({}); setLog([]); setFinished(false);

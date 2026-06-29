@@ -31,7 +31,7 @@ import { HarnessReachabilityProbe } from "./reachability.js";
 import { ScaffoldRunner, type ScaffoldTiers } from "./scaffold.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /**
  * Coordinator entry point (PRD §8.5; SPEC-003).
@@ -127,10 +127,10 @@ export class Coordinator {
     return actual;
   }
 
-  /** Inspect the project root and remember its method-ready classification (SPEC-004). */
-  private classifyProject(): void {
+  /** Inspect a folder (default the project root) and remember its classification (SPEC-004). */
+  private classifyProject(target: string = this.projectRoot): void {
     try {
-      const cls = FolderInspector.classify(this.projectRoot);
+      const cls = FolderInspector.classify(target);
       this.projectState = cls.state;
       this.missingSentinels = cls.missingSentinels;
     } catch {
@@ -145,43 +145,31 @@ export class Coordinator {
    * onboarding gate still reflects a usable harness. Updates the snapshot fields.
    */
   private async refreshReachability(): Promise<void> {
-    // The adapter's own readiness is authoritative once it has initialised: init() performs a real
-    // capability probe of the live server, which is more reliable than a generic HTTP health ping
-    // (e.g. OpenCode exposes no `/health`). Only when the adapter reports NOT ready (or has no
-    // readiness, or there is nothing configured) do we fall to the endpoint probe for a reason.
+    // The adapter's own readiness is AUTHORITATIVE for the gate: init() performs the real capability
+    // probe of the live server (it confirms the events endpoint exists), so a harness that answers
+    // a health ping but can't stream events is correctly reported unreachable — the gate must never
+    // open on a raw health 200 alone. The standalone HTTP probe is consulted only to enrich the
+    // failure *reason* when the adapter is not ready; it can never flip reachable to true.
     const r = this.adapter.readiness?.() ?? { ready: true };
-    if (r.ready || this.endpoints.length === 0) {
-      this.harnessReachable = r.ready;
-      this.harnessReachabilityReason = r.ready ? undefined : (r.reason ?? "harness not ready");
-      this.harnessPartial = false;
-      await this.emit({
-        seq: 0,
-        ts: 0,
-        harness: this.adapter.id,
-        type: "harness.reachability",
-        endpoint: this.endpoints[0] ?? this.adapter.id,
-        reachable: r.ready,
-        ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}),
-      });
-      return;
+    this.harnessReachable = r.ready;
+    this.harnessReachabilityReason = r.ready ? undefined : (r.reason ?? "harness not ready");
+    this.harnessPartial = false;
+    if (!r.ready && this.endpoints.length > 0) {
+      const { results } = await this.probe.anyReachable(this.endpoints);
+      const failed = results.find((res) => !res.reachable);
+      if (failed?.reason) this.harnessReachabilityReason = failed.reason;
+      this.harnessPartial = failed?.partial ?? false;
     }
-    const { reachable, results } = await this.probe.anyReachable(this.endpoints);
-    this.harnessReachable = reachable;
-    const failed = results.find((res) => !res.reachable);
-    this.harnessReachabilityReason = reachable ? undefined : failed?.reason;
-    this.harnessPartial = !reachable && (failed?.partial ?? false);
-    for (const res of results) {
-      await this.emit({
-        seq: 0,
-        ts: 0,
-        harness: this.adapter.id,
-        type: "harness.reachability",
-        endpoint: res.endpoint,
-        reachable: res.reachable,
-        ...(res.partial ? { partial: true } : {}),
-        ...(res.reason ? { reason: res.reason } : {}),
-      });
-    }
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "harness.reachability",
+      endpoint: this.endpoints[0] ?? this.adapter.id,
+      reachable: this.harnessReachable,
+      ...(this.harnessPartial ? { partial: true } : {}),
+      ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}),
+    });
   }
 
   /** Stop the pump and listener, close client connections, and stop any managed harness. */
@@ -239,7 +227,9 @@ export class Coordinator {
     } catch {
       return; // ignore malformed client input
     }
-    await this.trace.write({ kind: "client.request", request: msg });
+    // Redact any embedded URL credentials before the request becomes durable in the trace
+    // (a credentialed clone URL is rejected downstream, but must never reach the trace either).
+    await this.trace.write({ kind: "client.request", request: redactRequest(msg) });
 
     // SPEC-017: request/response command surface (CLI + any client) over the same WS.
     if (msg.type === "request") {
@@ -464,9 +454,11 @@ export class Coordinator {
     const url = InputValidator.validateCloneUrl(String(rawUrl ?? ""));
     const target = InputValidator.canonicalisePath(String(rawTarget ?? ""), this.projectRoot);
     if (!gitAvailable()) throw new Error("git not found on PATH; cannot clone");
-    // url is validated (no shell-special chars) and passed as an arg array — no shell, no injection.
-    const res = spawnSync("git", ["clone", url, target], { stdio: "ignore" });
-    if (res.status !== 0) throw new Error(`git clone failed (exit ${res.status ?? "signal"})`);
+    // Async + time-bounded: a slow remote or an SSH URL that prompts must not block the event loop
+    // (and thus every other client's messages, permissions, and progress). url is validated (no
+    // shell-special chars) and passed as an arg array — no shell, no injection. GIT_TERMINAL_PROMPT=0
+    // makes a credential/host prompt fail fast instead of hanging.
+    await gitCloneAsync(url, target, CLONE_TIMEOUT_MS);
     const cls = FolderInspector.classify(target);
     return { state: cls.state, missingSentinels: cls.missingSentinels, projectPath: target };
   }
@@ -488,25 +480,27 @@ export class Coordinator {
       trace: this.trace,
     });
     const result = await runner.run({ tiers, ...(resumeFrom ? { resumeFrom } : {}) });
-    // Re-classify so a subsequent snapshot reflects the now method-ready state.
-    this.classifyProject();
+    // Re-classify the path that was actually scaffolded (not always the coordinator root — e.g. a
+    // cloned subdir or a CLI/op target) so a subsequent snapshot reflects its now method-ready state.
+    this.classifyProject(path);
     if (result.ok) void this.runGrounding(path); // best-effort; never blocks the scaffold response
     return result;
   }
 
   /**
-   * Grounding session (SPEC-004): dispatch the researcher role to analyse the repo and (re)write
-   * AGENTS.md, recording full provenance in the trace. Best-effort — a harness without dispatch,
-   * or any failure, is traced and never throws into the scaffold path. The commit SHA is recorded
-   * when the harness commits; absent a git commit we anchor provenance on the AGENTS.md content
-   * hash so the entry is still auditable.
+   * Grounding session (SPEC-004): run the researcher role to analyse the repo and (re)write
+   * AGENTS.md, recording full provenance in the trace. Uses the SYNCHRONOUS `sendMessage` (not
+   * fire-and-watch `dispatchAsync`) so the turn has completed — and AGENTS.md has actually been
+   * rewritten — before we read its hash and stamp `completedAt`; otherwise provenance would record
+   * the scaffold stub's hash and a misleading time. Best-effort: any failure is traced, never thrown
+   * into the scaffold path. Absent a git commit we anchor provenance on the AGENTS.md content hash.
    */
   private async runGrounding(projectPath: string): Promise<void> {
     try {
       const agentsMdPath = resolve(projectPath, "AGENTS.md");
       const previousSha = fileSha(agentsMdPath);
       const session = await this.adapter.createSession({ specId: "grounding" });
-      await this.adapter.dispatchAsync({
+      await this.adapter.sendMessage({
         sessionId: session.sessionId,
         agent: "researcher",
         tier: "mid",
@@ -657,6 +651,20 @@ export class Coordinator {
   }
 }
 
+/** Strip `user:pass@` userinfo from a `scheme://…` URL so credentials never reach the trace. */
+function redactUrlCreds(s: string): string {
+  return s.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1");
+}
+
+/** Deep-copy a client request, redacting URL credentials from every string value. */
+function redactRequest(msg: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(msg), (_k, v) => (typeof v === "string" ? redactUrlCreds(v) : v));
+  } catch {
+    return msg;
+  }
+}
+
 /** Whether git is on PATH (clone + advisory vendored-repos step depend on it). */
 function gitAvailable(): boolean {
   try {
@@ -664,6 +672,37 @@ function gitAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Hard ceiling on a clone so a slow/hanging remote can't pin a context indefinitely. */
+const CLONE_TIMEOUT_MS = Number(process.env.ARKE_CLONE_TIMEOUT_MS ?? 120_000);
+
+/**
+ * Run `git clone <url> <target>` asynchronously with a timeout — never `spawnSync`, which would
+ * block the Node event loop (and every other client) until the remote responds. Args are passed as
+ * an array (no shell); `GIT_TERMINAL_PROMPT=0` turns an interactive credential/host prompt into a
+ * fast failure rather than a hang.
+ */
+function gitCloneAsync(url: string, target: string, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolvePromise, reject) => {
+    const child = spawn("git", ["clone", url, target], {
+      stdio: "ignore",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`git clone timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolvePromise();
+      else reject(new Error(`git clone failed (exit ${code ?? "signal"})`));
+    });
+  });
 }
 
 /** sha256 of a file's contents, or undefined if it does not exist — a provenance anchor. */

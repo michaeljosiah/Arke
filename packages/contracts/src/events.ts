@@ -158,7 +158,9 @@ export const ScaffoldStepEvent = base.extend({
 export const ScaffoldDoneEvent = base.extend({
   type: z.literal("scaffold.done"),
   projectPath: z.string(), // canonicalised project root only — never a raw client value
-  stepsRun: z.array(z.string()),
+  // Checked as strictly as scaffold.step so a malformed terminal signal (e.g. a bogus step name)
+  // cannot pass DomainEvent validation and be traced/rendered as completed progress.
+  stepsRun: z.array(ScaffoldStep),
 });
 
 /**

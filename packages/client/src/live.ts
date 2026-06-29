@@ -150,7 +150,11 @@ function applyEvent(ev: any) {
       store.set((s: any) => ({
         scaffold: {
           ...(s.scaffold ?? { steps: {}, log: [], running: true, done: false }),
-          running: ev.status === 'running' ? true : (s.scaffold?.running ?? true),
+          // An error step is terminal: ScaffoldRunner stops and emits no scaffold.done, so clear
+          // `running` (and flag `error`) — otherwise the init screen stays stuck on "Scaffolding…"
+          // and the retry path is unreachable.
+          running: ev.status === 'error' ? false : (ev.status === 'running' ? true : (s.scaffold?.running ?? true)),
+          error: ev.status === 'error' ? (ev.detail || ev.step) : (s.scaffold?.error ?? null),
           steps: { ...(s.scaffold?.steps ?? {}), [ev.step]: ev.status },
           log: [
             ...((s.scaffold?.log ?? [])),
