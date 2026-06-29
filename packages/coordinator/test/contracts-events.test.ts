@@ -53,3 +53,32 @@ test("EventEnvelope correlationId is optional", () => {
 test("an unknown event type is rejected by the union", () => {
   assert.equal(DomainEvent.safeParse({ ...base, type: "bogus.event" }).success, false);
 });
+
+test("scaffold.step parses with a known step + status (SPEC-004)", () => {
+  const ev = DomainEvent.parse({ ...base, type: "scaffold.step", step: "agents", status: "done" });
+  assert.equal(ev.type, "scaffold.step");
+});
+
+test("scaffold.step rejects an unknown step", () => {
+  const bad = { ...base, type: "scaffold.step", step: "nope", status: "done" };
+  assert.equal(DomainEvent.safeParse(bad).success, false);
+});
+
+test("scaffold.done parses with projectPath + stepsRun (SPEC-004)", () => {
+  const ev = DomainEvent.parse({ ...base, type: "scaffold.done", projectPath: "/p", stepsRun: ["agents"] });
+  assert.equal(ev.type, "scaffold.done");
+});
+
+test("harness.reachability parses with reason + partial (SPEC-004)", () => {
+  const ev = DomainEvent.parse({
+    ...base,
+    type: "harness.reachability",
+    endpoint: "http://127.0.0.1:4096",
+    reachable: false,
+    partial: true,
+    reason: "HTTP 503",
+  });
+  if (ev.type !== "harness.reachability") return assert.fail();
+  assert.equal(ev.reachable, false);
+  assert.equal(ev.reason, "HTTP 503");
+});

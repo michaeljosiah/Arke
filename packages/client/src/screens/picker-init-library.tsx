@@ -4,12 +4,78 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
+import { liveSend } from '../live';
 
 const e = React.createElement;
 
+/**
+ * Harness-setup guidance surface (SPEC-004). Shown in place of the project list when the
+ * coordinator reports no reachable harness. "Retry connection" re-probes without a reconnect;
+ * an "Edit endpoint" affordance is offered so a stuck probe still has a path forward. No project
+ * action is reachable from here — the gate is the only surface until a harness is confirmed.
+ */
+export function HarnessGuidance() {
+  const reason = useStore((s) => s.harnessReachabilityReason);
+  const partial = useStore((s) => s.harnessReachabilityPartial);
+  const [endpoint, setEndpoint] = React.useState('localhost:4096');
+  const [editing, setEditing] = React.useState(false);
+  const [retrying, setRetrying] = React.useState(false);
+  const retry = () => {
+    setRetrying(true);
+    liveSend({ type: 'harness.probe' });
+    setTimeout(() => setRetrying(false), 1200);
+  };
+  const drivers = [
+    { name: 'OpenCode', install: 'npm i -g opencode', start: 'opencode serve --port 4096' },
+    { name: 'Claude Code (ACP)', install: 'see docs/harnesses', start: 'acp serve' },
+  ];
+  return e('div', { style: { height: '100%', width: '100%', background: 'var(--muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto' } },
+    e('div', { style: { width: 520, padding: 32 } },
+      e('div', { style: { display: 'flex', justifyContent: 'center', marginBottom: 16 } },
+        e('div', { style: { background: 'var(--primary)', borderRadius: 'var(--radius-xl)', padding: '14px 22px' } }, e(Wordmark, { size: 26, onDark: true }))),
+      e(Card, { padding: 22 },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 } },
+          e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 18 })),
+          e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, color: 'var(--foreground)' } }, partial ? 'Harness responded, but is not ready' : 'No harness is reachable')),
+        e('p', { style: { margin: '0 0 16px', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--muted-foreground)', lineHeight: 1.6 } },
+          reason ? 'reason: ' + reason : 'Start a coding-agent harness, then retry. No project can be opened until a harness is confirmed reachable.'),
+        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 } },
+          drivers.map((d) => e('div', { key: d.name, style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '12px 14px' } },
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)', marginBottom: 6 } }, d.name),
+            e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, '$ ' + d.install),
+            e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, '$ ' + d.start)))),
+        editing
+          ? e('div', { style: { display: 'flex', gap: 8, marginBottom: 12 } },
+              e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'opencode://', value: endpoint, onChange: (ev) => setEndpoint(ev.target.value) })),
+              e(Button, { variant: 'secondary', style: { flex: 'none' }, onClick: () => setEditing(false) }, 'Save'))
+          : null,
+        e('div', { style: { display: 'flex', gap: 10 } },
+          e(Button, { iconLeft: e(Icon, { name: 'refresh', size: 15 }), disabled: retrying, onClick: retry }, retrying ? 'Retrying…' : 'Retry connection'),
+          e(Button, { variant: 'outline', onClick: () => setEditing((v) => !v) }, 'Edit endpoint'))),
+      e('p', { style: { textAlign: 'center', margin: '18px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
+    ),
+  );
+}
+
 export function Picker() {
+  const live = useStore((s) => s.live);
+  const harnessReachable = useStore((s) => s.harnessReachable);
   const [host, setHost] = React.useState('localhost:4096');
   const [connecting, setConnecting] = React.useState(false);
+  const [cloneUrl, setCloneUrl] = React.useState('');
+  // Clone a remote repository: the coordinator validates the URL (https/ssh only) and target,
+  // runs git clone on the host, then folder-state detection (SPEC-004). The client only sends intent.
+  const clone = () => {
+    const url = cloneUrl.trim();
+    if (!url) return;
+    const name = (url.split('/').pop() || 'repo').replace(/\.git$/, '');
+    liveSend({ type: 'repo.clone', url, targetPath: name });
+    store.set({ project: { name, specs: 0 }, view: 'init' });
+  };
+  // The reachability gate (SPEC-004): once live, no project action is shown until a harness is
+  // confirmed reachable. In the mock-only prototype `harnessReachable` defaults true, so the
+  // picker shows directly.
+  if (live && !harnessReachable) return e(HarnessGuidance);
   const projects = [
     { name: 'asset-platform', specs: 14, status: 'connected', meta: 'github.com/acme/asset-platform' },
     { name: 'billing-core', specs: 6, status: 'connected', meta: 'github.com/acme/billing-core' },
@@ -38,7 +104,10 @@ export function Picker() {
               e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, p.specs + ' specifications · ' + p.meta)),
             e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 })))),
         ),
-        e('button', { onClick: () => store.set({ project: { name: 'new-service', specs: 0 }, view: 'init' }), style: { marginTop: 12, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--muted-foreground)' } },
+        e('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
+          e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'git://', placeholder: 'https://… or ssh://… to clone', value: cloneUrl, onChange: (ev) => setCloneUrl(ev.target.value) })),
+          e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: !cloneUrl.trim(), onClick: clone }, 'Clone')),
+        e('button', { onClick: () => store.set({ project: { name: 'new-service', specs: 0 }, view: 'init' }), style: { marginTop: 10, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '11px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--muted-foreground)' } },
           e(Icon, { name: 'plus', size: 15 }), 'Initialise a new project'),
       ),
       e('p', { style: { textAlign: 'center', margin: '18px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
@@ -47,22 +116,51 @@ export function Picker() {
 }
 
 const SCAFFOLD = [
-  { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — Product Owner, Technical Architect, Engineering, Implementation, Reviewer', lines: ['+ .opencode/agents/product-owner.md', '+ .opencode/agents/technical-architect.md', '+ .opencode/agents/engineering.md', '+ .opencode/agents/implementation.md'] },
+  { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — six canonical roles: spec-author, architect, reviewer-a/b, implementer, researcher', lines: ['+ .opencode/agents/spec-author.md', '+ .opencode/agents/architect.md', '+ .opencode/agents/implementer.md', '+ .opencode/agents/researcher.md'] },
   { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
-  { id: 'ground', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md symlinked to CLAUDE.md — completion gates, priorities, reference repos under .repos', lines: ['+ AGENTS.md', '~ CLAUDE.md -> AGENTS.md', '+ .repos/ (read-only references)'] },
-  { id: 'plugins', icon: 'shield', title: 'Policy & projection plugins', detail: 'Direction-of-truth hooks and deterministic spec → record projection', lines: ['+ .opencode/plugins/direction-of-truth.ts', '+ .opencode/plugins/projection.ts'] },
+  { id: 'grounding', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md baseline stub, enriched in full by the researcher grounding session', lines: ['+ AGENTS.md', '+ .repos/ (read-only references)'] },
+  { id: 'plugins', icon: 'shield', title: 'Policy & projection plugins', detail: 'Permission policy hooks and deterministic spec → record projection', lines: ['+ .opencode/plugins/policy.ts', '+ .opencode/plugins/projection.ts'] },
 ];
 
 export function Initialisation() {
   const project = useStore((s) => s.project);
   const tiers = useStore((s) => s.tiers);
+  const live = useStore((s) => s.live);
+  const tierDefaults = useStore((s) => s.tierDefaults);
+  const projectState = useStore((s) => s.projectState);
+  const missingSentinels = useStore((s) => s.missingSentinels);
+  const scaffold = useStore((s) => s.scaffold);
   const [repo, setRepo] = React.useState('github.com/acme/new-service');
   const [running, setRunning] = React.useState(false);
   const [done, setDone] = React.useState({});
   const [log, setLog] = React.useState([]);
   const [finished, setFinished] = React.useState(false);
 
+  // In live mode the scaffold runs on the coordinator and its progress folds into store.scaffold;
+  // offline (prototype) it falls back to a simulation so the screen still demos. Tier defaults come
+  // from the registry — when absent, scaffolding is blocked rather than run with empty values (D9).
+  const liveSteps = (scaffold && scaffold.steps) || {};
+  const isDone = (id) => live ? (liveSteps[id] === 'done' || liveSteps[id] === 'skipped') : !!done[id];
+  const isRunningStep = (id) => live ? liveSteps[id] === 'running' : running;
+  const effLog = live ? ((scaffold && scaffold.log) || []) : log;
+  const effRunning = live ? !!(scaffold && scaffold.running) : running;
+  const effFinished = live ? !!(scaffold && scaffold.done) : finished;
+  const tiersBlocked = live && (!tierDefaults || !tierDefaults.capable || !tierDefaults.mid);
+  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise.
+  const tierRows = live
+    ? [
+        { tier: 'capable', label: 'Capable tier', model: (tierDefaults && tierDefaults.capable) || 'capable — not configured' },
+        { tier: 'mid', label: 'Mid tier', model: (tierDefaults && tierDefaults.mid) || 'mid — not configured' },
+      ]
+    : tiers;
+
   const run = () => {
+    if (tiersBlocked) return;
+    if (live) {
+      store.set({ scaffold: { steps: {}, log: [], running: true, done: false } });
+      liveSend({ type: 'scaffold.run', path: '.' });
+      return;
+    }
     setRunning(true); setDone({}); setLog([]); setFinished(false);
     let i = 0;
     const stepAll = () => {
@@ -81,43 +179,51 @@ export function Initialisation() {
     stepAll();
   };
 
+  const stateNote = projectState === 'partial-scaffold'
+    ? 'Partial scaffold detected — missing: ' + (missingSentinels || []).join(', ') + '. Existing files are left untouched; only what is missing will be added.'
+    : projectState === 'has-code'
+      ? 'Existing code detected — scaffolding adds the method structure only and never modifies your source.'
+      : null;
+
   return e(Page, { max: 1000 },
     e(SectionHead, { eyebrow: 'Setup', title: 'Initialise a method-ready project', sub: 'Scaffolding a repository is a first-class action, not a manual checklist. This writes the agent roster, the specification structure, the grounding baseline and the governance plugins so the repo is method-ready from the first commit.' }),
+    stateNote ? e('div', { style: { marginBottom: 14, padding: '10px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--secondary)', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)' } }, stateNote) : null,
     e('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, alignItems: 'start' } },
       e('div', null,
         e(Card, { padding: 18, style: { marginBottom: 16 } },
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, marginBottom: 8 } }, 'Repository'),
           e(Input, { mono: true, prefix: 'https://', value: repo, onChange: (ev) => setRepo(ev.target.value) }),
           e('div', { style: { display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap' } },
-            tiers.map((t) => e('div', { key: t.tier, style: { flex: '1 1 120px', minWidth: 0 } },
+            tierRows.map((t) => e('div', { key: t.tier, style: { flex: '1 1 120px', minWidth: 0 } },
               e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 6 } }, t.label),
               e(Input, { mono: true, size: 'sm', value: t.model, onChange: () => {} })))),
-          e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'agents reference logical tiers, resolved per project to the internal gateway')),
+          e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: tiersBlocked ? 'var(--warning, #B45309)' : 'var(--muted-foreground)', lineHeight: 1.5 } },
+            tiersBlocked ? 'tier defaults are not configured — configure the registry (.arke/config.json) before scaffolding' : 'agents reference logical tiers, resolved per project to the internal gateway')),
         e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
           SCAFFOLD.map((s) => e('div', { key: s.id, style: { display: 'flex', gap: 12, padding: '13px 15px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--card)' } },
-            e('span', { style: { flex: 'none', width: 32, height: 32, borderRadius: 'var(--radius-md)', background: done[s.id] ? 'var(--success-bg)' : 'var(--secondary)', color: done[s.id] ? 'var(--success)' : 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: done[s.id] ? 'check' : s.icon, size: 17 })),
+            e('span', { style: { flex: 'none', width: 32, height: 32, borderRadius: 'var(--radius-md)', background: isDone(s.id) ? 'var(--success-bg)' : 'var(--secondary)', color: isDone(s.id) ? 'var(--success)' : 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: isDone(s.id) ? 'check' : s.icon, size: 17 })),
             e('div', { style: { flex: 1 } },
               e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600, color: 'var(--foreground)' } }, s.title),
               e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)', lineHeight: 1.45, marginTop: 2 } }, s.detail)),
-            done[s.id] ? e(StatusDot, { status: 'done' }) : running ? e(StatusDot, { status: 'running', pulse: true }) : e(StatusDot, { status: 'idle' }),
+            isDone(s.id) ? e(StatusDot, { status: 'done' }) : isRunningStep(s.id) ? e(StatusDot, { status: 'running', pulse: true }) : e(StatusDot, { status: 'idle' }),
           )),
         ),
       ),
       e('div', { style: { position: 'sticky', top: 0 } },
-        e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-xl)', border: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column', height: 420 } },
+        e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-xl)', border: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column', height: 420 }, role: 'log', 'aria-live': 'polite' },
           e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)' } },
             e('span', { style: { display: 'flex', color: '#A1A1A1' } }, e(Icon, { name: 'terminal', size: 15 })),
             e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#A1A1A1' } }, 'arke init · ' + (project ? project.name : 'new-service'))),
           e('div', { style: { flex: 1, overflowY: 'auto', padding: '14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.7 } },
-            log.length === 0 ? e('div', { style: { color: '#737373' } }, '$ awaiting init…') : null,
-            log.map((l, i) => e('div', { key: i, style: { color: l.t === 'ok' ? '#4ADE80' : l.t === 'file' ? '#A1A1A1' : '#E5E5E5' } }, (l.t === 'file' ? '  ' : '$ ') + l.m)),
+            effLog.length === 0 ? e('div', { style: { color: '#737373' } }, '$ awaiting init…') : null,
+            effLog.map((l, i) => e('div', { key: i, style: { color: l.t === 'ok' ? '#4ADE80' : l.t === 'err' ? '#F87171' : l.t === 'skip' ? '#FBBF24' : l.t === 'file' ? '#A1A1A1' : '#E5E5E5' } }, (l.t === 'file' ? '  ' : '$ ') + l.m)),
           ),
         ),
         e('div', { style: { display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end' } },
           e(Button, { variant: 'outline', onClick: () => store.set({ project: null, view: 'picker' }) }, 'Cancel'),
-          finished
+          effFinished
             ? e(Button, { iconLeft: e(Icon, { name: 'arrowRight', size: 15 }), onClick: () => store.set({ view: 'cockpit' }) }, 'Open authoring cockpit')
-            : e(Button, { disabled: running, iconLeft: e(Icon, { name: running ? 'refresh' : 'play', size: 15 }), onClick: run }, running ? 'Scaffolding…' : 'Run scaffold')),
+            : e(Button, { disabled: effRunning || tiersBlocked, iconLeft: e(Icon, { name: effRunning ? 'refresh' : 'play', size: 15 }), onClick: run }, effRunning ? 'Scaffolding…' : 'Run scaffold')),
       ),
     ),
   );

@@ -126,6 +126,15 @@ export const store = createStore({
   // `live` flips true once a snapshot arrives, at which point the mock engine stands down.
   connection: 'offline',
   live: false,
+  // Onboarding state (SPEC-004), folded from the coordinator snapshot + events. Defaults assume a
+  // reachable harness so the mock-only prototype shows the picker directly.
+  harnessReachable: true,
+  harnessReachabilityReason: null,
+  harnessReachabilityPartial: false,
+  projectState: null,
+  missingSentinels: [],
+  tierDefaults: null,
+  scaffold: null,
 });
 
 // ---------- helpers to mutate ----------

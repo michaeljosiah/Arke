@@ -136,6 +136,46 @@ export const TurnQuiescentEvent = base.extend({
   turnId: z.string(),
 });
 
+/** The five method-ready scaffold steps (SPEC-004). `repos` is advisory (skipped without git). */
+export const ScaffoldStep = z.enum(["agents", "specs", "grounding", "plugins", "repos"]);
+export type ScaffoldStep = z.infer<typeof ScaffoldStep>;
+
+export const ScaffoldStepStatus = z.enum(["running", "done", "skipped", "error"]);
+export type ScaffoldStepStatus = z.infer<typeof ScaffoldStepStatus>;
+
+/**
+ * Progress for one scaffold step (SPEC-004). `detail` carries a skip reason or error message —
+ * NEVER a credential value, a path outside the project root, or any file content (NFR-1).
+ */
+export const ScaffoldStepEvent = base.extend({
+  type: z.literal("scaffold.step"),
+  step: ScaffoldStep,
+  status: ScaffoldStepStatus,
+  detail: z.string().optional(),
+});
+
+/** Terminal scaffold signal (SPEC-004): the canonicalised project root and the steps that ran. */
+export const ScaffoldDoneEvent = base.extend({
+  type: z.literal("scaffold.done"),
+  projectPath: z.string(), // canonicalised project root only — never a raw client value
+  stepsRun: z.array(z.string()),
+});
+
+/**
+ * Per-endpoint harness reachability from the onboarding probe (SPEC-004). `reason` is a
+ * human-readable failure cause (e.g. "timeout", "HTTP 503") — never a credential value. This is
+ * complementary to the SPEC-005 `registry.updated` projection: this fires from the onboarding
+ * probe path; `registry.updated` is the authoritative full-registry projection.
+ */
+export const HarnessReachabilityEvent = base.extend({
+  type: z.literal("harness.reachability"),
+  endpoint: z.string(),
+  reachable: z.boolean(),
+  /** Distinguishes a clean failure from a partial response (health up, capabilities unconfirmed). */
+  partial: z.boolean().optional(),
+  reason: z.string().optional(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -148,6 +188,9 @@ export const DomainEvent = z.discriminatedUnion("type", [
   MessagePartEvent,
   MessageUpdatedEvent,
   TurnQuiescentEvent,
+  ScaffoldStepEvent,
+  ScaffoldDoneEvent,
+  HarnessReachabilityEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
