@@ -159,3 +159,31 @@ public sealed class RunHandle
         if (File.Exists(p)) File.Delete(p);
     }
 }
+
+/// <summary>
+/// The CLI's locally-recorded active project (SPEC-018). Because each `arke` invocation is a
+/// separate process + WebSocket connection, a server-side `project.open` does not persist between
+/// commands; `arke project open` records the selection here so subsequent ops re-activate it on
+/// their own connection. Stores only a project id and/or canonical path — no credentials.
+/// </summary>
+public sealed class CliActive
+{
+    public string? ProjectId { get; set; }
+    public string? Path { get; set; }
+
+    private static string FilePath(string root) => System.IO.Path.Combine(root, ".arke", "cli-active.json");
+
+    public static void Save(string root, string? projectId, string? path)
+    {
+        Directory.CreateDirectory(System.IO.Path.Combine(root, ".arke"));
+        File.WriteAllText(FilePath(root), JsonSerializer.Serialize(new CliActive { ProjectId = projectId, Path = path }));
+    }
+
+    public static CliActive? Load(string root)
+    {
+        var p = FilePath(root);
+        if (!File.Exists(p)) return null;
+        try { return JsonSerializer.Deserialize<CliActive>(File.ReadAllText(p)); }
+        catch { return null; }
+    }
+}

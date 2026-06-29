@@ -42,6 +42,10 @@ public sealed class UpCommand : AsyncCommand<UpCommand.Settings>
             {
                 ["ARKE_MANAGE_HARNESS"] = s.NoManageHarness ? "false" : "true",
                 ["ARKE_COORDINATOR_PORT"] = new Uri(cfg.CoordinatorUrl).Port.ToString(),
+                // Root the coordinator at the chosen project (SPEC-018). `npm run --workspace` runs
+                // the coordinator with its package dir as cwd, so without this the default project
+                // would be the coordinator package itself, not the user's project (--project / cwd).
+                ["ARKE_PROJECT_ROOT"] = cfg.ProjectRoot,
             };
             var coord = Proc.StartNpm(cfg.ProjectRoot, "run dev:coordinator", env);
             handle.CoordinatorPid = coord.Id;

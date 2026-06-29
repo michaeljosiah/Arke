@@ -113,3 +113,75 @@ test("scaffold.run over the op surface returns a structured result", async () =>
   assert.ok(res.result.stepsRun.includes("agents"));
   ws.close();
 });
+
+test("scaffolding a subdirectory registers THAT project, not the context root (SPEC-018)", async () => {
+  const { c, port, dir } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  // scaffold a child folder (as the clone flow does) — it is a distinct project from the root
+  ws.send(JSON.stringify({ type: "request", id: "sc", op: "scaffold.run", args: { path: "beta" } }));
+  await waitFor((f) => f.type === "response" && f.id === "sc" && f.ok === true);
+  ws.send(JSON.stringify({ type: "request", id: "pl", op: "project.list" }));
+  const list = await waitFor((f) => f.type === "response" && f.id === "pl");
+  const roots = list.result.map((p: { root: string }) => p.root);
+  assert.ok(roots.includes(resolve(dir)), "the context root stays registered");
+  assert.ok(roots.includes(resolve(dir, "beta")), "the scaffolded subdir is registered as its own project");
+  // the scaffolded child is method-ready; the parent root's entry is not overwritten by it
+  const beta = list.result.find((p: { root: string }) => p.root === resolve(dir, "beta"));
+  assert.equal(beta.lastState, "method-ready");
+  ws.close();
+});
+
+test("the snapshot carries a projectId (SPEC-018)", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  assert.equal(typeof snap.projectId, "string");
+  assert.ok(snap.projectId.length > 0);
+  ws.close();
+});
+
+test("project.list returns the active project as a real recent (SPEC-018)", async () => {
+  const { c, port, dir } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  ws.send(JSON.stringify({ type: "request", id: "pl", op: "project.list" }));
+  const res = await waitFor((f) => f.type === "response" && f.id === "pl");
+  assert.equal(res.ok, true);
+  assert.equal(res.result.length, 1);
+  assert.equal(res.result[0].projectId, snap.projectId);
+  assert.equal(res.result[0].root, resolve(dir));
+  ws.close();
+});
+
+test("project.open resolves the active project; a different id is refused (SPEC-018)", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  ws.send(JSON.stringify({ type: "request", id: "o1", op: "project.open", args: { projectId: snap.projectId } }));
+  const ok = await waitFor((f) => f.type === "response" && f.id === "o1");
+  assert.equal(ok.ok, true);
+  assert.equal(ok.result.projectId, snap.projectId);
+  ws.send(JSON.stringify({ type: "request", id: "o2", op: "project.open", args: { projectId: "deadbeefdeadbeef" } }));
+  const err = await waitFor((f) => f.type === "response" && f.id === "o2");
+  assert.equal(err.ok, false);
+  assert.match(err.error, /unknown project/);
+  ws.close();
+});
+
+test("project.forget refuses an open project (must close first) (SPEC-018)", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, waitFor } = await connect(port);
+  const snap = await waitFor((f) => f.type === "snapshot");
+  // the default project is open, so it cannot be forgotten
+  ws.send(JSON.stringify({ type: "request", id: "f1", op: "project.forget", args: { projectId: snap.projectId } }));
+  const res = await waitFor((f) => f.type === "response" && f.id === "f1");
+  assert.equal(res.ok, false);
+  assert.match(res.error, /close the project before forgetting/);
+  ws.close();
+});

@@ -16,6 +16,14 @@ app.Configure(config =>
     config.AddCommand<DoctorCommand>("doctor").WithDescription("Diagnose the environment (config, reachability, toolchain).");
 
     // ---- operations (map to the coordinator command surface) ----
+    config.AddBranch("project", b =>
+    {
+        b.SetDescription("List, open, close, and forget projects (SPEC-018).");
+        b.AddCommand<ProjectListCommand>("list").WithDescription("List durable recent projects.");
+        b.AddCommand<ProjectOpenCommand>("open").WithDescription("Open/activate a project by --path or <PROJECT_ID>.");
+        b.AddCommand<ProjectCloseCommand>("close").WithDescription("Close an open (non-default) project.");
+        b.AddCommand<ProjectForgetCommand>("forget").WithDescription("Forget a project from recents (never deletes files).");
+    });
     config.AddBranch("session", b =>
     {
         b.SetDescription("Create and list sessions.");

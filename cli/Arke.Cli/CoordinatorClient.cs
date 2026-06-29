@@ -14,7 +14,17 @@ public sealed class ArkeException(string message) : Exception(message);
 public static class CoordinatorClient
 {
     /// <summary>Send one op and resolve the matching response (ignoring snapshot/event frames).</summary>
-    public static async Task<JsonElement> RequestAsync(string url, string op, object? args, CancellationToken ct = default)
+    public static Task<JsonElement> RequestAsync(string url, string op, object? args, CancellationToken ct = default)
+        => RequestWithActivationAsync(url, null, op, args, ct);
+
+    /// <summary>
+    /// Open ONE connection, optionally activate a project on it first (<paramref name="activate"/> →
+    /// a <c>project.open</c> request), then send <paramref name="op"/> and resolve its response.
+    /// Because each CLI invocation is its own short-lived connection, the active project does not
+    /// persist server-side between commands — so a per-project op must re-activate on its own
+    /// connection before issuing (SPEC-018).
+    /// </summary>
+    public static async Task<JsonElement> RequestWithActivationAsync(string url, object? activate, string op, object? args, CancellationToken ct = default)
     {
         using var ws = new ClientWebSocket();
         // The 30s cap is scoped to CONNECTION establishment only. The response itself can take far
@@ -31,6 +41,17 @@ public static class CoordinatorClient
             throw new ArkeException($"coordinator unreachable at {url} ({e.Message}). Is `arke up` running?");
         }
 
+        if (activate is not null)
+            await SendAndAwaitAsync(ws, "project.open", activate, ct); // bind this connection's active project
+
+        var result = await SendAndAwaitAsync(ws, op, args, ct);
+        await CloseAsync(ws);
+        return result;
+    }
+
+    /// <summary>Send one request on an open socket and await its matching response (no close).</summary>
+    private static async Task<JsonElement> SendAndAwaitAsync(ClientWebSocket ws, string op, object? args, CancellationToken ct)
+    {
         var id = Guid.NewGuid().ToString("N");
         var payload = JsonSerializer.Serialize(new { type = "request", id, op, args });
         await ws.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, ct);
@@ -44,12 +65,8 @@ public static class CoordinatorClient
                 root.TryGetProperty("id", out var rid) && rid.GetString() == id)
             {
                 if (root.GetProperty("ok").GetBoolean())
-                {
-                    await CloseAsync(ws);
                     return root.TryGetProperty("result", out var result) ? result.Clone() : default;
-                }
                 var error = root.TryGetProperty("error", out var e) ? e.GetString() : "unknown error";
-                await CloseAsync(ws);
                 throw new ArkeException(error ?? "unknown error");
             }
             // snapshot / event frames are not our response — keep reading
