@@ -52,6 +52,19 @@ app.Configure(config =>
         b.AddCommand<AgentsListCommand>("list").WithDescription("List agent images under agents/.");
         b.AddCommand<AgentsMaterializeCommand>("materialize").WithDescription("Materialise agent images into the harness convention.");
     });
+    config.AddBranch("spec", b =>
+    {
+        b.SetDescription("Read, approve, and convene review on a working specification (SPEC-006).");
+        b.AddCommand<SpecFileCommand>("file").WithDescription("Print the working specification file text + metadata.");
+        b.AddCommand<SpecApproveCommand>("approve").WithDescription("Approve a draft: branch-guarded commit + advance to in-review.");
+        b.AddCommand<SpecConveneCommand>("convene").WithDescription("Convene the multi-model review panel on the working draft.");
+    });
+    config.AddBranch("harnesses", b =>
+    {
+        b.SetDescription("Inspect the live harness & model registry (SPEC-005).");
+        b.AddCommand<HarnessesListCommand>("list").WithDescription("Show registered instances, tier labels, reachability, and roster resolution.");
+        b.AddCommand<HarnessesProbeCommand>("probe").WithDescription("Re-probe the live adapter and refresh the registry projection.");
+    });
     config.AddBranch("trace", b =>
     {
         b.SetDescription("Inspect the append-only audit trace.");
