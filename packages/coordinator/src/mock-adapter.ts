@@ -63,18 +63,28 @@ export class MockAdapter implements HarnessAdapter {
       yield { ...ev, ts: Date.now() };
     }
 
-    // Then loop: each cycle streams a fresh assistant turn on T-3 (parts arrive out of
+    // Then loop: each cycle streams a *distinct* assistant turn on T-3 (parts arrive out of
     // order to exercise partIndex ordering; message.updated closes it → the coordinator
     // emits turn.quiescent) and drives T-5 through a needs-human permission and back.
+    // Distinct content per turn so the transcript reads like real, ongoing work.
+    const TURNS: Array<[string, string, string]> = [
+      ["Reading ", "the spec ", "and repo context."],
+      ["Writing ", "migration ", "0042_add_idempotency_key.sql."],
+      ["Guarding ", "handle_retry ", "on the idempotency key."],
+      ["Running ", "typecheck ", "and the test suite."],
+    ];
     let cycle = 0;
     while (!signal?.aborted) {
+      const [a, b, c] = TURNS[cycle % TURNS.length]!;
       cycle += 1;
       const mid = `m${cycle}`;
+      const full = a + b + c;
+      // emit parts out of order (0, 2, 1) — the read model re-orders by partIndex
       const turn: DomainEvent[] = [
-        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 0, delta: "Adding ", role: "assistant", done: false },
-        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 2, delta: "key column.", role: "assistant", done: true },
-        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 1, delta: "the idempotency ", role: "assistant", done: false },
-        { ...base, correlationId: mid, type: "message.updated", sessionId: "T-3", messageId: mid, role: "assistant", text: "Adding the idempotency key column.", toolCalls: [], isStreaming: false },
+        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 0, delta: a, role: "assistant", done: false },
+        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 2, delta: c, role: "assistant", done: true },
+        { ...base, correlationId: mid, type: "message.part", sessionId: "T-3", messageId: mid, partIndex: 1, delta: b, role: "assistant", done: false },
+        { ...base, correlationId: mid, type: "message.updated", sessionId: "T-3", messageId: mid, role: "assistant", text: full, toolCalls: [], isStreaming: false },
       ];
       for (const ev of turn) {
         if (signal?.aborted) return;

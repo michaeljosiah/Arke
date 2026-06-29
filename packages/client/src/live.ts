@@ -65,11 +65,14 @@ function ensureCard(id: string, specId: string, kind: 'spec' | 'task'): LiveCard
   return c;
 }
 
+const MAX_TRANSCRIPT = 100;
+
 function transcriptEntry(card: LiveCard, messageId: string, role: string) {
   let entry = card.transcript.find((t) => t.messageId === messageId);
   if (!entry) {
     entry = { messageId, role, text: '', toolCalls: [], isStreaming: true };
     card.transcript.push(entry);
+    if (card.transcript.length > MAX_TRANSCRIPT) card.transcript.shift();
   }
   return entry;
 }

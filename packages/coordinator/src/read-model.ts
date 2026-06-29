@@ -21,6 +21,9 @@ export interface CardState {
   transcript: TranscriptEntry[];
 }
 
+/** Upper bound on retained transcript turns per card (most-recent kept). */
+const MAX_TRANSCRIPT = 100;
+
 /** Buffer for parts that arrive before their predecessors (out-of-order delivery). */
 interface PartBuffer {
   // partIndex → delta, accumulated until flushed into the transcript entry's text
@@ -128,6 +131,8 @@ export class ReadModel {
     if (!entry) {
       entry = { messageId, role, text: "", toolCalls: [], isStreaming: true };
       card.transcript.push(entry);
+      // Bound transcript growth for long-running sessions (keep the most recent turns).
+      if (card.transcript.length > MAX_TRANSCRIPT) card.transcript.shift();
     }
     return entry;
   }
