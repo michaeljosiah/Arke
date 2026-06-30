@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTasks, specSlug, worktreeBranch, planFanOut, maxConcurrentTasks } from "../src/fanout.js";
+import { parseTasks, specSlug, worktreeBranch, planFanOut, maxConcurrentTasks, taskKey } from "../src/fanout.js";
 
 const TASKS_MD = `# Spec
 
@@ -38,8 +38,23 @@ test("specSlug is branch-safe", () => {
 });
 
 test("worktreeBranch is deterministic, sibling form (no git D/F conflict with the feature branch)", () => {
-  assert.equal(worktreeBranch("feat/x", 2), "feat/x--task-2");
-  assert.equal(worktreeBranch("feat/x", 2), worktreeBranch("feat/x", 2));
+  assert.equal(worktreeBranch("feat/x", "ab12cd34"), "feat/x--task-ab12cd34");
+  assert.equal(worktreeBranch("feat/x", "ab12cd34"), worktreeBranch("feat/x", "ab12cd34"));
+});
+
+test("taskKey is a stable content hash, invariant to position", () => {
+  assert.equal(taskKey("First task"), taskKey("First task"));
+  assert.notEqual(taskKey("First task"), taskKey("Other task"));
+});
+
+test("task keys are stable when a task is inserted (idempotency survives list edits)", () => {
+  const before = parseTasks(TASKS_MD);
+  const after = parseTasks(TASKS_MD.replace("## Tasks\n", "## Tasks\n- [ ] Inserted at top\n"));
+  // The existing tasks keep their keys even though their positional indices shifted.
+  const firstBefore = before.find((t) => t.text === "First task")!;
+  const firstAfter = after.find((t) => t.text === "First task")!;
+  assert.notEqual(firstBefore.index, firstAfter.index, "positional index shifted");
+  assert.equal(firstBefore.key, firstAfter.key, "stable key unchanged → not re-dispatched");
 });
 
 test("planFanOut dispatches only unchecked, not-already-dispatched tasks", () => {
@@ -47,26 +62,26 @@ test("planFanOut dispatches only unchecked, not-already-dispatched tasks", () =>
   const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks, limit: 10 });
   assert.deepEqual(plan.dispatch.map((c) => c.taskIndex), [0, 2], "skips the checked task");
   assert.equal(plan.queued.length, 0);
-  assert.equal(plan.dispatch[0]!.worktreeBranch, "feat/x--task-0");
+  assert.equal(plan.dispatch[0]!.worktreeBranch, "feat/x--task-" + taskKey("First task"));
 });
 
-test("planFanOut is idempotent against alreadyDispatched", () => {
+test("planFanOut is idempotent against alreadyDispatched (by key)", () => {
   const tasks = parseTasks(TASKS_MD);
-  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks, alreadyDispatched: new Set([0]), limit: 10 });
-  assert.deepEqual(plan.dispatch.map((c) => c.taskIndex), [2]);
+  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks, alreadyDispatched: new Set([taskKey("First task")]), limit: 10 });
+  assert.deepEqual(plan.dispatch.map((c) => c.taskText), ["Third task"]);
 });
+
+const fakeTasks = (n: number) => Array.from({ length: n }, (_, i) => ({ index: i, key: `k${i}`, text: `t${i}`, done: false }));
 
 test("planFanOut respects the concurrency cap, queueing the excess", () => {
-  const tasks = Array.from({ length: 15 }, (_, i) => ({ index: i, text: `t${i}`, done: false }));
-  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks, limit: 10 });
+  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks: fakeTasks(15), limit: 10 });
   assert.equal(plan.dispatch.length, 10);
   assert.equal(plan.queued.length, 5);
   assert.deepEqual(plan.queued.map((c) => c.taskIndex), [10, 11, 12, 13, 14]);
 });
 
 test("planFanOut accounts for already-running tasks against the cap", () => {
-  const tasks = Array.from({ length: 5 }, (_, i) => ({ index: i, text: `t${i}`, done: false }));
-  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks, limit: 10, runningCount: 8 });
+  const plan = planFanOut({ specId: "S", specSessionId: "s0", featureBranch: "feat/x", tasks: fakeTasks(5), limit: 10, runningCount: 8 });
   assert.equal(plan.dispatch.length, 2, "only 2 slots left under the cap");
   assert.equal(plan.queued.length, 3);
 });

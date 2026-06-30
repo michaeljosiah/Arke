@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -10,8 +10,11 @@ import { Coordinator } from "../src/server.js";
 import { Trace } from "../src/trace.js";
 import { GrantStore } from "../src/grant-store.js";
 import { ProjectRegistry } from "../src/project-registry.js";
+import { taskKey, worktreeBranch } from "../src/fanout.js";
+import { FanOutStore } from "../src/fanout-store.js";
 
 const BRANCH = "feat/parallel-demo";
+const branchFor = (text: string) => worktreeBranch(BRANCH, taskKey(text));
 
 function git(cwd: string, ...args: string[]) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -73,7 +76,11 @@ class FanMockAdapter implements HarnessAdapter {
     this.dispatched.push({ sessionId: i.sessionId, text: i.parts.map((p) => (p as any).text).join("") });
     return { sessionId: i.sessionId, correlationId: "c" };
   }
+  pushDone(sessionId: string) {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId: "SPEC-FAN", kind: "task", status: "done" } as DomainEvent);
+  }
   pushIdle(sessionId: string) {
+    // `idle` is a per-turn signal, NOT completion — used to prove it does NOT drain the queue.
     this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId: "SPEC-FAN", kind: "task", status: "idle" } as DomainEvent);
   }
   async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
@@ -130,10 +137,10 @@ test("fanOut dispatches only unchecked tasks, each in its own worktree, idempote
   assert.equal(r.result.dispatched, 2, "two unchecked tasks dispatched (the [x] one is skipped)");
   assert.equal(adapter.dispatched.length, 2);
   // Distinct worktrees exist on disk for task-0 and task-2.
-  assert.ok(existsSync(resolve(dir, ".arke", "worktrees", "feat_parallel-demo--task-0")));
-  assert.ok(existsSync(resolve(dir, ".arke", "worktrees", "feat_parallel-demo--task-2")));
   const branches = git(dir, "branch", "--list");
-  assert.ok(branches.includes("feat/parallel-demo--task-0") && branches.includes("feat/parallel-demo--task-2"));
+  assert.ok(branches.includes(branchFor("Build the thing")), "task branch for 'Build the thing'");
+  assert.ok(branches.includes(branchFor("Test the thing")), "task branch for 'Test the thing'");
+  assert.ok(!branches.includes(branchFor("Already done")), "the [x] task is not branched");
 
   // Idempotent: a second fan-out dispatches nothing new (FanOutRecord guards it).
   const r2 = await op(port, "spec.fanout", { specId: "SPEC-FAN" });
@@ -143,8 +150,8 @@ test("fanOut dispatches only unchecked tasks, each in its own worktree, idempote
 
 test("a worktree branch collision fails that task only; the other still dispatches", async () => {
   const dir = repo();
-  // Pre-create the branch for task-0 → simulate an orphaned worktree from a prior run.
-  git(dir, "branch", "feat/parallel-demo--task-0");
+  // Pre-create the branch for the first task → simulate an orphaned worktree from a prior run.
+  git(dir, "branch", branchFor("Build the thing"));
   const adapter = new FanMockAdapter();
   const { c, port } = await start(dir, adapter);
   after(() => c.stop());
@@ -165,13 +172,42 @@ test("the concurrency cap queues the excess and drains it as tasks complete", as
     assert.equal(r.result.dispatched, 1, "cap=1 → one dispatched");
     assert.equal(r.result.queued, 1, "one queued");
     const firstSession = adapter.dispatched[0]!.sessionId;
-    // Complete the running task → the queued task drains.
+    // `idle` is a per-turn signal, not completion → it must NOT drain the queue.
     adapter.pushIdle(firstSession);
+    await sleep(200);
+    assert.equal(adapter.dispatched.length, 1, "idle does not drain the queue");
+    // `done` is terminal → the queued task drains.
+    adapter.pushDone(firstSession);
     await sleep(300);
     assert.equal(adapter.dispatched.length, 2, "queued task dispatched after the first completed");
   } finally {
     delete process.env.ARKE_MAX_CONCURRENT_TASKS;
   }
+});
+
+test("FanOutStore: restart frees slots held by interrupted tasks; dispatchedKeys excludes failed/queued", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "arke-store-")), "fanout.ndjson");
+  const a = new FanOutStore(path);
+  a.put({
+    specId: "S",
+    specSessionId: "s0",
+    featureBranch: "feat/x",
+    startedAt: 1,
+    tasks: [
+      { taskIndex: 0, taskKey: "k0", taskText: "t0", status: "running" },
+      { taskIndex: 1, taskKey: "k1", taskText: "t1", status: "queued" },
+      { taskIndex: 2, taskKey: "k2", taskText: "t2", status: "done" },
+      { taskIndex: 3, taskKey: "k3", taskText: "t3", status: "failed" },
+    ],
+  });
+  // Reopen (simulates a restart) and reconcile.
+  const b = new FanOutStore(path);
+  b.load();
+  // Before reconcile, the running task counts as dispatched.
+  assert.deepEqual([...b.dispatchedKeys("S")].sort(), ["k0", "k2"], "running + done are dispatched; queued + failed are not");
+  b.reconcileInterrupted();
+  // The interrupted running task is now failed → no longer blocks a slot, and is retryable.
+  assert.deepEqual([...b.dispatchedKeys("S")].sort(), ["k2"], "only the genuinely-done task remains a dispatched key");
 });
 
 test("a spec with no actionable tasks fails gracefully (no dispatch)", async () => {

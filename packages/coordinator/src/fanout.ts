@@ -3,9 +3,13 @@
  * list into dispatch commands. Side effects (git worktrees, createSession, dispatchAsync, trace)
  * live in the Dispatcher on ProjectContext; this module is deterministic and unit-testable.
  */
+import { createHash } from "node:crypto";
 
 export interface ParsedTask {
-  index: number; // position among ALL task lines (stable across runs → deterministic worktree branch)
+  /** Display ordinal (position among task lines) — for readable logs, NOT identity. */
+  index: number;
+  /** STABLE identity: a short hash of the task text, invariant under insert/delete/reorder. */
+  key: string;
   text: string;
   done: boolean;
 }
@@ -15,6 +19,7 @@ export interface TaskCommand {
   specId: string;
   specSessionId: string;
   taskIndex: number;
+  taskKey: string;
   taskText: string;
   featureBranch: string;
   worktreeBranch: string;
@@ -24,6 +29,7 @@ export type FanOutTaskStatus = "queued" | "dispatching" | "running" | "done" | "
 
 export interface FanOutTask {
   taskIndex: number;
+  taskKey: string; // stable identity (hash of text) — the idempotency key
   taskText: string;
   status: FanOutTaskStatus;
   sessionId?: string;
@@ -67,10 +73,16 @@ export function parseTasks(md: string): ParsedTask[] {
     const m = /^- \[([ xX~])\]\s+(.+)$/.exec(line);
     if (m) {
       const mark = m[1]!;
-      out.push({ index: idx++, text: m[2]!.trim(), done: mark.toLowerCase() === "x" });
+      const text = m[2]!.trim();
+      out.push({ index: idx++, key: taskKey(text), text, done: mark.toLowerCase() === "x" });
     }
   }
   return out;
+}
+
+/** Stable identity for a task: a short SHA-1 of its trimmed text — invariant under list edits. */
+export function taskKey(text: string): string {
+  return createHash("sha1").update(text.trim(), "utf8").digest("hex").slice(0, 8);
 }
 
 /** Derive a filesystem/branch-safe slug from a spec id (alphanumeric + hyphen, lowercased). */
@@ -87,8 +99,8 @@ export function specSlug(specId: string): string {
  * under the feature branch (`feat/x/task-0` when `feat/x` exists) is a directory/file conflict that
  * `git branch`/`worktree add` reject. The sibling form stays tied to the feature branch and is valid.
  */
-export function worktreeBranch(featureBranch: string, taskIndex: number): string {
-  return `${featureBranch}--task-${taskIndex}`;
+export function worktreeBranch(featureBranch: string, key: string): string {
+  return `${featureBranch}--task-${key}`;
 }
 
 export interface PlanInput {
@@ -96,8 +108,8 @@ export interface PlanInput {
   specSessionId: string;
   featureBranch: string;
   tasks: ParsedTask[];
-  /** Task indices already present in the durable FanOutRecord (dispatched on a prior run/restart). */
-  alreadyDispatched?: ReadonlySet<number>;
+  /** Task KEYS already dispatched in the durable FanOutRecord (stable across list edits). */
+  alreadyDispatched?: ReadonlySet<string>;
   /** How many task sessions are already running for this spec (counts toward the concurrency cap). */
   runningCount?: number;
   limit?: number;
@@ -117,18 +129,19 @@ export interface FanOutPlan {
  */
 export function planFanOut(input: PlanInput): FanOutPlan {
   const limit = input.limit ?? maxConcurrentTasks();
-  const already = input.alreadyDispatched ?? new Set<number>();
+  const already = input.alreadyDispatched ?? new Set<string>();
   const running = input.runningCount ?? 0;
   const candidates = input.tasks
-    .filter((t) => !t.done && !already.has(t.index))
+    .filter((t) => !t.done && !already.has(t.key))
     .map<TaskCommand>((t) => ({
       kind: "dispatch-task",
       specId: input.specId,
       specSessionId: input.specSessionId,
       taskIndex: t.index,
+      taskKey: t.key,
       taskText: t.text,
       featureBranch: input.featureBranch,
-      worktreeBranch: worktreeBranch(input.featureBranch, t.index),
+      worktreeBranch: worktreeBranch(input.featureBranch, t.key),
     }));
   const room = Math.max(0, limit - running);
   return { dispatch: candidates.slice(0, room), queued: candidates.slice(room) };

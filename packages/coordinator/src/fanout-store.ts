@@ -50,9 +50,40 @@ export class FanOutStore {
     }
   }
 
-  /** Task indices already present for a spec (dispatched on a prior run) — the idempotency guard. */
-  dispatchedIndices(specId: string): Set<number> {
+  /**
+   * Task KEYS that are live or completed for a spec — the idempotency guard. Excludes `queued` (not
+   * yet dispatched) AND `failed` (so a failed task is retried on the next fan-out, not stuck forever).
+   */
+  dispatchedKeys(specId: string): Set<string> {
     const rec = this.map.get(specId);
-    return new Set((rec?.tasks ?? []).filter((t) => t.status !== "queued").map((t) => t.taskIndex));
+    return new Set(
+      (rec?.tasks ?? [])
+        .filter((t) => t.status === "dispatching" || t.status === "running" || t.status === "done")
+        .map((t) => t.taskKey),
+    );
+  }
+
+  /** All records (for startup reconciliation). */
+  all(): FanOutRecord[] {
+    return [...this.map.values()];
+  }
+
+  /**
+   * On startup, a task left `running`/`dispatching` has no live session (the process died), so it can
+   * never emit completion — it would block a concurrency slot forever. Flip such tasks to `failed`
+   * ("interrupted") so the slot frees and the task is retried on the next fan-out (SPEC-009 restart).
+   */
+  reconcileInterrupted(): void {
+    for (const rec of this.map.values()) {
+      let changed = false;
+      for (const t of rec.tasks) {
+        if (t.status === "running" || t.status === "dispatching") {
+          t.status = "failed";
+          t.error = "interrupted-by-restart";
+          changed = true;
+        }
+      }
+      if (changed) this.put(rec);
+    }
   }
 }

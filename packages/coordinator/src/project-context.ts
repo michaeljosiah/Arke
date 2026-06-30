@@ -168,8 +168,8 @@ export class ProjectContext {
   private readonly fanoutQueues = new Map<string, TaskCommand[]>();
   /** Specs whose fan-out is halted because the spec was demoted away from approved (SPEC-009). */
   private readonly fanoutHalted = new Set<string>();
-  /** task sessionId → its specId, so a task's session.idle can drain the spec's queue (SPEC-009). */
-  private readonly taskSessions = new Map<string, { specId: string; taskIndex: number }>();
+  /** task sessionId → its spec + task key, so a completed task can drain the spec's queue (SPEC-009). */
+  private readonly taskSessions = new Map<string, { specId: string; taskKey: string }>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
 
@@ -222,6 +222,7 @@ export class ProjectContext {
     await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
     this.fanoutStore = new FanOutStore(resolve(this.root, ".arke", "fanout.ndjson")); // SPEC-009
     this.fanoutStore.load();
+    this.fanoutStore.reconcileInterrupted(); // restart: free slots held by tasks whose sessions died
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -674,15 +675,19 @@ export class ProjectContext {
       return { dispatched: 0, queued: 0, error: "no-tasks" };
     }
     const store = this.fanoutStore;
-    const already = store?.dispatchedIndices(cid) ?? new Set<number>();
+    const already = store?.dispatchedKeys(cid) ?? new Set<string>();
     const record: FanOutRecord = store?.get(cid) ?? { specId: cid, specSessionId: cid, featureBranch, tasks: [], startedAt: Date.now() };
     const runningCount = record.tasks.filter((t) => t.status === "running" || t.status === "dispatching").length;
     const plan = planFanOut({ specId: cid, specSessionId: cid, featureBranch, tasks, alreadyDispatched: already, runningCount, limit: maxConcurrentTasks() });
 
-    // Queue the excess (drained on task completion).
-    if (plan.queued.length) {
-      this.fanoutQueues.set(cid, [...(this.fanoutQueues.get(cid) ?? []), ...plan.queued]);
-      for (const cmd of plan.queued) record.tasks.push({ taskIndex: cmd.taskIndex, taskText: cmd.taskText, status: "queued", worktreeBranch: cmd.worktreeBranch });
+    // Replace the live queue from the freshly-computed plan — fanOut re-plans from the durable record
+    // each call, so repeated calls (and re-approval after a restart) are idempotent: dispatchedKeys
+    // excludes running/dispatching/done, so only genuinely-pending tasks are (re)queued here.
+    this.fanoutQueues.set(cid, plan.queued);
+    for (const cmd of plan.queued) {
+      const existing = record.tasks.find((t) => t.taskKey === cmd.taskKey);
+      if (!existing) record.tasks.push({ taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, taskText: cmd.taskText, status: "queued", worktreeBranch: cmd.worktreeBranch });
+      else if (existing.status === "failed") existing.status = "queued"; // retry a previously-failed task
     }
     store?.put(record);
 
@@ -699,30 +704,31 @@ export class ProjectContext {
     const store = this.fanoutStore;
     const record = store?.get(cmd.specId) ?? { specId: cmd.specId, specSessionId: cmd.specSessionId, featureBranch: cmd.featureBranch, tasks: [], startedAt: Date.now() };
     const upsert = (patch: Partial<FanOutTask>) => {
-      const existing = record.tasks.find((t) => t.taskIndex === cmd.taskIndex);
+      const existing = record.tasks.find((t) => t.taskKey === cmd.taskKey);
       if (existing) Object.assign(existing, patch);
-      else record.tasks.push({ taskIndex: cmd.taskIndex, taskText: cmd.taskText, status: "dispatching", ...patch });
+      else record.tasks.push({ taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, taskText: cmd.taskText, status: "dispatching", ...patch });
       store?.put(record);
     };
     const fail = async (reason: string) => {
       upsert({ status: "failed", error: reason });
-      await this.trace.write({ kind: "dispatch.failed", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, worktreeBranch: cmd.worktreeBranch, reason });
-      // The task card moves to needs-human via a waiting status the read model maps to that column.
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: `${cmd.specId}#task-${cmd.taskIndex}`, specId: cmd.specId, kind: "task", status: "error" } as DomainEvent);
+      await this.trace.write({ kind: "dispatch.failed", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, worktreeBranch: cmd.worktreeBranch, reason });
+      // The task card moves to needs-human (the read model maps an errored task session to that column).
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: `${cmd.specId}#task-${cmd.taskKey}`, specId: cmd.specId, kind: "task", status: "error" } as DomainEvent);
     };
 
     upsert({ status: "dispatching", worktreeBranch: cmd.worktreeBranch });
-    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, worktreeBranch: cmd.worktreeBranch });
+    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, worktreeBranch: cmd.worktreeBranch });
 
     // Branch-collision guard: an existing branch means an orphaned worktree from a prior run.
     const exists = spawnSync("git", ["branch", "--list", cmd.worktreeBranch], gitOpts(this.root));
     if ((exists.stdout ?? "").trim().length > 0) {
-      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, reason: "branch-collision", branch: cmd.worktreeBranch });
+      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cmd.specId, taskKey: cmd.taskKey, reason: "branch-collision", branch: cmd.worktreeBranch });
       await fail(`worktree branch '${cmd.worktreeBranch}' already exists`);
       return false;
     }
-    // Create the isolated worktree off the feature branch (coordinator-derived branch name; no user input).
-    const wtPath = resolve(this.root, ".arke", "worktrees", cmd.worktreeBranch.replace(/[^a-zA-Z0-9-]+/g, "_"));
+    // Worktree path keyed by a hash of the full branch name, so distinct branches never collapse to
+    // the same on-disk path (a lossy char-replace could map `feat/foo` and `feat-foo` together).
+    const wtPath = resolve(this.root, ".arke", "worktrees", createHash("sha1").update(cmd.worktreeBranch).digest("hex").slice(0, 16));
     const add = spawnSync("git", ["worktree", "add", "-b", cmd.worktreeBranch, wtPath, cmd.featureBranch], gitOpts(this.root));
     if (add.status !== 0) {
       await fail(`git worktree add failed: ${(add.stderr || add.stdout || "").toString().trim().slice(0, 200)}`);
@@ -731,13 +737,17 @@ export class ProjectContext {
 
     try {
       const ref = await this.adapter.createSession({ specId: cmd.specId, parent: cmd.specSessionId });
-      this.taskSessions.set(ref.sessionId, { specId: cmd.specId, taskIndex: cmd.taskIndex });
+      this.taskSessions.set(ref.sessionId, { specId: cmd.specId, taskKey: cmd.taskKey });
       upsert({ status: "running", sessionId: ref.sessionId });
       await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: cmd.taskText }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cmd.specId, kind: "task", status: "running" } as DomainEvent);
-      await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, sessionId: ref.sessionId });
+      await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, sessionId: ref.sessionId });
       return true;
     } catch (err) {
+      // The worktree was created but the session never started: remove it so a retry is clean rather
+      // than tripping the collision guard on the orphaned branch.
+      spawnSync("git", ["worktree", "remove", "--force", wtPath], gitOpts(this.root));
+      spawnSync("git", ["branch", "-D", cmd.worktreeBranch], gitOpts(this.root));
       await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
@@ -1514,18 +1524,23 @@ export class ProjectContext {
     }
   }
 
-  /** When a task session completes (idle/done), mark its FanOutRecord and drain a queued task (SPEC-009). */
+  /**
+   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). `done` is
+   * terminal; `idle` is only the end of one turn (the agent may still be working) so it must NOT
+   * count as completion. `error` is terminal too — it frees the slot, so it also drains.
+   */
   private async observeTaskCompletion(event: DomainEvent): Promise<void> {
     if (event.type !== "session.status") return;
-    if (event.status !== "done" && event.status !== "idle") return;
+    if (event.status !== "done" && event.status !== "error") return;
     const link = this.taskSessions.get(event.sessionId);
     if (!link) return;
     const store = this.fanoutStore;
     const record = store?.get(link.specId);
     if (record) {
-      const task = record.tasks.find((t) => t.taskIndex === link.taskIndex);
+      const task = record.tasks.find((t) => t.taskKey === link.taskKey);
       if (task && task.status === "running") {
-        task.status = "done";
+        task.status = event.status === "done" ? "done" : "failed";
+        if (event.status === "error") task.error = "task session reported error";
         store?.put(record);
       }
     }
