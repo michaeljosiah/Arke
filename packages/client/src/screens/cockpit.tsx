@@ -127,11 +127,15 @@ function LiveCockpit() {
   // reload) so follow-ups continue the same session rather than splitting context (round 6).
   const specStatusCard = cards.find((c: any) => c.id === specId);
   const authoringSessions = cards.filter((c: any) => c.specId === specId && c.id !== specId && c.kind === 'spec');
+  // A session is REUSABLE for follow-ups only while idle/running — a terminal (done/error/interrupted)
+  // session would be rejected by the coordinator's stale-session guard, so we create a fresh one
+  // instead (PR #18 review round 7).
   const reusableSession = authoringSessions.find((c: any) => c.status === 'running')
-    ?? authoringSessions.find((c: any) => c.status === 'idle')
-    ?? authoringSessions[0];
+    ?? authoringSessions.find((c: any) => c.status === 'idle');
   const authoringCard = sessionId ? cards.find((c: any) => c.id === sessionId) : null;
-  const liveCard = authoringCard ?? reusableSession ?? specStatusCard;
+  // For display, fall back to the most recent authoring session (even terminal) so its transcript
+  // stays visible, then the spec status card.
+  const liveCard = authoringCard ?? reusableSession ?? authoringSessions[authoringSessions.length - 1] ?? specStatusCard;
   const inFlight = authoringSessions.some((c: any) => c.status === 'running');
   const transcript = liveCard?.transcript ?? [];
   // A signature that also changes when a streamed turn is finalised via message.updated (same entry,
@@ -195,9 +199,11 @@ function LiveCockpit() {
     const sentAs = role;
     setSending(true);
     try {
-      // Reuse an existing authoring session for this spec (e.g. after a reload) before creating a new
-      // one, so follow-ups continue the same harness session/history (PR #18 review round 6).
-      let sid = sessionId ?? reusableSession?.id ?? null;
+      // Reuse an existing NON-TERMINAL authoring session for this spec (e.g. after a reload) before
+      // creating a new one, so follow-ups continue the same harness session/history (PR #18 review
+      // rounds 6–7). A terminal tracked session is not reused (it would be rejected as stale).
+      const trackedUsable = authoringCard && (authoringCard.status === 'idle' || authoringCard.status === 'running');
+      let sid = (trackedUsable ? sessionId : null) ?? reusableSession?.id ?? null;
       if (!sid) {
         // Don't attempt session.create while offline — it would time out and the message would be
         // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).

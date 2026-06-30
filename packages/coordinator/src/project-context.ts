@@ -298,7 +298,7 @@ export class ProjectContext {
    * (matched against the frontmatter `spec_id`/`slug`/`title` or the filename stem). Host-side read,
    * confined to the project root. Returns the file's text + parsed frontmatter, or null if absent.
    */
-  private findSpecFile(specId: string): { relPath: string; absPath: string; text: string; frontmatter: Record<string, string> } | null {
+  private findSpecFile(specId: string): { relPath: string; absPath: string; text: string; frontmatter: Record<string, string>; canonicalId: string } | null {
     if (!specId) return null;
     const dir = resolve(this.root, "docs", "specifications");
     if (!existsSync(dir)) return null;
@@ -346,7 +346,10 @@ export class ProjectContext {
       if (data.spec_id === specId || data.specId === specId || data.slug === specId || data.title === specId || stem === specId) {
         // Derive the git pathspec from the CANONICAL root, so a project opened via a symlinked dir
         // still yields `docs/specifications/foo.md` (not `../real-repo/…`, which `git add` rejects).
-        return { relPath: relative(realRoot, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data };
+        // `canonicalId` is the frontmatter spec id, so results/events use it even when the caller
+        // passed a slug/title/filename alias (PR #18 review round 7).
+        const canonicalId = data.spec_id ?? data.specId ?? specId;
+        return { relPath: relative(realRoot, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data, canonicalId };
       }
     }
     return null;
@@ -364,7 +367,7 @@ export class ProjectContext {
     const found = this.findSpecFile(specId);
     if (!found) return { specId, exists: false };
     return {
-      specId,
+      specId: found.canonicalId, // canonical id even when the caller passed an alias (round 7)
       exists: true,
       path: found.relPath,
       text: found.text,
@@ -409,17 +412,20 @@ export class ProjectContext {
 
     const found = this.findSpecFile(specId);
     if (!found) return fail(`no specification file found for '${specId}' under docs/specifications`);
+    // Use the frontmatter's canonical spec id for all events/results/trace, even if the caller passed
+    // a slug/title/filename alias — so the right board card advances (PR #18 review round 7).
+    const cid = found.canonicalId;
     // Only a draft may be approved into review — never regress an already-approved/merged spec back
     // to in-review (PR #18 review). A spec with no status is treated as a draft.
     const current = found.frontmatter.status;
     if (current && current !== "draft") {
-      return fail(`cannot approve: specification '${specId}' is '${current}', expected 'draft'`);
+      return fail(`cannot approve: specification '${cid}' is '${current}', expected 'draft'`);
     }
     // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
-    // while an authoring session for this spec is running — the agent could be mid-write and we'd
-    // commit a partial draft or clobber its edits (PR #18 review round 5).
-    if (this.read.snapshot().some((c) => (c.id === specId || c.specId === specId) && c.status === "running")) {
-      return fail(`an authoring session for '${specId}' is still running — wait for it to finish before approving`);
+    // while a spec-author/architect AUTHORING session for this spec is running — an unrelated
+    // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7).
+    if (this.read.snapshot().some((c) => c.specId === cid && c.id !== cid && c.kind === "spec" && c.status === "running")) {
+      return fail(`an authoring session for '${cid}' is still running — wait for it to finish before approving`);
     }
     const fmBranch = found.frontmatter.branch;
     if (!fmBranch) return fail(`specification '${specId}' has no 'branch' in its frontmatter`);
@@ -445,7 +451,7 @@ export class ProjectContext {
     // append-only trace is unwritable we refuse (and roll back the file) rather than commit something
     // we can't audit (PR #18 review round 6, per AGENTS.md/SPEC-006).
     try {
-      await this.trace.write({ kind: "spec.approve.preflight", projectId: this.projectId, specId, branch: fmBranch });
+      await this.trace.write({ kind: "spec.approve.preflight", projectId: this.projectId, specId: cid, branch: fmBranch });
     } catch (err) {
       try {
         writeFileSync(found.absPath, found.text, "utf8");
@@ -454,7 +460,7 @@ export class ProjectContext {
       }
       return fail(`audit trace is unwritable — refusing to approve (${err instanceof Error ? err.message : String(err)})`);
     }
-    const committed = gitCommit(this.root, found.relPath, `spec(${specId}): approve → in-review`);
+    const committed = gitCommit(this.root, found.relPath, `spec(${cid}): approve → in-review`);
     if (!committed.ok) {
       // Roll back the write so the on-disk status is unchanged (the approval did not happen).
       try {
@@ -465,12 +471,16 @@ export class ProjectContext {
       return fail(`git commit failed: ${committed.error}`);
     }
 
-    // The commit is permanent — the approval succeeded. Record the final audit (the trace was proven
-    // writable by the preflight) and publish the status. emit() publishes even if its own trace write
-    // fails, so live clients always advance to in-review (PR #18 review rounds 4–6).
-    await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
-    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
-    return { ok: true, specId, status: "in-review", branch: fmBranch };
+    // The commit is permanent — the approval succeeded. Publish the status FIRST (emit() publishes
+    // even if its own trace write fails), then record the final audit best-effort: a post-commit
+    // trace failure must not report an already-committed approval as failed (PR #18 review rounds 4–7).
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId: cid, status: "in-review" } as DomainEvent);
+    try {
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: true, branch: fmBranch, commit: committed.sha });
+    } catch {
+      /* committed + published already — the preflight recorded the governed action; this is bonus */
+    }
+    return { ok: true, specId: cid, status: "in-review", branch: fmBranch };
   }
 
   /**
@@ -495,9 +505,9 @@ export class ProjectContext {
       throw new Error(`branch mismatch: client sent '${branch}' but spec '${specId}' is on '${fmBranch}'`);
     }
     const resolvedBranch = fmBranch ?? branch;
-    await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId, branch: resolvedBranch ?? null });
+    await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId: found.canonicalId, branch: resolvedBranch ?? null });
     return {
-      specId,
+      specId: found.canonicalId, // canonical id even when the caller passed an alias (round 7)
       ...(resolvedBranch ? { branch: resolvedBranch } : {}),
       convened: true,
       note: "review panel (SPEC-007) is not yet implemented; the request was recorded",

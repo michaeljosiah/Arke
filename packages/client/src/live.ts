@@ -401,7 +401,7 @@ export function isCoordinatorConnected(): boolean {
 
 /** Re-bind to the project the prompts were queued for, then drain them SEQUENTIALLY against it. */
 async function drainCockpitQueue(): Promise<void> {
-  if (outbound.size === 0) return;
+  if (outbound.size === 0) { queuedForProject = null; return; }
   // Re-bind this fresh socket to the project the prompts were authored against (NOT the post-reconnect
   // default). If the rebind fails (project forgotten/unopenable), keep the queue intact rather than
   // dispatching against the wrong project (PR #18 review rounds 3 & 5).
@@ -410,22 +410,32 @@ async function drainCockpitQueue(): Promise<void> {
     const reopened = await liveRequest('project.open', { projectId: target }, 90000);
     if (!reopened?.ok) {
       store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `reconnected, but couldn't reopen the project — ${outbound.size} message${outbound.size === 1 ? '' : 's'} held` } }));
-      return;
+      return; // queue + queuedForProject intact for the next attempt
     }
   }
-  queuedForProject = null;
   const items = outbound.takeAll();
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
-  // Await each in order so FIFO holds. On a rejection, stop and RE-QUEUE the still-unsent remainder
-  // so other-session prompts aren't lost (PR #18 review rounds 2–3); the rejected one is dropped.
+  // Await each in order so FIFO holds. On a rejection, drop the rejected one and RE-QUEUE the unsent
+  // remainder so other-session prompts aren't lost (PR #18 review rounds 2–3).
+  let rejected = false;
   for (let i = 0; i < items.length; i++) {
     const res = await submitCockpitPrompt(items[i]);
     if (!res?.ok) {
-      const remaining = items.slice(i + 1);
-      for (const cmd of remaining) outbound.enqueue(cmd);
-      store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `replay stopped after a rejection — ${remaining.length} message${remaining.length === 1 ? '' : 's'} re-queued for retry` } }));
+      for (const cmd of items.slice(i + 1)) outbound.enqueue(cmd);
+      rejected = true;
       break;
     }
+  }
+  if (outbound.size === 0) {
+    queuedForProject = null; // fully drained → release the binding (PR #18 review round 6)
+    return;
+  }
+  // Items remain (re-queued after a stale rejection). The rejected head was dropped, so a follow-up
+  // drain can flush the remainder for still-valid sessions immediately rather than waiting for the
+  // next reconnect — queuedForProject is preserved so it still targets the right project (round 7).
+  if (rejected && isCoordinatorConnected()) {
+    store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `a queued message was rejected — retrying ${outbound.size} remaining` } }));
+    void drainCockpitQueue();
   }
 }
 
