@@ -310,6 +310,11 @@ function applySnapshot(snap: any) {
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();
   void refreshRecents(); // SPEC-018: populate the picker's real recents
+  // Run a deferred cockpit-queue drain now that the post-reconnect snapshot has been applied.
+  if (drainPending) {
+    drainPending = false;
+    void drainCockpitQueue();
+  }
 }
 
 // ---- request/response over the same WS (SPEC-017/018) ----
@@ -368,17 +373,23 @@ export function startLive(): ArkeTransport {
   store.set({ connection: transport.state });
   transport.subscribe((state: TransportState) => {
     store.set({ connection: state });
-    // On reconnect, drain the cockpit's outbound queue (SPEC-006) — but only AFTER re-binding this
-    // connection to the active project, since a fresh socket starts on the coordinator's default
-    // project. Draining on raw 'open' could otherwise dispatch a queued prompt (which carries only a
-    // sessionId) against the wrong project/repo (PR #18 review).
-    if (state === 'open' && outbound.size > 0) void drainCockpitQueue();
+    // On reconnect, defer the cockpit-queue drain until AFTER the first snapshot is processed: the
+    // transport fires 'open' before the snapshot, and a drain that re-binds the project here can race
+    // ahead of the coordinator's default-project snapshot (which would then overwrite connectedProject
+    // and drop the replayed prompt's events). applySnapshot() triggers the deferred drain (PR #18
+    // review round 5).
+    if (state === 'open' && outbound.size > 0) drainPending = true;
   });
   return transport;
 }
 
 // ---- authoring cockpit (SPEC-006) ----
 const outbound = new OutboundQueue<any>(50);
+// Set on reconnect-with-queue; the drain is run by applySnapshot once the first snapshot lands.
+let drainPending = false;
+// The projectId the offline prompts were authored against — the drain re-binds to THIS, not the
+// post-reconnect default snapshot's project (PR #18 review round 5).
+let queuedForProject: string | null = null;
 // prompt.send resolves only when the agent's turn completes, which routinely exceeds the default
 // request window — use a long ceiling so a normal turn is not reported as a spurious timeout.
 const PROMPT_TIMEOUT_MS = 10 * 60_000;
@@ -388,20 +399,21 @@ export function isCoordinatorConnected(): boolean {
   return !!transport && transport.state === 'open';
 }
 
-/** Re-activate the stored active project, then drain queued prompts SEQUENTIALLY against it. */
+/** Re-bind to the project the prompts were queued for, then drain them SEQUENTIALLY against it. */
 async function drainCockpitQueue(): Promise<void> {
   if (outbound.size === 0) return;
-  // Re-bind this fresh socket to the active project BEFORE sending. If the rebind fails (project
-  // forgotten/unopenable), keep the queue intact rather than dispatching against the coordinator's
-  // default project (PR #18 review round 3).
-  const active = (store.get() as any).connectedProject?.projectId;
-  if (active) {
-    const reopened = await liveRequest('project.open', { projectId: active }, 90000);
+  // Re-bind this fresh socket to the project the prompts were authored against (NOT the post-reconnect
+  // default). If the rebind fails (project forgotten/unopenable), keep the queue intact rather than
+  // dispatching against the wrong project (PR #18 review rounds 3 & 5).
+  const target = queuedForProject ?? (store.get() as any).connectedProject?.projectId;
+  if (target) {
+    const reopened = await liveRequest('project.open', { projectId: target }, 90000);
     if (!reopened?.ok) {
       store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `reconnected, but couldn't reopen the project — ${outbound.size} message${outbound.size === 1 ? '' : 's'} held` } }));
       return;
     }
   }
+  queuedForProject = null;
   const items = outbound.takeAll();
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
   // Await each in order so FIFO holds. On a rejection, stop and RE-QUEUE the still-unsent remainder
@@ -429,12 +441,14 @@ async function submitCockpitPrompt(args: any): Promise<any> {
  * coordinator's response so a stale-session rejection is visible); when offline it is queued,
  * bounded at 50 — a full queue is refused, never silently dropped.
  */
-export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
+export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
   if (transport && transport.state === 'open') {
     const res = await submitCockpitPrompt(args);
-    return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId } : { status: 'rejected', error: res?.error };
+    return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId ?? args.correlationId } : { status: 'rejected', error: res?.error };
   }
   const accepted = outbound.enqueue(args);
+  // Remember which project these offline prompts belong to, so the reconnect drain re-binds to it.
+  if (accepted && !queuedForProject) queuedForProject = (store.get() as any).connectedProject?.projectId ?? null;
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: accepted ? `offline — queued ${outbound.size} message${outbound.size === 1 ? '' : 's'}` : 'offline — queue full (50); message not queued' } }));
   return { status: accepted ? 'queued' : 'full' };
 }

@@ -77,8 +77,13 @@ function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: a
 }
 
 function LiveCockpit() {
-  const { activeSpec, cards, cockpit } = useStore();
-  const specId = activeSpec || (cards.find((c: any) => c.kind === 'spec')?.specId) || null;
+  const { activeSpec, activeCard, cards, cockpit } = useStore();
+  // Resolve the spec to author: an explicit activeSpec, else the spec of the active board/session card
+  // (so "Go to authoring" from a card opens the right spec), else the first spec card (PR #18 review).
+  const specId = activeSpec
+    || cards.find((c: any) => c.id === activeCard)?.specId
+    || (cards.find((c: any) => c.kind === 'spec')?.specId)
+    || null;
   const [file, setFile] = React.useState<any>(null);
   const [refreshed, setRefreshed] = React.useState(false);
   const [draft, setDraft] = React.useState('');
@@ -91,6 +96,7 @@ function LiveCockpit() {
   // messageId → the agent role that produced it, captured at send time, so each agent turn keeps its
   // own attribution even if the composer's role selector changes later (PR #18 review round 2).
   const roleByMsgId = React.useRef<Map<string, string>>(new Map());
+  const lastSentRole = React.useRef<string | undefined>(undefined); // fallback attribution
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
   const scroller = React.useRef<any>(null);
@@ -150,7 +156,7 @@ function LiveCockpit() {
       let next = prev;
       for (const t of transcript) {
         const key = 'a:' + t.messageId;
-        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? 'agent', model: modelLabel, streaming: t.isStreaming };
+        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: modelLabel, streaming: t.isStreaming };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
         else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) {
@@ -181,13 +187,19 @@ function LiveCockpit() {
         if (sid) setSessionId(sid);
       }
       if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
-      // Optimistically show the human turn + clear the composer for immediate feedback (prompt.send
-      // resolves only when the whole turn completes). Roll back on a rejection/queue-full so the
-      // message stays editable (PR #18 review rounds 1–4).
+      // Record the reply's attribution BEFORE awaiting: prompt.send resolves only when the turn
+      // completes, by which time the transcript (and its agent turn) may already be merged — so set
+      // roleByMsgId by a client-generated correlationId now, with lastSentRole as a fallback for
+      // turns whose messageId differs from the correlationId (PR #18 review round 5).
+      const correlationId = (globalThis.crypto?.randomUUID?.() ?? `cock-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      roleByMsgId.current.set(correlationId, sentAs);
+      lastSentRole.current = sentAs;
+      // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
+      // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4).
       const key = 'h:' + Date.now();
       setConvo((c) => [...c, { key, kind: 'human', text }]);
       setDraft('');
-      const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text });
+      const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text, correlationId });
       if (outcome.status === 'rejected' || outcome.status === 'full') {
         setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
         setDraft((d) => d || text); // restore the text if the composer is still empty

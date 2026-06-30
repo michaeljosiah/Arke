@@ -343,7 +343,9 @@ export class ProjectContext {
       // Match either frontmatter convention: `spec_id` (the spec files' YAML) or `specId` (the
       // SpecFrontmatter contract shape), plus slug / title / filename stem.
       if (data.spec_id === specId || data.specId === specId || data.slug === specId || data.title === specId || stem === specId) {
-        return { relPath: relative(this.root, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data };
+        // Derive the git pathspec from the CANONICAL root, so a project opened via a symlinked dir
+        // still yields `docs/specifications/foo.md` (not `../real-repo/…`, which `git add` rejects).
+        return { relPath: relative(realRoot, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data };
       }
     }
     return null;
@@ -411,6 +413,12 @@ export class ProjectContext {
     const current = found.frontmatter.status;
     if (current && current !== "draft") {
       return fail(`cannot approve: specification '${specId}' is '${current}', expected 'draft'`);
+    }
+    // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
+    // while an authoring session for this spec is running — the agent could be mid-write and we'd
+    // commit a partial draft or clobber its edits (PR #18 review round 5).
+    if (this.read.snapshot().some((c) => (c.id === specId || c.specId === specId) && c.status === "running")) {
+      return fail(`an authoring session for '${specId}' is still running — wait for it to finish before approving`);
     }
     const fmBranch = found.frontmatter.branch;
     if (!fmBranch) return fail(`specification '${specId}' has no 'branch' in its frontmatter`);
@@ -833,7 +841,14 @@ export class ProjectContext {
       projectId: string;
     };
     this.read.apply(stamped);
-    await this.trace.write({ kind: "event", projectId: this.projectId, event: stamped });
+    // The audit trace is best-effort: an unwritable `.arke/trace.ndjson` must NOT stop the live event
+    // from reaching clients (e.g. an approval's spec.status after the commit already landed) — the
+    // read model + publish are the live path; the trace is durable audit (PR #18 review round 5).
+    try {
+      await this.trace.write({ kind: "event", projectId: this.projectId, event: stamped });
+    } catch {
+      /* trace unavailable — still publish the live event */
+    }
     this.publish(stamped);
   }
 }
