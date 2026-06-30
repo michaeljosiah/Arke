@@ -59,6 +59,15 @@ test("parseFrontmatter strips inline comments and unquotes scalars", () => {
   assert.equal(data.owner, "dana.k"); // single-quotes stripped
 });
 
+test("parseFrontmatter unquotes a scalar that also carries an inline comment", () => {
+  // Regression (PR #18 final review): a quoted value followed by a comment ends with the comment, not
+  // the quote, so endsWith() left it quoted and approveDraft wrongly rejected the spec.
+  const md = "---\nstatus: \"draft\" # set by tooling\nbranch: 'feat/x' # comment\n---\n\nbody\n";
+  const { data } = parseFrontmatter(md);
+  assert.equal(data.status, "draft");
+  assert.equal(data.branch, "feat/x");
+});
+
 test("parseSpecDoc extracts requirements with delta kinds", () => {
   const doc = parseSpecDoc(DOC);
   assert.equal(doc.requirements.length, 3);

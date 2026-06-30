@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -130,6 +130,37 @@ test("spec.file returns the working specification text + metadata", async () => 
   assert.equal(res.result.status, "draft");
   assert.ok(res.result.text.includes("The system SHALL do a thing"));
   assert.equal(res.result.path, "docs/specifications/test.md");
+  ws.close();
+});
+
+test("a docs/specifications symlinked to the project root is refused (no top-level .md leakage)", async () => {
+  // Regression (PR #18 final review): isWithinRoot passed when the specs dir resolved to the root
+  // itself (a `docs/specifications -> .` symlink), which then authorised any top-level .md. Pinning
+  // the canonical specs location rejects it.
+  const dir = mkdtempSync(join(tmpdir(), "arke-symlink-"));
+  git(dir, "init", "-q");
+  git(dir, "config", "user.email", "t@example.com");
+  git(dir, "config", "user.name", "Tester");
+  git(dir, "config", "commit.gpgsign", "false");
+  git(dir, "checkout", "-q", "-b", BRANCH);
+  writeFileSync(resolve(dir, "leak.md"), specDoc(BRANCH), "utf8"); // a top-level spec, NOT under a real specs dir
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "init");
+  mkdirSync(resolve(dir, "docs"), { recursive: true });
+  let linked = true;
+  try {
+    symlinkSync(dir, resolve(dir, "docs", "specifications"), process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    linked = false; // environment can't create the link (no privilege) → nothing to assert
+  }
+  if (!linked) return;
+
+  const { c, port } = await coordinatorAt(dir);
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+  const res = await request("spec.file", { specId: "SPEC-TEST" });
+  assert.ok(!(res.ok && res.result?.exists), "spec.file must not serve a top-level .md via a root symlink");
   ws.close();
 });
 
@@ -280,5 +311,21 @@ test("stale-session guard rejects a prompt to a non-idle/running session", async
   const res = await request("prompt.send", { sessionId: "S1", agent: "implementer", tier: "mid", message: "hi" });
   assert.equal(res.ok, false);
   assert.match(res.error, /waiting/);
+  ws.close();
+});
+
+test("a REPLAYED prompt to an unknown session is rejected; a fresh one is allowed", async () => {
+  // Regression (PR #18 final review): after a restart the read model may not list an old session, so
+  // a replayed offline-queued prompt must NOT be executed blindly. A brand-new (non-replay) first
+  // prompt for an unknown session must still go through.
+  const { c, port } = await coordinatorAt(repoWith(BRANCH), new WaitingAdapter());
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+  const replayed = await request("prompt.send", { sessionId: "S-unknown", agent: "spec-author", tier: "capable", message: "hi", replay: true });
+  assert.equal(replayed.ok, false);
+  assert.match(replayed.error, /not active|rejected/i);
+  const fresh = await request("prompt.send", { sessionId: "S-unknown", agent: "spec-author", tier: "capable", message: "hi" });
+  assert.equal(fresh.ok, true);
   ws.close();
 });

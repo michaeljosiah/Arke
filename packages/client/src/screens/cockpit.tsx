@@ -7,6 +7,14 @@ import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, l
 
 const e = React.createElement;
 
+/** Cheap djb2 content fingerprint: changes whenever the text changes, regardless of length — so a
+ *  same-length `message.updated` snapshot still invalidates the transcript signature (PR #18 final review). */
+function textSig(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
 // ============================ LIVE MODE (SPEC-006) ============================
 // The authoring agents surfaced in the composer (capable tier; the registry resolves the model).
 const LIVE_ROLES = ['spec-author', 'architect'];
@@ -141,10 +149,13 @@ function LiveCockpit() {
   const liveCard = authoringCard ?? reusableSession ?? authoringSessions[authoringSessions.length - 1] ?? specStatusCard;
   const inFlight = authoringSessions.some((c: any) => c.status === 'running');
   const transcript = liveCard?.transcript ?? [];
-  // A signature that also changes when a streamed turn is finalised via message.updated (same entry,
-  // so transcript.length is unchanged) — this is what makes the preview re-poll after the final
-  // update, not only after the first part (PR #18 review).
-  const transcriptSig = transcript.map((t: any) => `${t.messageId}:${(t.text ?? '').length}:${t.isStreaming ? 1 : 0}`).join('|');
+  // Drop user-role echoes: the human turn is already shown optimistically, so a harness echo of the
+  // user message must not reappear as a spec-author/architect reply (PR #18 final review).
+  const agentTranscript = transcript.filter((t: any) => t.role !== 'user');
+  // A signature that changes when a streamed turn is finalised via message.updated (same entry, so
+  // length is unchanged) — keyed on a content fingerprint, not length, so a same-length corrected
+  // snapshot still re-polls the preview and re-merges the turn (PR #18 review + final review).
+  const transcriptSig = agentTranscript.map((t: any) => `${t.messageId}:${textSig(t.text ?? '')}:${t.isStreaming ? 1 : 0}`).join('|');
 
   // Load the working file on mount/spec change, after each transcript change, and on a 30s fallback.
   const refresh = React.useCallback(async (markRefreshed = false) => {
@@ -175,11 +186,11 @@ function LiveCockpit() {
   // after the human turn that prompted them, so the chat stays chronological. Each agent turn keeps
   // the role it was sent to (roleByMsgId), independent of the current composer selection.
   React.useEffect(() => {
-    if (!transcript.length) return;
+    if (!agentTranscript.length) return;
     const modelLabel = liveCard?.model;
     setConvo((prev) => {
       let next = prev;
-      for (const t of transcript) {
+      for (const t of agentTranscript) {
         const key = 'a:' + t.messageId;
         // Label with the resolved model if the session carries one, else the tier the turn ran at
         // (client-safe; SPEC-005 keeps vendor model ids off the client).

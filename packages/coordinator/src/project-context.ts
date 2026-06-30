@@ -362,7 +362,12 @@ export class ProjectContext {
     } catch {
       return null;
     }
-    if (!isWithinRoot(realRoot, realDir)) return null;
+    // The specs dir must resolve to EXACTLY <root>/docs/specifications. isWithinRoot alone passed when
+    // realDir === realRoot (a `docs/specifications -> .` symlink), which then authorised every top-level
+    // .md in the repo via the per-file `isWithinRoot(realDir, …)` check below. Pinning the canonical
+    // location rejects a specs dir relocated by a symlink (PR #18 final review).
+    const expectedDir = resolve(realRoot, "docs", "specifications");
+    if (realDir !== expectedDir || !isWithinRoot(realRoot, realDir)) return null;
     let entries: string[];
     try {
       entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
@@ -453,9 +458,12 @@ export class ProjectContext {
   }
 
   private async approveDraftLocked(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
+    // Failures emit/trace under the canonical id once it's known; before resolution (file-not-found)
+    // only the caller's alias is available, which is the right thing to record there (PR #18 final review).
+    let auditId = specId;
     const fail = async (reason: string): Promise<never> => {
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
-      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId: auditId, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: auditId, ok: false, reason });
       throw new Error(reason);
     };
 
@@ -464,6 +472,7 @@ export class ProjectContext {
     // Use the frontmatter's canonical spec id for all events/results/trace, even if the caller passed
     // a slug/title/filename alias — so the right board card advances (PR #18 review round 7).
     const cid = found.canonicalId;
+    auditId = cid;
     // Only a draft may be approved into review — never regress an already-approved/merged spec back
     // to in-review (PR #18 review). A spec with no status is treated as a draft.
     const current = found.frontmatter.status;
@@ -864,11 +873,18 @@ export class ProjectContext {
         const sessionId = String(a.sessionId ?? "");
         // Stale-session guard (SPEC-006): a queued message that targets a session no longer idle or
         // running (e.g. it went waiting/done/error while the client was offline) is rejected with its
-        // current status rather than silently executed. Unknown sessions (not yet in the read model)
-        // are allowed — a brand-new session's first prompt must not be blocked.
+        // current status rather than silently executed.
         const known = this.read.snapshot().find((c) => c.id === sessionId);
-        if (known && known.status !== "idle" && known.status !== "running") {
-          throw new Error(`session '${sessionId}' is '${known.status}', not idle/running — message rejected`);
+        if (known) {
+          if (known.status !== "idle" && known.status !== "running") {
+            throw new Error(`session '${sessionId}' is '${known.status}', not idle/running — message rejected`);
+          }
+        } else if (a.replay === true) {
+          // A REPLAYED (offline-queued) prompt whose session is absent from the read model can't be
+          // confirmed live — e.g. after a coordinator restart the read model may not list the old
+          // session yet. Reject rather than execute blindly; only a brand-new session's first online
+          // prompt (unknown AND not a replay) is allowed through (PR #18 final review).
+          throw new Error(`session '${sessionId}' is not active — replayed message rejected`);
         }
         const input = {
           sessionId,

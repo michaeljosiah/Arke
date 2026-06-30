@@ -497,28 +497,31 @@ async function drainCockpitQueue(): Promise<void> {
   }
   const items = outbound.takeAll();
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
-  // Await each in order so FIFO holds. On a rejection, drop the rejected one and RE-QUEUE the unsent
-  // remainder so other-session prompts aren't lost (PR #18 review rounds 2–3).
-  let rejected = false;
-  for (let i = 0; i < items.length; i++) {
-    const res = await submitCockpitPrompt(items[i]);
+  // Replay in order (FIFO). Each is marked `replay: true` so the coordinator rejects it if the target
+  // session can't be confirmed live (e.g. after a restart) instead of executing blindly (PR #18 final
+  // review). When a session is rejected as stale, DROP that session's later prompts too — resubmitting
+  // them would only be rejected again, and re-queuing them looped forever (PR #18 final review). A
+  // mid-drain disconnect is different: hold the unsent remainder for the next reconnect.
+  const rejectedSessions = new Set<string>();
+  const requeue: any[] = [];
+  let dropped = 0;
+  for (const cmd of items) {
+    if (rejectedSessions.has(cmd.sessionId)) { dropped++; continue; } // same stale session → drop
+    if (!isCoordinatorConnected()) { requeue.push(cmd); continue; }   // socket dropped → retry on reconnect
+    const res = await submitCockpitPrompt({ ...cmd, replay: true });
     if (!res?.ok) {
-      for (const cmd of items.slice(i + 1)) outbound.enqueue(cmd);
-      rejected = true;
-      break;
+      if (!isCoordinatorConnected()) requeue.push(cmd);               // disconnected during the call
+      else { rejectedSessions.add(cmd.sessionId); dropped++; }        // server rejected (stale) → drop session
     }
   }
+  for (const cmd of requeue) outbound.enqueue(cmd);
   if (outbound.size === 0) {
-    queuedForProject = null; // fully drained → release the binding (PR #18 review round 6)
+    queuedForProject = null; // fully drained (or all dropped) → release the binding (PR #18 review round 6)
+    if (dropped > 0) store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `dropped ${dropped} queued message${dropped === 1 ? '' : 's'} for stale session${dropped === 1 ? '' : 's'}` } }));
     return;
   }
-  // Items remain (re-queued after a stale rejection). The rejected head was dropped, so a follow-up
-  // drain can flush the remainder for still-valid sessions immediately rather than waiting for the
-  // next reconnect — queuedForProject is preserved so it still targets the right project (round 7).
-  if (rejected && isCoordinatorConnected()) {
-    store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `a queued message was rejected — retrying ${outbound.size} remaining` } }));
-    void drainCockpitQueue();
-  }
+  // Items remain only because the socket dropped mid-drain; they're held for the next reconnect.
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `connection dropped mid-replay — ${outbound.size} message${outbound.size === 1 ? '' : 's'} held` } }));
 }
 
 /** Issue a prompt.send request and surface a stale-session (or other) rejection in the cockpit. */
