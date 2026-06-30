@@ -626,3 +626,16 @@ export function stopLive(): void {
 export function liveSend(msg: unknown): void {
   transport?.send(msg);
 }
+
+/** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
+export function reconnectLive(): void {
+  stopLive();
+  startLive();
+}
+
+/** Promote a draft spec to in-review from the board (SPEC-010) — a governed coordinator command,
+ *  refused while offline (not queued), exactly like approve/convene. */
+export function promoteSpecLive(specId: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to promote" });
+  return liveRequest("spec.promote", { specId }, 30000);
+}

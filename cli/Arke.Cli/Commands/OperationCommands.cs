@@ -347,6 +347,19 @@ public sealed class SpecFanoutCommand : AsyncCommand<SpecFanoutCommand.Settings>
         Ops.RunAsync(s, "spec.fanout", new { specId = s.SpecId });
 }
 
+/// <summary>`arke spec promote` — human board correction: advance a draft to in-review (SPEC-010).</summary>
+public sealed class SpecPromoteCommand : AsyncCommand<SpecPromoteCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "spec.promote", new { specId = s.SpecId });
+}
+
 /// <summary>`arke spec approve` — branch-guarded commit + status advance to in-review (SPEC-006).</summary>
 public sealed class SpecApproveCommand : AsyncCommand<SpecApproveCommand.Settings>
 {
