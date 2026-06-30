@@ -389,6 +389,28 @@ public sealed class PrApproveCommand : AsyncCommand<PrApproveCommand.Settings>
         Ops.RunAsync(s, "pr.approve", new { sessionId = s.SessionId });
 }
 
+/// <summary>`arke integrations status` — the per-project integrations registry (SPEC-014).</summary>
+public sealed class IntegrationsStatusCommand : AsyncCommand<IntegrationsStatusCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings { }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "integration.status", new { });
+}
+
+/// <summary>`arke projections list` — projection-write history for the active project (SPEC-014).</summary>
+public sealed class ProjectionsListCommand : AsyncCommand<ProjectionsListCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandOption("--spec <SPEC_ID>")]
+        public string? SpecId { get; set; }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "projections.query", new { specId = s.SpecId });
+}
+
 /// <summary>`arke spec generate` — propose downstream artefacts from an approved spec (SPEC-013).</summary>
 public sealed class SpecGenerateCommand : AsyncCommand<SpecGenerateCommand.Settings>
 {

@@ -179,8 +179,26 @@ export const ProjectionWriteEvent = base.extend({
   type: z.literal("projection.write"),
   target: z.enum(["jira", "azure-devops", "github", "docs", "tests"]),
   specId: z.string(),
-  trigger: z.string(), // the spec/status change that caused the write
+  trigger: z.string(), // the generation.decided event id that caused the write
   ok: z.boolean(),
+  // SPEC-014 additions: anchor the write to its artefact + dedup + failure detail.
+  artifactId: z.string().optional(),
+  idempotencyKey: z.string().optional(),
+  errorMessage: z.string().optional(),
+});
+
+/** SPEC-014: the per-project integrations registry status (credentials never cross the wire). */
+export const IntegrationStatusEvent = base.extend({
+  type: z.literal("integration.status"),
+  integrations: z.array(
+    z.object({
+      id: z.enum(["github", "jira", "azure-devops"]),
+      status: z.enum(["connected", "not-configured", "error"]),
+      enables: z.array(z.string()),
+      lastCheckedAt: z.number(),
+      errorReason: z.string().optional(),
+    }),
+  ),
 });
 
 /**
@@ -409,6 +427,7 @@ export const DomainEvent = z.discriminatedUnion("type", [
   PermissionAskedEvent,
   PermissionRepliedEvent,
   ProjectionWriteEvent,
+  IntegrationStatusEvent,
   MessagePartEvent,
   MessageUpdatedEvent,
   TurnQuiescentEvent,
