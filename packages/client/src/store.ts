@@ -127,6 +127,10 @@ export const store = createStore({
   registryWarnings: [],
   // Authoring cockpit transient state (SPEC-006): outbound queue depth + a reconnect/queue notice.
   cockpit: { queued: 0, notice: null },
+  // Live multi-model review panel (SPEC-007): the current panel projection, and the set of specIds
+  // that have a completed review (the cockpit approval gate reads this).
+  panel: null,
+  reviewedSpecs: [],
   permission: null,
   entryFolder: null,
   theme: 'light',

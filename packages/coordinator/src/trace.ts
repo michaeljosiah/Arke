@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /**
@@ -19,5 +19,28 @@ export class Trace {
   async write(record: Record<string, unknown>): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
     await appendFile(this.path, JSON.stringify({ at: Date.now(), ...record }) + "\n", "utf8");
+  }
+
+  /**
+   * Read every trace record (best-effort): skips malformed lines, returns `[]` when the file is
+   * absent. The single reader of the trace, so callers never re-derive or hardcode the path/format.
+   */
+  async readAll(): Promise<Record<string, unknown>[]> {
+    let raw: string;
+    try {
+      raw = await readFile(this.path, "utf8");
+    } catch {
+      return [];
+    }
+    const out: Record<string, unknown>[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line) as Record<string, unknown>);
+      } catch {
+        /* skip malformed trace lines */
+      }
+    }
+    return out;
   }
 }

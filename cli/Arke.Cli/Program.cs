@@ -59,6 +59,12 @@ app.Configure(config =>
         b.AddCommand<SpecApproveCommand>("approve").WithDescription("Approve a draft: branch-guarded commit + advance to in-review.");
         b.AddCommand<SpecConveneCommand>("convene").WithDescription("Convene the multi-model review panel on the working draft.");
     });
+    config.AddBranch("panel", b =>
+    {
+        b.SetDescription("Convene and adjudicate multi-model review panels (SPEC-007).");
+        b.AddCommand<PanelConveneCommand>("convene").WithDescription("Start a review panel on a working draft.");
+        b.AddCommand<PanelAdjudicateCommand>("adjudicate").WithDescription("Accept / dismiss / send-back a review issue.");
+    });
     config.AddBranch("harnesses", b =>
     {
         b.SetDescription("Inspect the live harness & model registry (SPEC-005).");

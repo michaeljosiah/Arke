@@ -357,6 +357,64 @@ public sealed class SpecConveneCommand : AsyncCommand<SpecConveneCommand.Setting
         Ops.RunAsync(s, "convenePanel", new { specId = s.SpecId, branch = s.Branch });
 }
 
+/// <summary>`arke panel convene` — start a multi-model review panel on a working draft (SPEC-007).</summary>
+public sealed class PanelConveneCommand : AsyncCommand<PanelConveneCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--branch <BRANCH>")]
+        public string? Branch { get; set; }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "convenePanel", new { specId = s.SpecId, branch = s.Branch });
+}
+
+/// <summary>`arke panel adjudicate` — accept / dismiss / send-back one review issue (SPEC-007).</summary>
+public sealed class PanelAdjudicateCommand : AsyncCommand<PanelAdjudicateCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<PANEL_ID>")]
+        public string PanelId { get; set; } = "";
+
+        [CommandArgument(1, "<ISSUE_ID>")]
+        public string IssueId { get; set; } = "";
+
+        [CommandOption("--accept")]
+        public bool Accept { get; set; }
+
+        [CommandOption("--dismiss")]
+        public bool Dismiss { get; set; }
+
+        [CommandOption("--send-back")]
+        public bool SendBack { get; set; }
+
+        [CommandOption("--rationale <TEXT>")]
+        public string? Rationale { get; set; }
+
+        [CommandOption("--confirm")]
+        public bool Confirm { get; set; }
+
+        public override Spectre.Console.ValidationResult Validate()
+        {
+            var n = (Accept ? 1 : 0) + (Dismiss ? 1 : 0) + (SendBack ? 1 : 0);
+            return n == 1
+                ? Spectre.Console.ValidationResult.Success()
+                : Spectre.Console.ValidationResult.Error("specify exactly one of --accept | --dismiss | --send-back");
+        }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct)
+    {
+        var action = s.Accept ? "accepted" : s.Dismiss ? "dismissed" : "sent-back";
+        return Ops.RunAsync(s, "adjudicateIssue", new { panelId = s.PanelId, issueId = s.IssueId, action, rationale = s.Rationale, confirm = s.Confirm });
+    }
+}
+
 /// <summary>`arke harnesses list` — the live harness/model registry projection (SPEC-005): instances,
 /// tier labels, reachability, roster resolution. Tier labels only; no vendor model ids or credentials.</summary>
 public sealed class HarnessesListCommand : AsyncCommand<HarnessesListCommand.Settings>

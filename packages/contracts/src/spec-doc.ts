@@ -82,9 +82,14 @@ export function parseFrontmatter(md: string): SplitFrontmatter {
  */
 function normalizeScalar(value: string): string {
   const v = value.trim();
-  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) {
-    return v.slice(1, -1);
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    // A quoted scalar ends at its closing quote; anything after it (e.g. an inline ` # comment`) is
+    // not part of the value. Matching on endsWith() missed this and returned a still-quoted string.
+    const close = v.indexOf(q, 1);
+    if (close !== -1) return v.slice(1, close);
   }
+  // Unquoted: a `#` only starts a YAML comment when preceded by whitespace.
   return v.replace(/\s+#.*$/, "").trim();
 }
 
