@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arke — Autonomous Specification Implementation Report</title>
+<style>
+  :root {
+    --bg: #0b0c0e; --panel: #141619; --panel-2: #1b1e23; --border: #262a31;
+    --fg: #e8eaed; --muted: #9aa1ab; --faint: #6b727c;
+    --accent: #7dd3fc; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); line-height: 1.6; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: 30px; letter-spacing: -.02em; margin: 10px 0 8px; }
+  h2 { font-size: 20px; letter-spacing: -.01em; margin: 44px 0 14px; padding-top: 18px; border-top: 1px solid var(--border); }
+  h3 { font-size: 15px; margin: 26px 0 8px; color: var(--fg); }
+  p, li { color: var(--fg); }
+  .lede { color: var(--muted); font-size: 15px; max-width: 760px; }
+  .meta { font-family: var(--mono); font-size: 12px; color: var(--faint); margin-top: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 22px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .stat .n { font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+  .stat .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  .pill.ok { color: var(--ok); border-color: #1f5236; background: #0f2419; }
+  .pill.warn { color: var(--warn); border-color: #5a4513; background: #241c08; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
+  .card h3 { margin-top: 0; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  ul.tight { margin: 6px 0; padding-left: 20px; }
+  ul.tight li { margin: 3px 0; }
+  .muted { color: var(--muted); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px){ .two{ grid-template-columns:1fr; } }
+  .leadcell { font-weight: 600; }
+  .foot { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--faint); font-size: 12.5px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">Arke · Autonomous run report</div>
+  <h1>Eight specifications, implemented end-to-end and merged</h1>
+  <p class="lede">An autonomous engineering pass over every outstanding Arke specification (008–015), plus
+  completion of the in-flight SPEC-007. Each spec was implemented across the stack
+  (contracts → coordinator → adapter → client → CLI), reviewed adversarially, gated green, and merged
+  to <code>main</code> on its own branch + pull request.</p>
+  <div class="meta">Generated 2026-06-30 · branch base <code>main</code> @ <code>5e26400</code> · repo michaeljosiah/Arke</div>
+</header>
+
+<div class="grid">
+  <div class="stat"><div class="n">9</div><div class="l">specs shipped &amp; merged (007–015)</div></div>
+  <div class="stat"><div class="n">9</div><div class="l">pull requests (#19–#27)</div></div>
+  <div class="stat"><div class="n">371</div><div class="l">JS tests passing (0 fail)</div></div>
+  <div class="stat"><div class="n">252</div><div class="l">coordinator tests (was 165)</div></div>
+  <div class="stat"><div class="n">~30</div><div class="l">review findings fixed</div></div>
+  <div class="stat"><div class="n">0</div><div class="l">typecheck / build / CLI errors</div></div>
+</div>
+
+<h2>1 · What was delivered, per specification</h2>
+<p class="muted">Every PR was merged to <code>main</code> after its gates passed (typecheck, full test suite,
+production build, .NET CLI build + tests) and an adversarial review. “Core” means the governed,
+deterministic, fully-tested heart of the spec; UI/live-integration depth deferred where it requires a
+real external system is listed honestly in §3.</p>
+
+<table>
+  <thead><tr><th>Spec</th><th>PR</th><th>Delivered</th><th>State</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="leadcell">007 · Multi-model review panel</td><td class="mono">#19</td>
+      <td>Pairwise-distinct-model validation, parallel reviewer dispatch, section-hash agreement detection,
+      coordinator-enforced finalisation gate (no approve without a completed review, trace-reconstructed),
+      read-only reviewers. Also folded the 7 post-merge Codex comments from SPEC-006's PR #18.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">008 · Spec lifecycle &amp; library</td><td class="mono">#20</td>
+      <td>Idempotent delta-tag flatten (ADDED/MODIFIED/REMOVED/RENAMED), normative-hash material-change
+      detector, HMAC-validated <code>POST /webhooks/github</code> on a shared HTTP server, anti-self-approval
+      gate, spec library with search + status badges + divergence. CLI <code>spec list</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">009 · Parallel task fan-out</td><td class="mono">#21</td>
+      <td>Pure decider (<code>planFanOut</code>), durable <code>FanOutStore</code> for restart idempotency,
+      isolated git-worktree dispatch with collision guard + per-task failure isolation, concurrency cap +
+      queue drain, spec-demotion halt. CLI <code>spec fanout</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">010 · Delivery board</td><td class="mono">#22</td>
+      <td>Completed the signal-driven board: <strong>fixed a real gap</strong> (only 5 of 7 columns rendered —
+      <code>approved</code>/<code>needs-human</code> cards were invisible); connection indicator with a
+      permanent-failure reconnect path; <code>spec.promote</code> human correction (no direct column write).
+      CLI <code>spec promote</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">011 · Session detail &amp; rescue</td><td class="mono">#23</td>
+      <td>Governed mutation surface: ownership-validated <code>revert</code>/<code>unrevert</code>
+      (capability-gated), idempotent <code>pr.approve</code> diff-gate (durable across restart),
+      <code>diff.refresh</code>; OpenCode adapter revert + elicitation producer wired so the
+      <code>elicitation.*</code> events are live end-to-end. CLI <code>session revert/unrevert</code>,
+      <code>pr approve</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">012 · Human-in-the-loop permissions</td><td class="mono">#24</td>
+      <td>Audited decision boundary: trace-before-relay with identity + unknown-id rejection;
+      <strong>fixed a real <code>needsHuman</code> stickiness bug</strong> (any session status cleared it);
+      elicitation decision routing; gates sticky until <em>all</em> open gates resolve.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">013 · Generation workspace</td><td class="mono">#25</td>
+      <td>Propose → decide → execute: deterministic <code>parseArtifacts</code> with <code>sorTarget</code>
+      validation, <code>proposalId</code>-anchored decisions (stale rejected), trace-before-write with
+      partial approval + human edits (incl. editing an invalid ticket to add a target), timeout + idempotent
+      trigger. CLI <code>spec generate</code>, <code>generation approve/reject</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">014 · Deterministic projection &amp; integrations</td><td class="mono">#26</td>
+      <td>Stable idempotency key, env-based integration probe (no credential ever returned), the
+      <code>tool.execute.before</code> direction-of-truth + integration-domain policy, trace-verified
+      <code>retry-projection</code> (latest approval, no new gesture), capped <code>projections.query</code>,
+      and the deterministic harness plugin <code>arke-projection.ts</code>. CLI <code>integrations status</code>,
+      <code>projections list</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+    <tr>
+      <td class="leadcell">015 · Audit trace &amp; observability</td><td class="mono">#27</td>
+      <td>Trace promoted to an audit layer: serialised <code>WriteQueue</code> (atomic, drain-on-shutdown),
+      file-level monotonic <code>seq</code> (restart-resilient), 3-location <code>query</code> with cap + total,
+      span-attribute allowlist, <code>withSpan</code>, and a <code>get-audit-records</code> op. Crucially,
+      preserved the <strong>trace-before-action fail-safe</strong> (<code>write</code> best-effort vs
+      <code>writeOrThrow</code>). CLI <code>audit</code>.</td>
+      <td><span class="pill ok">merged</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>2 · Review methodology — adversarial, every spec</h2>
+<p>The brief called for the Codex review-bot loop, with internal agents as the fallback. <strong>Codex was
+rate-limited for the entire run</strong> (“You have reached your Codex usage limits for code reviews”), so
+every spec received a thorough <em>internal multi-angle adversarial review</em> in its place — a dedicated
+review agent reading the full diff against the real code, hunting correctness bugs, removed invariants, and
+cross-file breakage. This was not a rubber stamp: it found <strong>real, shipped-quality bugs on every
+single spec</strong>, which were fixed with regression tests before merge.</p>
+
+<div class="two">
+  <div class="card">
+    <h3>Representative bugs caught &amp; fixed</h3>
+    <ul class="tight">
+      <li><span class="mono">009</span> — git ref <strong>D/F conflict</strong>: <code>feat/x/task-0</code> can't coexist with branch <code>feat/x</code>; switched to a sibling name. Also: <code>idle</code> is per-turn, not terminal — the queue drained too early.</li>
+      <li><span class="mono">010</span> — board rendered only 5 of 7 columns; approved/needs-human cards invisible.</li>
+      <li><span class="mono">012</span> — <code>needsHuman</code> cleared by any status event; a ghost gate for an unknown session could pin a card forever.</li>
+      <li><span class="mono">013</span> — an invalid ticket was <strong>permanently unapprovable</strong> (edits couldn't add a <code>sorTarget</code>); a <code>generate()</code> TOCTOU race spawned two live sessions.</li>
+      <li><span class="mono">014</span> — <code>retry-projection</code> picked the <em>oldest</em> approval, drifting the idempotency key.</li>
+      <li><span class="mono">015</span> — the trace rewrite <strong>silently defeated the trace-before-action fail-safe</strong> (a governed action could proceed with no audit record).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Quality bar held per spec</h3>
+    <ul class="tight">
+      <li>TypeScript strict typecheck — 0 errors across all six workspaces.</li>
+      <li>Full Node test suite green before every merge (grew 165 → 252 coordinator tests).</li>
+      <li>Production <code>vite build</code> + .NET <code>dotnet build</code> + CLI tests green.</li>
+      <li>Every fix shipped with a regression test reproducing the finding.</li>
+      <li>Spec change-history updated honestly, including deferrals.</li>
+      <li>Security invariants preserved throughout: vendor model ids never reach the client; credentials never cross the wire; reviewers read-only; governed writes never queued offline.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>3 · Identified gaps &amp; concerns</h2>
+<p class="muted">Stated plainly so they are not mistaken for done. None block the core governed loop; each is a
+deliberate, documented deferral or an environment limitation.</p>
+
+<div class="card">
+  <h3>Verification gap — interactive browser QA</h3>
+  <p>The brief asked for UI verification by driving the app in Chrome. The Chrome extension MCP bridge was
+  <strong>unreachable for the entire run</strong> (every <code>tabs_context_mcp</code> call returned “not
+  connected”, though Chrome was open). UI was therefore verified to the strongest available headless degree:
+  the production build compiles every screen, the Vite dev server serves and transforms all client modules
+  with zero errors, and the 18 client unit tests pass. <strong>Pixel-level interactive QA (clicking through
+  each new screen) was not performed</strong> and should be done once the bridge is restored.</p>
+</div>
+
+<div class="card">
+  <h3>Deferred to a live external system (verified-by-mirror / by tests)</h3>
+  <ul class="tight">
+    <li><span class="mono">008</span> — GitHub-API open-PR re-fetch, concurrent-capability conflict detection, branch-protection scaffolding (the coordinator self-approval gate <em>is</em> implemented + tested).</li>
+    <li><span class="mono">013/014</span> — actual local file writes &amp; live SoR API calls (GitHub/Jira/Azure) and the OpenCode plugin-load health-check need a real harness + integration; the deterministic logic is unit-tested and the plugin mirrors it.</li>
+    <li><span class="mono">015</span> — the full <code>@opentelemetry/sdk-node</code> + OTLP <code>BatchSpanProcessor</code> export to Jaeger/Tempo; local span records + allowlist + per-spec causal chain exist and are exportable.</li>
+    <li><span class="mono">011/013/014/015</span> — several client screens have their store-fold + live helpers + CLI wired, but the deep live-mode <em>render</em> (rescue section, elicitation overlay, generation/projections/audit live screens) is not fully swapped from the demo screens.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Concerns worth a follow-up pass</h3>
+  <ul class="tight">
+    <li><strong>Identity is <code>"anonymous"</code></strong> (Phase-1, by spec): audit records can't attribute <em>who</em> approved until a coordinator auth layer lands. The schema is ready for it.</li>
+    <li><strong>Trace is unbounded</strong>: append-only with no rotation; <code>query</code> is a full-file scan (capped at 500). Fine for now; needs rotation + an index at scale.</li>
+    <li><strong>Per-project vs global env</strong>: the integrations probe reads the global <code>process.env</code> rather than each project's <code>.arke/config.json</code> (SPEC-018 intent). Functional, but not yet per-project.</li>
+    <li><strong>Generation/agent output is trusted to be parseable JSON</strong>: robust extraction is in place, but a malformed-but-plausible artefact set is only as safe as the human review gate.</li>
+  </ul>
+</div>
+
+<h2>4 · Product suggestions</h2>
+<div class="two">
+  <div class="card">
+    <h3>Make the audit trail the product, not a byproduct</h3>
+    <p>Every governed action now lands a resolvable, causally-linked trace record (intent → approval →
+    projection). Surface a <strong>“provenance” view per released change</strong>: from a merged PR or a
+    Jira ticket, one click back to the spec approval, the reviewer panel verdict, and the human who decided.
+    That story — “prove what every agent did, and who authorised it” — is a differentiator for
+    change-controlled teams and is mostly already in the data.</p>
+  </div>
+  <div class="card">
+    <h3>Close the loop with a coordinator auth layer</h3>
+    <p>The single highest-leverage follow-up: a lightweight local identity (OS user or session token) so
+    <code>identity</code> stops being <code>"anonymous"</code>. It unlocks real attribution in the audit
+    surface, the second-human gate, and per-operator metrics — with no schema change.</p>
+  </div>
+  <div class="card">
+    <h3>Treat deferred “live” edges as a conformance suite</h3>
+    <p>The deterministic cores (flatten, fan-out, projection, idempotency, policy) are unit-tested; the live
+    edges (SoR APIs, OTLP, plugin load) are mirrored. Stand up a <strong>recorded-fixture conformance run</strong>
+    against a sandbox GitHub/Jira and a local Jaeger so those edges get automated coverage without a manual pass.</p>
+  </div>
+  <div class="card">
+    <h3>Unify the “decision” primitive</h3>
+    <p>Permissions, elicitations, generation approvals, and diff approvals are now four parallel
+    trace-before-relay flows with near-identical shapes. A single <strong>Decision</strong> abstraction
+    (validate → trace → relay/execute, with proposalId/idempotency) would collapse duplication and make the
+    next governed action a config, not a code path.</p>
+  </div>
+</div>
+
+<h2>5 · Verification appendix</h2>
+<table>
+  <thead><tr><th>Workspace / target</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>@arke/coordinator (Node test)</td><td class="mono">252 pass / 0 fail</td></tr>
+    <tr><td>@arke/adapter-opencode</td><td class="mono">83 pass / 0 fail</td></tr>
+    <tr><td>@arke/client</td><td class="mono">18 pass / 0 fail</td></tr>
+    <tr><td>@arke/adapter-omnigent</td><td class="mono">12 pass / 0 fail</td></tr>
+    <tr><td>@arke/agent-image</td><td class="mono">6 pass / 0 fail</td></tr>
+    <tr><td>npm run typecheck (all workspaces)</td><td class="mono">0 errors</td></tr>
+    <tr><td>npm run build (client + contracts + coordinator)</td><td class="mono">built, 0 errors</td></tr>
+    <tr><td>Arke.Cli (.NET 10) build + tests</td><td class="mono">Build succeeded · 4 pass / 0 fail</td></tr>
+    <tr><td>Dev server transform (all client screens)</td><td class="mono">HTTP 200, 0 Vite errors</td></tr>
+    <tr><td>Interactive Chrome QA</td><td class="mono">not performed — extension bridge unreachable</td></tr>
+  </tbody>
+</table>
+
+<p class="foot">Prepared autonomously by Claude (Opus 4.8) for Arke. Each specification was implemented on its own
+branch, opened as a pull request (#19–#27), reviewed adversarially, gated green, and merged to <code>main</code>.
+Codex code-review was unavailable (rate-limited) throughout; internal multi-agent reviews substituted and are
+documented per-PR. 🤖 Generated with Claude Code.</p>
+
+</div>
+</body>
+</html>
