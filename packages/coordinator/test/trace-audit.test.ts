@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -84,6 +84,16 @@ test("drain() resolves after all enqueued writes land", async () => {
   for (let i = 0; i < 5; i++) void t.write({ kind: "x", n: i });
   await t.drain();
   assert.equal(readFileSync(path, "utf8").split("\n").filter(Boolean).length, 5);
+});
+
+test("write() is best-effort (resolves on failure); writeOrThrow() rejects — the fail-safe contract", async () => {
+  // An unwritable path: a file used as a directory component makes mkdir/appendFile fail.
+  const dir = mkdtempSync(join(tmpdir(), "arke-ro-"));
+  const blocker = join(dir, "blk");
+  writeFileSync(blocker, "x"); // `blocker` is a file…
+  const t = new Trace(join(blocker, "trace.ndjson")); // …so writing under it fails (ENOTDIR)
+  await t.write({ kind: "x" }); // best-effort: must NOT reject (no crash, degraded audit)
+  await assert.rejects(() => t.writeOrThrow({ kind: "permission.decision" }), "fail-safe write rejects so the relay is blocked");
 });
 
 test("WriteQueue keeps running after a task throws (chain not poisoned)", async () => {

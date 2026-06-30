@@ -836,8 +836,8 @@ export class ProjectContext {
     const { artifacts, error } = resolveApproval(proposal.artifacts, approvedArtifactIds, edits);
     if (error) return { ok: false, error };
     // Trace-BEFORE-write (SPEC-013): the durable proof of intent + recovery anchor. Records the final,
-    // human-reviewed content for each approved artefact. If this throws, no write is attempted.
-    await this.trace.write({
+    // human-reviewed content for each approved artefact. writeOrThrow → if it can't persist, no write.
+    await this.trace.writeOrThrow({
       kind: "generation.decision",
       projectId: this.projectId,
       specId: cid,
@@ -1124,7 +1124,7 @@ export class ProjectContext {
     // append-only trace is unwritable we refuse (and roll back the file) rather than commit something
     // we can't audit (PR #18 review round 6, per AGENTS.md/SPEC-006).
     try {
-      await this.trace.write({ kind: "spec.approve.preflight", projectId: this.projectId, specId: cid, branch: fmBranch });
+      await this.trace.writeOrThrow({ kind: "spec.approve.preflight", projectId: this.projectId, specId: cid, branch: fmBranch });
     } catch (err) {
       try {
         writeFileSync(found.absPath, found.text, "utf8");
@@ -1630,8 +1630,8 @@ export class ProjectContext {
       throw new Error(`unknown permissionId '${decision.permissionId}'`);
     }
     // Trace-BEFORE-relay, fail-safe (SPEC-012): the audit record must exist before the adapter acts.
-    // This write is intentionally NOT best-effort — if it throws, the relay below never runs.
-    await this.trace.write({
+    // writeOrThrow is intentionally NOT best-effort — if it rejects, the relay below never runs.
+    await this.trace.writeOrThrow({
       kind: "permission.decision",
       at: Date.now(),
       projectId: this.projectId,
@@ -1664,7 +1664,7 @@ export class ProjectContext {
     if (verb === "reply" ? !a.respondToElicitation : !a.rejectElicitation) {
       return { ok: false, error: "harness does not support elicitation" };
     }
-    await this.trace.write({
+    await this.trace.writeOrThrow({ // trace-before-relay fail-safe (SPEC-012), same as permissions
       kind: "elicitation.decision",
       at: Date.now(),
       projectId: this.projectId,

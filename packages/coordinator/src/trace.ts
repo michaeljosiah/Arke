@@ -80,19 +80,37 @@ export class Trace {
     }
   }
 
-  /** Append a record, assigning a file-level monotonic `seq`. Serialised; failures are swallowed. */
-  async write(record: Record<string, unknown>): Promise<void> {
+  private enqueueWrite(record: Record<string, unknown>, throwOnFail: boolean): Promise<void> {
     return this.queue.enqueue(async () => {
       await this.ensureSeq();
       const line = JSON.stringify({ at: Date.now(), seq: ++this.seq, ...record }) + "\n";
       try {
         await mkdir(dirname(this.path), { recursive: true });
         await appendFile(this.path, line, { encoding: "utf8", mode: 0o600 });
-      } catch {
+      } catch (err) {
         this.seq--; // the write didn't land — don't burn the sequence number
-        /* degraded audit, never a crash (SPEC-015) */
+        if (throwOnFail) throw err; // fail-safe callers MUST learn the audit record didn't persist
+        /* else degraded audit, never a crash (SPEC-015) */
       }
     });
+  }
+
+  /**
+   * Append a record (best-effort): assigns a file-level monotonic `seq`, serialised through the queue.
+   * NEVER rejects — an unwritable trace degrades audit but does not crash the hot pump, and a
+   * fire-and-forget `void trace.write(...)` can't raise an unhandled rejection.
+   */
+  async write(record: Record<string, unknown>): Promise<void> {
+    return this.enqueueWrite(record, false);
+  }
+
+  /**
+   * Append a record, REJECTING if it can't be persisted. The trace-before-action fail-safe
+   * (SPEC-006/012/013): a governed action that must not proceed without a durable audit record awaits
+   * this and aborts on rejection. The queue chain is not poisoned by the rejection.
+   */
+  async writeOrThrow(record: Record<string, unknown>): Promise<void> {
+    return this.enqueueWrite(record, true);
   }
 
   /** Wait for all enqueued writes to land (shutdown). */
@@ -133,7 +151,8 @@ export class Trace {
       const attrs = r.attributes as Record<string, unknown> | undefined;
       return r.specId === specId || ev?.specId === specId || attrs?.["arke.specId"] === specId;
     });
-    if (matched.length <= limit) return { records: matched, total: matched.length };
-    return { records: matched.slice(-limit).reverse(), total: matched.length }; // newest-first when capped
+    // Always newest-first (consistent whether or not the cap bites — the surface/CLI promise this).
+    const newestFirst = matched.slice().reverse();
+    return { records: newestFirst.slice(0, limit), total: matched.length };
   }
 }

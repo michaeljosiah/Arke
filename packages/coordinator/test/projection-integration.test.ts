@@ -98,6 +98,6 @@ test("approve → projection.write with idempotency key → projections.query li
   assert.ok(kinds.has("generation.decision"), "approval decision is in the audit trace");
   assert.ok(kinds.has("projection.write") || [...kinds].some((k) => k === "projection.write"), "projection write is in the audit trace");
   const seqs = audit.result.records.map((r: any) => r.seq);
-  assert.deepEqual([...seqs].sort((a, b) => a - b), seqs, "records are monotonically sequenced");
+  assert.deepEqual([...seqs].sort((a, b) => b - a), seqs, "records are newest-first by monotonic seq");
   ws.close();
 });
