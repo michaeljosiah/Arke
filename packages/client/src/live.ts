@@ -102,6 +102,16 @@ function applyEvent(ev: any) {
       if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
       break;
     }
+    case 'projection.write': {
+      // SPEC-014: append to the projections-status surface (most-recent-first).
+      store.set((s: any) => ({ projections: [{ target: ev.target, specId: ev.specId, trigger: ev.trigger, ok: ev.ok, artifactId: ev.artifactId, idempotencyKey: ev.idempotencyKey, error: ev.errorMessage, ts }, ...(s.projections || [])].slice(0, 200) }));
+      rail('projection.write', `projection.write · ${ev.target} · ${ev.specId} · ${ev.ok ? 'ok' : 'failed'}`, ts);
+      break;
+    }
+    case 'integration.status': {
+      store.set({ integrations: ev.integrations });
+      break;
+    }
     case 'generation.proposed': {
       // SPEC-013: the agent's pre-write artefact proposal for review.
       store.set({ generation: { specId: ev.specId, proposalId: ev.sessionId, artifacts: ev.artifacts, status: 'pending-review' } });
@@ -686,6 +696,13 @@ export const approveGenerationLive = (specId: string, proposalId: string, approv
   governed("generation.approve", { specId, proposalId, approvedArtifactIds, edits });
 /** Reject a generation proposal (SPEC-013). */
 export const rejectGenerationLive = (specId: string, proposalId: string) => governed("generation.reject", { specId, proposalId });
+/** Fetch the per-project integrations registry status (SPEC-014). */
+export async function fetchIntegrations(): Promise<void> {
+  const res = await liveRequest("integration.status");
+  if (res?.ok && Array.isArray(res.result)) store.set({ integrations: res.result });
+}
+/** Retry a failed/blocked SoR write using the original approval (SPEC-014). */
+export const retryProjectionLive = (specId: string, artifactId: string, target: string) => governed("retry-projection", { specId, artifactId, target });
 
 /** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
 export function reconnectLive(): void {

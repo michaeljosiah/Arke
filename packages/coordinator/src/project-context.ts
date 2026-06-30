@@ -61,6 +61,7 @@ import {
   type ArtifactEdit,
   type ArtifactProposal,
 } from "./generation.js";
+import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import type { Trace } from "./trace.js";
@@ -843,13 +844,58 @@ export class ProjectContext {
     this.generationProposals.delete(cid);
     this.generationSessions.delete(proposal.sessionId);
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "generation.decided", specId: cid, sessionId: proposalId, decision: "approved", approvedArtifactIds: artifacts.map((a) => a.id) } as DomainEvent);
-    // Fan-out: SoR-targeted artefacts are handed to SPEC-014's deterministic projection (a trace event
-    // it consumes); local docs/tests would be written via a harness write session (deferred to SPEC-014
-    // wiring). Per-artefact completion is traced.
+    // Fan-out (SPEC-014): each artefact becomes a projection.write with a stable idempotency key. A
+    // SoR-targeted artefact (sorTarget) is the deterministic-plugin hand-off; local docs/tests record
+    // the same way. The harness plugin performs the real API call; the coordinator records the intent.
     for (const a of artifacts) {
-      await this.trace.write({ kind: a.sorTarget ? "projection.write" : "artifact.write", projectId: this.projectId, specId: cid, artifactId: a.id, target: a.target, ...(a.sorTarget ? { sorTarget: a.sorTarget } : {}) });
+      const target = a.sorTarget ?? a.target;
+      await this.emit({
+        seq: 0, ts: 0, harness: this.adapter.id, type: "projection.write",
+        target, specId: cid, trigger: proposalId, ok: true, artifactId: a.id,
+        idempotencyKey: idempotencyKey(cid, a.id, a.content),
+      } as DomainEvent);
     }
     return { ok: true, written: artifacts.length };
+  }
+
+  // ---- deterministic projection + integrations registry (SPEC-014) --------
+
+  /** Probe this project's integrations from the environment (credentials never returned). */
+  integrationStatus(): IntegrationRecord[] {
+    return probeIntegrations(process.env, Date.now());
+  }
+
+  /**
+   * Re-attempt a failed/blocked SoR write using the ORIGINAL approval as authorisation — no new human
+   * gesture (SPEC-014). The original `generation.decision approved` trace record for the spec must
+   * exist and have included this artefactId; otherwise the retry is refused.
+   */
+  async retryProjection(specId: string, artifactId: string, target: string): Promise<{ ok: boolean; error?: string }> {
+    const records = await this.trace.readAll();
+    // Newest-first: re-generation reassigns the same artifactId with NEW content, so the retry must
+    // mirror the LATEST approval's content (not the oldest) — else the idempotency key drifts from the
+    // current SoR write and the plugin's dedup is defeated.
+    const approval = [...records].reverse().find(
+      (r) => r.kind === "generation.decision" && r.decision === "approved" && r.specId === specId && Array.isArray(r.approvedArtifactIds) && (r.approvedArtifactIds as string[]).includes(artifactId),
+    );
+    if (!approval) return { ok: false, error: "cannot retry — original approval not found" };
+    const final = (approval.finalContent as Array<{ id: string; content: string }> | undefined)?.find((a) => a.id === artifactId);
+    if (!final) return { ok: false, error: "cannot retry — approved content not found in the trace record" };
+    await this.emit({
+      seq: 0, ts: 0, harness: this.adapter.id, type: "projection.write",
+      target, specId, trigger: String(approval.sessionId ?? "retry"), ok: true, artifactId,
+      idempotencyKey: idempotencyKey(specId, artifactId, final.content),
+    } as DomainEvent);
+    return { ok: true };
+  }
+
+  /** The projections-status surface data: projection.write records, newest first, capped (SPEC-014). */
+  async projectionsQuery(specId?: string): Promise<{ rows: unknown[]; total: number; capped: boolean }> {
+    const limit = Number(process.env.ARKE_PROJECTION_QUERY_LIMIT) || 200;
+    const records = await this.trace.readAll();
+    const all = records.filter((r) => r.kind === "event" && (r.event as { type?: string } | undefined)?.type === "projection.write" && (!specId || (r.event as { specId?: string }).specId === specId)).map((r) => r.event);
+    const newestFirst = all.reverse();
+    return { rows: newestFirst.slice(0, limit), total: all.length, capped: all.length > limit };
   }
 
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
@@ -1496,6 +1542,12 @@ export class ProjectContext {
         return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "approved", Array.isArray(a.approvedArtifactIds) ? (a.approvedArtifactIds as string[]) : undefined, Array.isArray(a.edits) ? (a.edits as ArtifactEdit[]) : undefined);
       case "generation.reject":
         return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "rejected");
+      case "integration.status": // SPEC-014
+        return this.integrationStatus();
+      case "retry-projection":
+        return this.retryProjection(String(a.specId ?? ""), String(a.artifactId ?? ""), String(a.target ?? ""));
+      case "projections.query":
+        return this.projectionsQuery(a.specId ? String(a.specId) : undefined);
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);

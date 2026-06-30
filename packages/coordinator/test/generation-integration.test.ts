@@ -97,7 +97,7 @@ test("generate → generation.proposed; partial approve records the decision in 
 
   const lines = traceLines(dir);
   const decisionIdx = lines.findIndex((l) => l.kind === "generation.decision" && l.decision === "approved");
-  const writeIdx = lines.findIndex((l) => l.kind === "artifact.write" || l.kind === "projection.write");
+  const writeIdx = lines.findIndex((l) => l.kind === "event" && l.event?.type === "projection.write");
   assert.ok(decisionIdx >= 0, "approval recorded");
   assert.ok(decisionIdx < writeIdx, "decision traced before the write");
   assert.equal(lines[decisionIdx].finalContent.find((a: any) => a.id === docId).content, "# Edited doc", "edited content recorded");

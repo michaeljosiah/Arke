@@ -43,6 +43,16 @@ app.Configure(config =>
         b.AddCommand<GenerationApproveCommand>("approve").WithDescription("Approve a generation proposal --proposal <id>.");
         b.AddCommand<GenerationRejectCommand>("reject").WithDescription("Reject a generation proposal --proposal <id>.");
     });
+    config.AddBranch("integrations", b =>
+    {
+        b.SetDescription("Integrations registry (SPEC-014).");
+        b.AddCommand<IntegrationsStatusCommand>("status").WithDescription("Show GitHub/Jira/Azure DevOps connection status.");
+    });
+    config.AddBranch("projections", b =>
+    {
+        b.SetDescription("Projection-write history (SPEC-014).");
+        b.AddCommand<ProjectionsListCommand>("list").WithDescription("List projection writes (optionally --spec <id>).");
+    });
     config.AddCommand<PromptCommand>("prompt").WithDescription("Send (or --async dispatch) a prompt to a session as an agent role at a tier.");
     config.AddCommand<WatchCommand>("watch").WithDescription("Stream normalised domain events as NDJSON.");
     config.AddCommand<TodosCommand>("todos").WithDescription("Read a session's todo list.");
