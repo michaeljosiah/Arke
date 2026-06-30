@@ -6,6 +6,7 @@ import {
   DomainEvent,
   appendChangeHistory,
   parseFrontmatter,
+  parseSpecDoc,
   setFrontmatterStatus,
   type AgentImage,
   type HarnessAdapter,
@@ -440,6 +441,19 @@ export class ProjectContext {
     } catch (err) {
       return fail(`could not write the specification file: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // Preflight the audit trace BEFORE committing: a governed action must be recorded, so if the
+    // append-only trace is unwritable we refuse (and roll back the file) rather than commit something
+    // we can't audit (PR #18 review round 6, per AGENTS.md/SPEC-006).
+    try {
+      await this.trace.write({ kind: "spec.approve.preflight", projectId: this.projectId, specId, branch: fmBranch });
+    } catch (err) {
+      try {
+        writeFileSync(found.absPath, found.text, "utf8");
+      } catch {
+        /* best-effort rollback */
+      }
+      return fail(`audit trace is unwritable — refusing to approve (${err instanceof Error ? err.message : String(err)})`);
+    }
     const committed = gitCommit(this.root, found.relPath, `spec(${specId}): approve → in-review`);
     if (!committed.ok) {
       // Roll back the write so the on-disk status is unchanged (the approval did not happen).
@@ -451,15 +465,11 @@ export class ProjectContext {
       return fail(`git commit failed: ${committed.error}`);
     }
 
-    // The commit is permanent — the approval succeeded. Publishing the status event and writing the
-    // audit record are best-effort after that point: a trace/emit failure (e.g. unwritable .arke)
-    // must NOT turn a committed approval into a reported failure (PR #18 review round 4).
-    try {
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
-      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
-    } catch {
-      /* committed already — audit/notify is best-effort */
-    }
+    // The commit is permanent — the approval succeeded. Record the final audit (the trace was proven
+    // writable by the preflight) and publish the status. emit() publishes even if its own trace write
+    // fails, so live clients always advance to in-review (PR #18 review rounds 4–6).
+    await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
     return { ok: true, specId, status: "in-review", branch: fmBranch };
   }
 
@@ -472,6 +482,11 @@ export class ProjectContext {
     const found = this.findSpecFile(specId);
     // No authoritative working draft → refuse, rather than acking a review of nothing (PR #18 review).
     if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    // A review needs something to review: require at least one requirement (SPEC-006) — mirrors the
+    // cockpit's disabled state so the CLI/op path can't convene an empty draft (PR #18 review round 6).
+    if (parseSpecDoc(found.text).requirements.length === 0) {
+      throw new Error(`specification '${specId}' has no requirements yet — nothing to review`);
+    }
     const fmBranch = found.frontmatter.branch;
     // The frontmatter branch is the source of truth. A client-supplied branch that disagrees (a stale
     // preview, or `--branch` on the CLI) is rejected rather than recorded against the wrong branch
@@ -881,7 +896,7 @@ export function gitAvailable(): boolean {
 /** The current git HEAD branch name in `cwd`, or null when it can't be determined (SPEC-006). */
 export function gitHeadBranch(cwd: string): string | null {
   try {
-    const res = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, encoding: "utf8" });
+    const res = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], gitOpts(cwd));
     if (res.status !== 0) return null;
     const branch = (res.stdout ?? "").trim();
     return branch.length > 0 && branch !== "HEAD" ? branch : null;
@@ -890,20 +905,28 @@ export function gitHeadBranch(cwd: string): string | null {
   }
 }
 
+/** Bound git invocations so a hanging hook / credential or GPG prompt can't wedge the event loop. */
+const GIT_TIMEOUT_MS = Number(process.env.ARKE_GIT_TIMEOUT_MS ?? 20_000);
+/** Non-interactive git: never block on a terminal credential prompt (PR #18 review round 6). */
+function gitOpts(cwd: string) {
+  return { cwd, encoding: "utf8" as const, timeout: GIT_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+}
+
 /** Stage and commit a single file in `cwd` (SPEC-006). Returns the new sha or the failure reason. */
 export function gitCommit(cwd: string, relPath: string, message: string): { ok: true; sha: string } | { ok: false; error: string } {
   try {
-    const add = spawnSync("git", ["add", "--", relPath], { cwd, encoding: "utf8" });
+    const add = spawnSync("git", ["add", "--", relPath], gitOpts(cwd));
     if (add.status !== 0) return { ok: false, error: (add.stderr || "git add failed").trim() };
-    const commit = spawnSync("git", ["commit", "-m", message, "--", relPath], { cwd, encoding: "utf8" });
+    const commit = spawnSync("git", ["commit", "-m", message, "--", relPath], gitOpts(cwd));
     if (commit.status !== 0) {
       // Unstage what `git add` staged so a commit failure leaves the index clean too — otherwise the
       // approval change sits staged and a later commit could include it (PR #18 review). The caller
-      // restores the working-tree file; this restores the index.
-      spawnSync("git", ["reset", "-q", "--", relPath], { cwd, encoding: "utf8" });
-      return { ok: false, error: (commit.stderr || commit.stdout || "git commit failed").trim() };
+      // restores the working-tree file; this restores the index. (A timeout yields status null →
+      // treated as failure, and the bounded wait means a hung hook can't block forever.)
+      spawnSync("git", ["reset", "-q", "--", relPath], gitOpts(cwd));
+      return { ok: false, error: (commit.error?.message || commit.stderr || commit.stdout || "git commit failed").trim() };
     }
-    const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], gitOpts(cwd));
     return { ok: true, sha: (sha.stdout ?? "").trim() };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

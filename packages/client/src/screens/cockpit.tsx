@@ -78,10 +78,11 @@ function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: a
 
 function LiveCockpit() {
   const { activeSpec, activeCard, cards, cockpit } = useStore();
-  // Resolve the spec to author: an explicit activeSpec, else the spec of the active board/session card
-  // (so "Go to authoring" from a card opens the right spec), else the first spec card (PR #18 review).
-  const specId = activeSpec
-    || cards.find((c: any) => c.id === activeCard)?.specId
+  // Resolve the spec to author: prefer the ACTIVE board/session card's spec when one is selected (so
+  // "Go to authoring" from a card opens that card's spec, not a stale activeSpec), then activeSpec,
+  // then the first spec card (PR #18 review rounds 5–6).
+  const specId = (activeCard ? cards.find((c: any) => c.id === activeCard)?.specId : null)
+    || activeSpec
     || (cards.find((c: any) => c.kind === 'spec')?.specId)
     || null;
   const [file, setFile] = React.useState<any>(null);
@@ -97,6 +98,11 @@ function LiveCockpit() {
   // own attribution even if the composer's role selector changes later (PR #18 review round 2).
   const roleByMsgId = React.useRef<Map<string, string>>(new Map());
   const lastSentRole = React.useRef<string | undefined>(undefined); // fallback attribution
+  // The tier each turn ran at (client-safe label; vendor model ids never reach the client per
+  // SPEC-005). Shown on agent turns when the session card carries no resolved model (PR #18 round 6).
+  const tierByMsgId = React.useRef<Map<string, string>>(new Map());
+  const lastSentTier = React.useRef<string | undefined>(undefined);
+  const latestSpec = React.useRef<string | null>(specId); // guards against stale spec.file responses
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
   const scroller = React.useRef<any>(null);
@@ -104,21 +110,29 @@ function LiveCockpit() {
   // Reset all per-spec state when the active spec changes, so a prompt is never routed to the prior
   // spec's session and the preview/conversation don't bleed across specs (PR #18 review round 4).
   React.useEffect(() => {
+    latestSpec.current = specId;
     setSessionId(null);
     setConvo([]);
     setFile(null);
     roleByMsgId.current = new Map();
+    tierByMsgId.current = new Map();
+    lastSentRole.current = undefined;
+    lastSentTier.current = undefined;
   }, [specId]);
 
-  // Resolve the live authoring session for this spec. Prefer the session we created; otherwise any
-  // card for this spec that is currently running (e.g. a session already in flight after a reload).
-  // `inFlight` is true if ANY session for the spec is running, so Approve is disabled mid-write even
-  // before this client created a session (PR #18 review round 4).
-  const specCards = cards.filter((c: any) => c.id === specId || c.specId === specId);
+  // Resolve the live AUTHORING session for this spec. Authoring sessions are spec-kind sessions for
+  // this spec (id !== specId) — NOT the spec status card and NOT implementation task sessions, which
+  // must stay out of the authoring conversation/in-flight state (PR #18 review round 6). Prefer the
+  // session we created; otherwise reuse an existing running/idle authoring session (e.g. after a
+  // reload) so follow-ups continue the same session rather than splitting context (round 6).
+  const specStatusCard = cards.find((c: any) => c.id === specId);
+  const authoringSessions = cards.filter((c: any) => c.specId === specId && c.id !== specId && c.kind === 'spec');
+  const reusableSession = authoringSessions.find((c: any) => c.status === 'running')
+    ?? authoringSessions.find((c: any) => c.status === 'idle')
+    ?? authoringSessions[0];
   const authoringCard = sessionId ? cards.find((c: any) => c.id === sessionId) : null;
-  const runningCard = specCards.find((c: any) => c.status === 'running');
-  const liveCard = authoringCard ?? runningCard ?? specCards.find((c: any) => c.id === specId) ?? specCards[0];
-  const inFlight = specCards.some((c: any) => c.status === 'running');
+  const liveCard = authoringCard ?? reusableSession ?? specStatusCard;
+  const inFlight = authoringSessions.some((c: any) => c.status === 'running');
   const transcript = liveCard?.transcript ?? [];
   // A signature that also changes when a streamed turn is finalised via message.updated (same entry,
   // so transcript.length is unchanged) — this is what makes the preview re-poll after the final
@@ -128,7 +142,11 @@ function LiveCockpit() {
   // Load the working file on mount/spec change, after each transcript change, and on a 30s fallback.
   const refresh = React.useCallback(async (markRefreshed = false) => {
     if (!specId) return;
-    const res = await fetchSpecFile(specId);
+    const reqSpec = specId;
+    const res = await fetchSpecFile(reqSpec);
+    // Discard a late response for a spec we've since navigated away from, so it can't overwrite the
+    // current spec's preview (and feed the wrong branch into approve/convene) (PR #18 review round 6).
+    if (reqSpec !== latestSpec.current) return;
     if (res?.ok) {
       setFile((prev: any) => {
         if (markRefreshed && prev?.text !== res.result?.text) { setRefreshed(true); setTimeout(() => setRefreshed(false), 2500); }
@@ -156,12 +174,15 @@ function LiveCockpit() {
       let next = prev;
       for (const t of transcript) {
         const key = 'a:' + t.messageId;
-        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: modelLabel, streaming: t.isStreaming };
+        // Label with the resolved model if the session carries one, else the tier the turn ran at
+        // (client-safe; SPEC-005 keeps vendor model ids off the client).
+        const label = modelLabel ?? tierByMsgId.current.get(t.messageId) ?? lastSentTier.current;
+        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
         else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) {
           next = next.slice();
-          next[idx] = { ...next[idx], text: entry.text, streaming: entry.streaming, model: modelLabel };
+          next[idx] = { ...next[idx], text: entry.text, streaming: entry.streaming, model: label };
         }
       }
       return next;
@@ -174,7 +195,9 @@ function LiveCockpit() {
     const sentAs = role;
     setSending(true);
     try {
-      let sid = sessionId;
+      // Reuse an existing authoring session for this spec (e.g. after a reload) before creating a new
+      // one, so follow-ups continue the same harness session/history (PR #18 review round 6).
+      let sid = sessionId ?? reusableSession?.id ?? null;
       if (!sid) {
         // Don't attempt session.create while offline — it would time out and the message would be
         // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).
@@ -184,16 +207,18 @@ function LiveCockpit() {
         }
         const created = await liveRequest('session.create', { specId });
         sid = created?.ok ? created.result?.sessionId : null;
-        if (sid) setSessionId(sid);
       }
       if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
-      // Record the reply's attribution BEFORE awaiting: prompt.send resolves only when the turn
-      // completes, by which time the transcript (and its agent turn) may already be merged — so set
-      // roleByMsgId by a client-generated correlationId now, with lastSentRole as a fallback for
-      // turns whose messageId differs from the correlationId (PR #18 review round 5).
+      if (sid !== sessionId) setSessionId(sid); // remember the (created or reused) session
+      // Record the reply's attribution + tier BEFORE awaiting: prompt.send resolves only when the
+      // turn completes, by which time the transcript (and its agent turn) may already be merged — so
+      // set roleByMsgId/tierByMsgId by a client-generated correlationId now, with lastSent* fallbacks
+      // for turns whose messageId differs from the correlationId (PR #18 review rounds 5–6).
       const correlationId = (globalThis.crypto?.randomUUID?.() ?? `cock-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       roleByMsgId.current.set(correlationId, sentAs);
+      tierByMsgId.current.set(correlationId, tier);
       lastSentRole.current = sentAs;
+      lastSentTier.current = tier;
       // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
       // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4).
       const key = 'h:' + Date.now();
@@ -238,7 +263,7 @@ function LiveCockpit() {
         e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Authoring'),
         inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'agent writing')) : null,
         e('div', { style: { flex: 1 } }),
-        e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId, onClick: () => void convene() }, 'Convene review')),
+        e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId || !file?.exists || !(doc?.requirements?.length), onClick: () => void convene() }, 'Convene review')),
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
         turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
