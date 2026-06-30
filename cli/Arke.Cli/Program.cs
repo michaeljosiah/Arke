@@ -103,6 +103,7 @@ app.Configure(config =>
         b.SetDescription("Inspect the append-only audit trace.");
         b.AddCommand<TraceTailCommand>("tail").WithDescription("Print the last N trace records.");
     });
+    config.AddCommand<AuditCommand>("audit").WithDescription("Query the audit/activity trace for a spec --spec <id> (SPEC-015).");
 });
 
 return await app.RunAsync(args);

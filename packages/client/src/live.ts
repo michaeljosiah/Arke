@@ -704,6 +704,12 @@ export async function fetchIntegrations(): Promise<void> {
 /** Retry a failed/blocked SoR write using the original approval (SPEC-014). */
 export const retryProjectionLive = (specId: string, artifactId: string, target: string) => governed("retry-projection", { specId, artifactId, target });
 
+/** Fetch the audit/activity trace for a spec (SPEC-015) into the store (read-only surface). */
+export async function fetchAuditRecords(specId: string, since?: number): Promise<void> {
+  const res = await liveRequest("get-audit-records", { specId, since });
+  if (res?.ok && res.result) store.set({ audit: res.result.records, auditTotal: res.result.total });
+}
+
 /** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
 export function reconnectLive(): void {
   stopLive();

@@ -389,6 +389,22 @@ public sealed class PrApproveCommand : AsyncCommand<PrApproveCommand.Settings>
         Ops.RunAsync(s, "pr.approve", new { sessionId = s.SessionId });
 }
 
+/// <summary>`arke audit` — the audit/activity trace for a spec (SPEC-015), newest-first, capped.</summary>
+public sealed class AuditCommand : AsyncCommand<AuditCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandOption("--spec <SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--since <EPOCH_MS>")]
+        public long? Since { get; set; }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "get-audit-records", new { specId = s.SpecId, since = s.Since });
+}
+
 /// <summary>`arke integrations status` — the per-project integrations registry (SPEC-014).</summary>
 public sealed class IntegrationsStatusCommand : AsyncCommand<IntegrationsStatusCommand.Settings>
 {
