@@ -334,6 +334,19 @@ public sealed class SpecListCommand : AsyncCommand<SpecListCommand.Settings>
         Ops.RunAsync(s, "spec.library", new { });
 }
 
+/// <summary>`arke spec fanout` — fan an approved spec's task list into concurrent worktree sessions (SPEC-009).</summary>
+public sealed class SpecFanoutCommand : AsyncCommand<SpecFanoutCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "spec.fanout", new { specId = s.SpecId });
+}
+
 /// <summary>`arke spec approve` — branch-guarded commit + status advance to in-review (SPEC-006).</summary>
 public sealed class SpecApproveCommand : AsyncCommand<SpecApproveCommand.Settings>
 {
