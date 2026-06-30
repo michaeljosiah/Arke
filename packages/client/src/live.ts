@@ -95,6 +95,26 @@ function applyEvent(ev: any) {
       specStatus.set(ev.specId, ev.status);
       const c = ensureCard(ev.specId, ev.specId, 'spec');
       c.col = deriveColumn(c, ev.status);
+      // SPEC-008: live-update the spec library badge for this spec (no reload).
+      store.set((s: any) => ({
+        specs: (s.specs || []).map((sp: any) => sp.specId === ev.specId ? { ...sp, status: ev.status } : sp),
+      }));
+      if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
+      break;
+    }
+    case 'spec.branch-mismatch': {
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `branch mismatch on ${ev.specId}: frontmatter '${ev.frontmatterBranch}' ≠ pushed '${ev.pushedBranch}'` } }));
+      rail('spec.branch-mismatch', `spec.branch-mismatch · ${ev.specId}`, ts);
+      break;
+    }
+    case 'spec.divergence-warning': {
+      store.set((s: any) => ({ specs: (s.specs || []).map((sp: any) => sp.specId === ev.specId ? { ...sp, hasDivergence: true } : sp) }));
+      rail('spec.divergence-warning', `spec.divergence-warning · ${ev.specId}`, ts);
+      break;
+    }
+    case 'projection.stale': {
+      store.set((s: any) => ({ projections: (s.projections || []).map((p: any) => (p.recordRef === ev.recordRef || p.target === ev.target) ? { ...p, stale: true } : p) }));
+      rail('projection.stale', `projection.stale · ${ev.specId} · ${ev.target}`, ts);
       break;
     }
     case 'session.status': {
@@ -388,6 +408,7 @@ function applySnapshot(snap: any) {
     projectState: snap?.projectState ?? null,
     missingSentinels: snap?.missingSentinels ?? [],
     tierDefaults: snap?.tierDefaults ?? null,
+    specs: Array.isArray(snap?.specs) ? snap.specs : [], // SPEC-008: live spec library for this project
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();

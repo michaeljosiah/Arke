@@ -56,6 +56,7 @@ app.Configure(config =>
     {
         b.SetDescription("Read, approve, and convene review on a working specification (SPEC-006).");
         b.AddCommand<SpecFileCommand>("file").WithDescription("Print the working specification file text + metadata.");
+        b.AddCommand<SpecListCommand>("list").WithDescription("List every specification in the active project with its status (SPEC-008).");
         b.AddCommand<SpecApproveCommand>("approve").WithDescription("Approve a draft: branch-guarded commit + advance to in-review.");
         b.AddCommand<SpecConveneCommand>("convene").WithDescription("Convene the multi-model review panel on the working draft.");
     });

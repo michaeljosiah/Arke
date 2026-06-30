@@ -15,8 +15,16 @@ import {
   type PermissionAck,
   type PermissionDecision,
   type ScaffoldStep,
+  type SpecStatus,
 } from "@arke/contracts";
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
+import {
+  flattenDeltaTags,
+  isSelfApproval,
+  mapWebhookEvent,
+  normativeHash,
+  parseCapabilities,
+} from "./spec-lifecycle.js";
 import {
   RegistryResolver,
   type RegistryConfig,
@@ -102,6 +110,25 @@ interface ReviewPanel {
   status: "running" | "complete" | "failed";
 }
 
+/** A spec library entry projected from a file's frontmatter + coordinator lifecycle state (SPEC-008). */
+export interface SpecLibraryRecord {
+  specId: string;
+  title: string;
+  status: SpecStatus;
+  branch: string;
+  capabilities: string[];
+  updatedAt: string;
+  prNumber?: number;
+  hasDivergence?: boolean;
+}
+
+/** Coordinator-side lifecycle state for a spec, driven by PR webhooks (SPEC-008). */
+interface SpecRecordState {
+  status: SpecStatus;
+  prNumber?: number;
+  normativeHash?: string;
+}
+
 export class ProjectContext {
   readonly projectId: string;
   readonly root: string;
@@ -123,6 +150,8 @@ export class ProjectContext {
   private readonly panels = new Map<string, ReviewPanel>();
   /** Reviewer session id → its panel + role, so the pump routes reviewer output to the panel. */
   private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
+  /** Spec lifecycle state by canonical specId, driven by PR webhooks (SPEC-008). */
+  private readonly specRecords = new Map<string, SpecRecordState>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
 
@@ -213,6 +242,7 @@ export class ProjectContext {
       missingSentinels: this.missingSentinels,
       tierDefaults: this.tierDefaults,
       ...(this.registrySnapshot ? { registry: this.registrySnapshot } : {}),
+      specs: this.specLibrary(), // SPEC-008: the spec library for this project
     };
   }
 
@@ -428,6 +458,150 @@ export class ProjectContext {
       ...(found.frontmatter.branch ? { branch: found.frontmatter.branch } : {}),
       ...(found.frontmatter.status ? { status: found.frontmatter.status } : {}),
     };
+  }
+
+  // ---- spec library + lifecycle (SPEC-008) --------------------------------
+
+  /**
+   * Build the spec library for this project (SPEC-008): one record per file under
+   * `docs/specifications/` (template + examples excluded), parsed from frontmatter. The file in git is
+   * the source of truth; `hasDivergence` flags a record whose frontmatter status differs from the
+   * status the read model believes (e.g. after a missed webhook).
+   */
+  specLibrary(): SpecLibraryRecord[] {
+    const records: SpecLibraryRecord[] = [];
+    const expectedDir = (() => {
+      try {
+        return resolve(realpathSync.native(this.root), "docs", "specifications");
+      } catch {
+        return resolve(this.root, "docs", "specifications");
+      }
+    })();
+    const dir = resolve(this.root, "docs", "specifications");
+    if (!existsSync(dir)) return records;
+    let realDir: string;
+    try {
+      realDir = realpathSync.native(dir);
+    } catch {
+      return records;
+    }
+    if (realDir !== expectedDir) return records; // same symlink guard as findSpecFile
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "specification.template.md");
+    } catch {
+      return records;
+    }
+    for (const f of entries) {
+      let real: string;
+      try {
+        real = realpathSync.native(resolve(dir, f));
+      } catch {
+        continue;
+      }
+      if (!isWithinRoot(realDir, real)) continue;
+      let text: string;
+      try {
+        text = readFileSync(real, "utf8");
+      } catch {
+        continue;
+      }
+      const { data } = parseFrontmatter(text);
+      const specId = data.spec_id ?? data.specId ?? f.replace(/\.md$/, "");
+      const frontStatus = (data.status ?? "draft") as SpecStatus;
+      const known = this.specRecords.get(specId);
+      records.push({
+        specId,
+        title: data.title ?? specId,
+        status: known?.status ?? frontStatus,
+        branch: data.branch ?? "",
+        capabilities: parseCapabilities(data),
+        updatedAt: data.updated ?? "",
+        ...(known?.prNumber !== undefined ? { prNumber: known.prNumber } : {}),
+        hasDivergence: known ? known.status !== frontStatus : false,
+      });
+    }
+    return records;
+  }
+
+  /**
+   * Apply a GitHub webhook event to this project's spec lifecycle (SPEC-008). Maps the event to a
+   * transition, enforces the second-human (anti-self-approval) gate at the coordinator, runs the
+   * merge-time delta flatten, and emits `spec.status` / governance trace. Returns a short outcome.
+   */
+  async handleWebhook(eventName: string, payload: unknown): Promise<{ applied: string; specId?: string }> {
+    const t = mapWebhookEvent(eventName, payload);
+    if (t.kind === "ignored") return { applied: `ignored: ${t.reason}` };
+    const found = this.findSpecByBranch(t.branch);
+    if (!found) return { applied: `no spec on branch '${t.branch}'` };
+    const specId = found.canonicalId;
+    const owner = found.frontmatter.owner;
+
+    const setStatus = async (status: SpecStatus, reason: string) => {
+      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), status, ...(("prNumber" in t) ? { prNumber: (t as any).prNumber } : {}) });
+      await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason } as DomainEvent);
+    };
+
+    switch (t.kind) {
+      case "opened":
+        await setStatus("in-review", "pr-opened");
+        return { applied: "in-review", specId };
+      case "reopened":
+        await setStatus("in-review", "pr-reopened");
+        return { applied: "in-review", specId };
+      case "closed-unmerged":
+        await setStatus("draft", "pr-closed");
+        return { applied: "draft", specId };
+      case "approved": {
+        if (isSelfApproval(t.approver, owner)) {
+          await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId, approver: t.approver, prNumber: t.prNumber });
+          return { applied: "self-approval-rejected", specId };
+        }
+        await setStatus("approved", "pr-approved");
+        // Record the normative baseline so a later material change can be detected.
+        this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? { status: "approved" }), status: "approved", normativeHash: normativeHash(found.text) });
+        return { applied: "approved", specId };
+      }
+      case "merged":
+        await this.flattenAndMerge(specId, t.branch);
+        await setStatus("merged", "pr-merged");
+        return { applied: "merged", specId };
+      case "force-push": {
+        if (found.frontmatter.branch && found.frontmatter.branch !== t.branch) {
+          await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.branch-mismatch", specId, frontmatterBranch: found.frontmatter.branch, pushedBranch: t.branch } as DomainEvent);
+        }
+        return { applied: "force-push-revalidated", specId };
+      }
+    }
+  }
+
+  /** Flatten delta tags on the working file at merge (idempotent), bracketed by trace markers. */
+  private async flattenAndMerge(specId: string, branch: string): Promise<void> {
+    const found = this.findSpecFile(specId);
+    if (!found) return;
+    await this.trace.write({ kind: "flatten.started", projectId: this.projectId, specId, branch });
+    const date = new Date().toISOString().slice(0, 10);
+    const { text, changed } = flattenDeltaTags(found.text, branch, date);
+    if (changed) {
+      try {
+        writeFileSync(found.absPath, text, "utf8");
+      } catch {
+        /* best-effort; the trace records the attempt */
+      }
+    }
+    await this.trace.write({ kind: "flatten.complete", projectId: this.projectId, specId, branch, changed });
+  }
+
+  /** Find the spec file whose frontmatter `branch` matches (for webhook routing by branch). */
+  private findSpecByBranch(branch: string): { canonicalId: string; text: string; frontmatter: Record<string, string>; absPath: string } | null {
+    for (const rec of this.specLibrary()) {
+      if (rec.branch === branch) {
+        const found = this.findSpecFile(rec.specId);
+        if (found) return found;
+      }
+    }
+    return null;
   }
 
   /**
@@ -940,6 +1114,11 @@ export class ProjectContext {
         return this.registrySnapshot;
       case "spec.file":
         return this.readSpecFile(String(a.specId ?? ""));
+      case "spec.library":
+        return this.specLibrary(); // SPEC-008: every spec in the active project with status
+      case "spec.webhook":
+        // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
+        return this.handleWebhook(String(a.eventName ?? ""), a.payload);
       case "approveDraft":
         return this.approveDraft(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "convenePanel":
