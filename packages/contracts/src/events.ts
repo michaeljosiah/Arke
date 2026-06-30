@@ -65,6 +65,39 @@ export const SpecBranchMismatchEvent = base.extend({
   pushedBranch: z.string(),
 });
 
+/** SPEC-013: the generation agent proposed downstream artefacts from an approved spec (preview, no write). */
+export const GenerationProposedEvent = base.extend({
+  type: z.literal("generation.proposed"),
+  specId: z.string(),
+  sessionId: z.string(), // doubles as proposalId — carried on every decision command
+  artifacts: z.array(
+    z.object({
+      id: z.string(),
+      target: z.enum(["docs", "tests", "ticket", "tracking"]),
+      title: z.string(),
+      content: z.string(),
+      sorTarget: z.enum(["jira", "azure-devops", "github"]).optional(),
+      invalid: z.string().optional(),
+    }),
+  ),
+});
+
+/** SPEC-013: a human decided on a generation proposal (approve subset / reject). */
+export const GenerationDecidedEvent = base.extend({
+  type: z.literal("generation.decided"),
+  specId: z.string(),
+  sessionId: z.string(), // proposalId anchor
+  decision: z.enum(["approved", "rejected"]),
+  approvedArtifactIds: z.array(z.string()).optional(),
+});
+
+/** SPEC-013: generation could not produce a usable proposal (parse error / timeout). */
+export const GenerationErrorEvent = base.extend({
+  type: z.literal("generation.error"),
+  specId: z.string(),
+  reason: z.string(),
+});
+
 /** SPEC-011: an agent asks the human a structured question mid-run (maps to OpenCode `question.asked`). */
 export const ElicitationAskedEvent = base.extend({
   type: z.literal("elicitation.asked"),
@@ -367,6 +400,9 @@ export const DomainEvent = z.discriminatedUnion("type", [
   ElicitationAskedEvent,
   ElicitationRepliedEvent,
   ElicitationRejectedEvent,
+  GenerationProposedEvent,
+  GenerationDecidedEvent,
+  GenerationErrorEvent,
   SessionStatusEvent,
   TodoUpdatedEvent,
   DiffFinalizedEvent,

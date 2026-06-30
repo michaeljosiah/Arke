@@ -52,6 +52,15 @@ import {
   validateReviewers,
   type ReviewerConfig,
 } from "./review-panel.js";
+import {
+  DEFAULT_GENERATION_TIMEOUT_MS,
+  buildGenerationPrompt,
+  parseArtifacts,
+  resolveApproval,
+  specContentHash,
+  type ArtifactEdit,
+  type ArtifactProposal,
+} from "./generation.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import type { Trace } from "./trace.js";
@@ -164,6 +173,10 @@ export class ProjectContext {
   private readonly specRecords = new Map<string, SpecRecordState>();
   /** Sessions whose diff a human has approved for PR (SPEC-011 diff-gate; idempotency guard). */
   private readonly prApproved = new Set<string>();
+  /** Generation proposals by specId (SPEC-013); the buffered, pre-write proposal awaiting a decision. */
+  private readonly generationProposals = new Map<string, { sessionId: string; artifacts: ArtifactProposal[]; specContentHash: string; status: "generating" | "pending-review" }>();
+  /** generation sessionId → specId, so the agent's completed turn is routed back to its proposal. */
+  private readonly generationSessions = new Map<string, string>();
   /** Durable fan-out records for restart idempotency (SPEC-009). */
   private fanoutStore?: FanOutStore;
   /** Per-spec queue of task commands held back by the concurrency cap (SPEC-009). */
@@ -613,6 +626,7 @@ export class ProjectContext {
         await setStatus("approved", "pr-approved", { normativeHash: normativeHash(found.text) });
         this.fanoutHalted.delete(specId);
         void this.fanOut(specId); // SPEC-009: fan the task list out concurrently (non-blocking)
+        void this.generate(specId); // SPEC-013: propose downstream artefacts from the approved spec
         return { applied: "approved", specId };
       }
       case "merged":
@@ -725,6 +739,117 @@ export class ProjectContext {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  // ---- generation workspace: propose → decide → execute (SPEC-013) --------
+
+  /**
+   * Dispatch the generation agent for an approved spec (SPEC-013). Idempotent: a duplicate trigger
+   * while a generation session is live is a no-op. The agent is given ONLY the canonical spec markdown
+   * (the sole generation input). A timeout surfaces a `generation.error` so the workspace never hangs.
+   */
+  async generate(specId: string): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { ok: false, error: "spec not found" };
+    const cid = found.canonicalId;
+    const existing = this.generationProposals.get(cid);
+    if (existing?.status === "generating") return { ok: true, sessionId: existing.sessionId }; // duplicate → no-op
+    // Claim the slot SYNCHRONOUSLY (before the createSession await) so a concurrent generate() for the
+    // same spec sees `generating` and no-ops — closing the TOCTOU race (single live session invariant).
+    this.generationProposals.set(cid, { sessionId: "", artifacts: [], specContentHash: specContentHash(found.text), status: "generating" });
+    // Superseding a prior pending-review proposal: release its leaked session→spec mapping.
+    if (existing) for (const [sid, owner] of this.generationSessions) if (owner === cid) this.generationSessions.delete(sid);
+    const ref = await this.adapter.createSession({ specId: cid });
+    this.generationSessions.set(ref.sessionId, cid);
+    this.generationProposals.set(cid, { sessionId: ref.sessionId, artifacts: [], specContentHash: specContentHash(found.text), status: "generating" });
+    await this.trace.write({ kind: "generation.started", projectId: this.projectId, specId: cid, sessionId: ref.sessionId });
+    await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: buildGenerationPrompt(found.text) }] });
+    const timeoutMs = Number(process.env.ARKE_GENERATION_TIMEOUT_MS) || DEFAULT_GENERATION_TIMEOUT_MS;
+    const timer = setTimeout(() => void this.failGeneration(cid, ref.sessionId, "generation timed out"), timeoutMs);
+    timer.unref?.();
+    return { ok: true, sessionId: ref.sessionId };
+  }
+
+  /** The generation agent's completed turn: parse artefacts → buffer + emit proposed (or error). */
+  private async ingestGeneration(sessionId: string, text: string): Promise<void> {
+    const cid = this.generationSessions.get(sessionId);
+    if (!cid) return;
+    const proposal = this.generationProposals.get(cid);
+    if (!proposal || proposal.sessionId !== sessionId || proposal.status !== "generating") return;
+    const artifacts = parseArtifacts(text);
+    if (artifacts.length === 0) {
+      await this.failGeneration(cid, sessionId, "could not parse agent output");
+      return;
+    }
+    proposal.artifacts = artifacts;
+    proposal.status = "pending-review";
+    await this.trace.write({ kind: "generation.proposed", projectId: this.projectId, specId: cid, sessionId, count: artifacts.length });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "generation.proposed", specId: cid, sessionId, artifacts } as DomainEvent);
+  }
+
+  /** Surface a generation failure (parse/timeout) and clear the in-flight proposal. */
+  private async failGeneration(cid: string, sessionId: string, reason: string): Promise<void> {
+    const p = this.generationProposals.get(cid);
+    if (!p || p.sessionId !== sessionId || p.status !== "generating") return; // already resolved
+    this.generationProposals.delete(cid);
+    this.generationSessions.delete(sessionId);
+    await this.trace.write({ kind: "generation.error", projectId: this.projectId, specId: cid, sessionId, reason });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "generation.error", specId: cid, reason } as DomainEvent);
+  }
+
+  /**
+   * Decide on a generation proposal (SPEC-013). The `proposalId` MUST match the current pending
+   * proposal's sessionId (stale/mismatched decisions are refused). Approve resolves the final
+   * artefacts (partial selection + human edits), records the full decision in the trace BEFORE any
+   * write, then fans out. Nothing is written before this approval.
+   */
+  async decideGeneration(
+    specId: string,
+    proposalId: string,
+    decision: "approved" | "rejected",
+    approvedArtifactIds?: string[],
+    edits?: ArtifactEdit[],
+  ): Promise<{ ok: boolean; written?: number; error?: string }> {
+    // Resolve the proposal by the specId the client sent (the canonical id carried on generation.proposed)
+    // first, so a decision still lands even if the spec file was moved/deleted mid-flight; fall back to
+    // the file's canonical id only if the direct key misses.
+    const found = this.findSpecFile(specId);
+    const cid = this.generationProposals.has(specId) ? specId : found?.canonicalId ?? specId;
+    const proposal = this.generationProposals.get(cid);
+    if (!proposal || proposal.status !== "pending-review") return { ok: false, error: "no pending proposal" };
+    if (proposal.sessionId !== proposalId) return { ok: false, error: "stale proposalId — proposal was superseded" };
+
+    if (decision === "rejected") {
+      this.generationProposals.delete(cid);
+      this.generationSessions.delete(proposal.sessionId);
+      await this.trace.write({ kind: "generation.decision", projectId: this.projectId, specId: cid, sessionId: proposalId, decision: "rejected" });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "generation.decided", specId: cid, sessionId: proposalId, decision: "rejected" } as DomainEvent);
+      return { ok: true, written: 0 };
+    }
+
+    const { artifacts, error } = resolveApproval(proposal.artifacts, approvedArtifactIds, edits);
+    if (error) return { ok: false, error };
+    // Trace-BEFORE-write (SPEC-013): the durable proof of intent + recovery anchor. Records the final,
+    // human-reviewed content for each approved artefact. If this throws, no write is attempted.
+    await this.trace.write({
+      kind: "generation.decision",
+      projectId: this.projectId,
+      specId: cid,
+      sessionId: proposalId,
+      decision: "approved",
+      approvedArtifactIds: artifacts.map((a) => a.id),
+      finalContent: artifacts.map((a) => ({ id: a.id, target: a.target, title: a.title, content: a.content, ...(a.sorTarget ? { sorTarget: a.sorTarget } : {}) })),
+    });
+    this.generationProposals.delete(cid);
+    this.generationSessions.delete(proposal.sessionId);
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "generation.decided", specId: cid, sessionId: proposalId, decision: "approved", approvedArtifactIds: artifacts.map((a) => a.id) } as DomainEvent);
+    // Fan-out: SoR-targeted artefacts are handed to SPEC-014's deterministic projection (a trace event
+    // it consumes); local docs/tests would be written via a harness write session (deferred to SPEC-014
+    // wiring). Per-artefact completion is traced.
+    for (const a of artifacts) {
+      await this.trace.write({ kind: a.sorTarget ? "projection.write" : "artifact.write", projectId: this.projectId, specId: cid, artifactId: a.id, target: a.target, ...(a.sorTarget ? { sorTarget: a.sorTarget } : {}) });
+    }
+    return { ok: true, written: artifacts.length };
   }
 
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
@@ -1365,6 +1490,12 @@ export class ProjectContext {
         return this.decideElicitation("reply", String(a.sessionId ?? ""), String(a.questionId ?? ""), a.answer != null ? String(a.answer) : undefined);
       case "elicitation.reject":
         return this.decideElicitation("reject", String(a.sessionId ?? ""), String(a.questionId ?? ""));
+      case "spec.generate": // SPEC-013: trigger/regenerate downstream artefacts
+        return this.generate(String(a.specId ?? ""));
+      case "generation.approve":
+        return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "approved", Array.isArray(a.approvedArtifactIds) ? (a.approvedArtifactIds as string[]) : undefined, Array.isArray(a.edits) ? (a.edits as ArtifactEdit[]) : undefined);
+      case "generation.reject":
+        return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "rejected");
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);
@@ -1620,6 +1751,7 @@ export class ProjectContext {
       await this.emit(event);
       await this.observeReviewerEvent(event);
       await this.observeTaskCompletion(event); // SPEC-009: drain the fan-out queue on task completion
+      await this.observeGeneration(event); // SPEC-013: ingest the generation agent's proposal
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
@@ -1680,6 +1812,16 @@ export class ProjectContext {
     }
     this.taskSessions.delete(event.sessionId);
     await this.drainFanOut(link.specId);
+  }
+
+  /** Route a generation session's completed turn (or error) into its proposal (SPEC-013). */
+  private async observeGeneration(event: DomainEvent): Promise<void> {
+    if (!("sessionId" in event)) return;
+    const sid = (event as { sessionId: string }).sessionId;
+    const cid = this.generationSessions.get(sid);
+    if (!cid) return;
+    if (event.type === "message.updated" && !event.isStreaming) await this.ingestGeneration(sid, event.text);
+    else if (event.type === "session.status" && event.status === "error") await this.failGeneration(cid, sid, "generation session reported error");
   }
 
   /** Stamp ingest seq + ts + projectId, fold into the read model, trace (before push), publish. */

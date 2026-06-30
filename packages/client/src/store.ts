@@ -133,6 +133,8 @@ export const store = createStore({
   reviewedSpecs: [],
   // Pending agent elicitation (SPEC-011): a structured question overlay for the active session.
   elicitation: null,
+  // Live generation proposal (SPEC-013): the agent's pre-write artefacts awaiting review.
+  generation: null,
   permission: null,
   entryFolder: null,
   theme: 'light',

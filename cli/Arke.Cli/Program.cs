@@ -37,6 +37,12 @@ app.Configure(config =>
         b.SetDescription("Diff-review gate (SPEC-011).");
         b.AddCommand<PrApproveCommand>("approve").WithDescription("Approve a session's diff so the coordinator opens its PR.");
     });
+    config.AddBranch("generation", b =>
+    {
+        b.SetDescription("Generation workspace decisions (SPEC-013).");
+        b.AddCommand<GenerationApproveCommand>("approve").WithDescription("Approve a generation proposal --proposal <id>.");
+        b.AddCommand<GenerationRejectCommand>("reject").WithDescription("Reject a generation proposal --proposal <id>.");
+    });
     config.AddCommand<PromptCommand>("prompt").WithDescription("Send (or --async dispatch) a prompt to a session as an agent role at a tier.");
     config.AddCommand<WatchCommand>("watch").WithDescription("Stream normalised domain events as NDJSON.");
     config.AddCommand<TodosCommand>("todos").WithDescription("Read a session's todo list.");
@@ -66,6 +72,7 @@ app.Configure(config =>
         b.AddCommand<SpecListCommand>("list").WithDescription("List every specification in the active project with its status (SPEC-008).");
         b.AddCommand<SpecFanoutCommand>("fanout").WithDescription("Fan an approved spec's tasks into concurrent worktree sessions (SPEC-009).");
         b.AddCommand<SpecPromoteCommand>("promote").WithDescription("Promote a draft to in-review — a human board correction (SPEC-010).");
+        b.AddCommand<SpecGenerateCommand>("generate").WithDescription("Propose downstream artefacts from an approved spec (SPEC-013).");
         b.AddCommand<SpecApproveCommand>("approve").WithDescription("Approve a draft: branch-guarded commit + advance to in-review.");
         b.AddCommand<SpecConveneCommand>("convene").WithDescription("Convene the multi-model review panel on the working draft.");
     });
