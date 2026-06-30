@@ -46,7 +46,10 @@ function BoardCard({ c }: any) {
   const promote = async (ev: any) => {
     ev.stopPropagation();
     const res = await promoteSpecLive(c.specId || c.id);
-    if (!res?.ok && res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `promote failed — ${res.error}` } }));
+    // Two failure shapes: an offline refusal resolves `{ ok:false, error }` directly, while a
+    // server refusal is the WS frame `{ ok:true, result:{ ok:false, error } }` — surface either.
+    const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+    if (err) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `promote failed — ${err}` } }));
   };
   return e('div', { className: 'so-enter', onClick: open, style: { cursor: 'pointer', position: 'relative' } },
     showBar ? e('div', { style: { position: 'absolute', left: 11, right: 11, top: 0, height: 2, background: 'var(--secondary)', borderRadius: 999, overflow: 'hidden', zIndex: 2 } },
