@@ -20,6 +20,7 @@ export const Capability = z.enum([
   "permissions", // respondToPermission()
   "commands", // runCommand()
   "models", // listModels() — the backend exposes a model catalog (SPEC-005)
+  "revert", // revert()/unrevert() — git-checkpoint rescue (SPEC-011)
 ]);
 export type Capability = z.infer<typeof Capability>;
 
@@ -198,4 +199,10 @@ export interface HarnessAdapter {
    */
   respondToPermission?(decision: PermissionDecision): Promise<PermissionAck>;
   runCommand?(ref: SessionRef, command: string, args?: string[]): Promise<void>;
+
+  // ---- rescue (capability: revert, SPEC-011) ----
+  /** Roll a session back to the git checkpoint before `messageId`'s turn. */
+  revert?(ref: SessionRef, messageId: string): Promise<void>;
+  /** Undo the most recent revert. */
+  unrevert?(ref: SessionRef): Promise<void>;
 }

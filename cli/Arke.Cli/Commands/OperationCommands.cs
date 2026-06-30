@@ -347,6 +347,48 @@ public sealed class SpecFanoutCommand : AsyncCommand<SpecFanoutCommand.Settings>
         Ops.RunAsync(s, "spec.fanout", new { specId = s.SpecId });
 }
 
+/// <summary>`arke session revert` — roll a session back to a checkpoint (SPEC-011 rescue).</summary>
+public sealed class SessionRevertCommand : AsyncCommand<SessionRevertCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SESSION_ID>")]
+        public string SessionId { get; set; } = "";
+
+        [CommandOption("--message <MESSAGE_ID>")]
+        public string MessageId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "revert", new { sessionId = s.SessionId, messageId = s.MessageId });
+}
+
+/// <summary>`arke session unrevert` — undo the most recent revert (SPEC-011 rescue).</summary>
+public sealed class SessionUnrevertCommand : AsyncCommand<SessionUnrevertCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SESSION_ID>")]
+        public string SessionId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "unrevert", new { sessionId = s.SessionId });
+}
+
+/// <summary>`arke pr approve` — approve a session's diff so the coordinator opens its PR (SPEC-011 gate).</summary>
+public sealed class PrApproveCommand : AsyncCommand<PrApproveCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SESSION_ID>")]
+        public string SessionId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "pr.approve", new { sessionId = s.SessionId });
+}
+
 /// <summary>`arke spec promote` — human board correction: advance a draft to in-review (SPEC-010).</summary>
 public sealed class SpecPromoteCommand : AsyncCommand<SpecPromoteCommand.Settings>
 {

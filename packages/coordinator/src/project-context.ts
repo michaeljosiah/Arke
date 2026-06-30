@@ -162,6 +162,8 @@ export class ProjectContext {
   private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
   /** Spec lifecycle state by canonical specId, driven by PR webhooks (SPEC-008). */
   private readonly specRecords = new Map<string, SpecRecordState>();
+  /** Sessions whose diff a human has approved for PR (SPEC-011 diff-gate; idempotency guard). */
+  private readonly prApproved = new Set<string>();
   /** Durable fan-out records for restart idempotency (SPEC-009). */
   private fanoutStore?: FanOutStore;
   /** Per-spec queue of task commands held back by the concurrency cap (SPEC-009). */
@@ -677,6 +679,54 @@ export class ProjectContext {
     return { ok: true, specId: cid, status: "in-review" };
   }
 
+  // ---- session detail: rescue / steering / diff-gate (SPEC-011) -----------
+
+  /** True when a session exists in the read model (the ownership guard — not specId truthiness). */
+  private sessionExists(sessionId: string): boolean {
+    return this.read.snapshot().some((c) => c.id === sessionId);
+  }
+
+  /** `revert` / `unrevert` (SPEC-011) — git-checkpoint rescue, routed to the adapter, ownership-checked. */
+  private async rescue(verb: "revert" | "unrevert", sessionId: string, messageId?: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.sessionExists(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (verb === "revert" && !messageId) return { ok: false, error: "revert requires a target messageId (checkpoint)" };
+    if (!this.adapter.capabilities().has("revert") || !this.adapter[verb]) {
+      return { ok: false, error: `harness does not support ${verb}` };
+    }
+    await this.trace.write({ kind: "client.request", projectId: this.projectId, verb, sessionId, ...(messageId ? { messageId } : {}) });
+    try {
+      if (verb === "revert") await this.adapter.revert!({ sessionId }, messageId!);
+      else await this.adapter.unrevert!({ sessionId });
+      return { ok: true };
+    } catch (err) {
+      // A transient rescue failure must NOT corrupt the card's real status — surface it in the
+      // response only; the harness will report the true status via the event stream.
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** `pr.approve` (SPEC-011) — the diff-review gate. Idempotent per session: a second approve is a no-op. */
+  private async approvePr(sessionId: string): Promise<{ ok: boolean; opened: boolean; error?: string }> {
+    if (!this.sessionExists(sessionId)) return { ok: false, opened: false, error: `unknown session '${sessionId}'` };
+    if (this.prApproved.has(sessionId)) return { ok: true, opened: false }; // already approved → no double PR
+    this.prApproved.add(sessionId);
+    await this.trace.write({ kind: "client.request", projectId: this.projectId, verb: "pr.approve", sessionId });
+    return { ok: true, opened: true };
+  }
+
+  /** `diff.refresh` (SPEC-011) — re-fetch the diff via the adapter and re-emit `diff.finalized`. */
+  private async refreshDiff(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.sessionExists(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (!this.adapter.getDiff) return { ok: false, error: "harness does not support diff" };
+    try {
+      const d = await this.adapter.getDiff({ sessionId });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "diff.finalized", sessionId, added: d.added, removed: d.removed, files: d.files } as DomainEvent);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
 
   /**
@@ -1018,9 +1068,11 @@ export class ProjectContext {
    */
   private async reconstructReviewGate(): Promise<void> {
     // Read through the Trace abstraction (the single owner of the path/format) rather than
-    // re-deriving the trace location here.
+    // re-deriving the trace location here. One pass rebuilds both the review gate (SPEC-007) and the
+    // pr.approve idempotency set (SPEC-011) so a restart can't re-open a second PR for a session.
     for (const rec of await this.trace.readAll()) {
       if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
+      if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
     }
   }
 
@@ -1301,6 +1353,14 @@ export class ProjectContext {
         return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
       case "spec.promote":
         return this.promoteSpec(String(a.specId ?? "")); // SPEC-010: human board correction draft→in-review
+      case "revert": // SPEC-011 rescue
+        return this.rescue("revert", String(a.sessionId ?? ""), a.messageId ? String(a.messageId) : undefined);
+      case "unrevert":
+        return this.rescue("unrevert", String(a.sessionId ?? ""));
+      case "pr.approve": // SPEC-011 diff-review gate (idempotent)
+        return this.approvePr(String(a.sessionId ?? ""));
+      case "diff.refresh":
+        return this.refreshDiff(String(a.sessionId ?? ""));
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);

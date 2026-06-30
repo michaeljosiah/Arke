@@ -29,6 +29,13 @@ app.Configure(config =>
         b.SetDescription("Create and list sessions.");
         b.AddCommand<SessionCreateCommand>("create").WithDescription("Create a session for a spec (or a child task with --parent).");
         b.AddCommand<SessionListCommand>("list").WithDescription("List current sessions/cards.");
+        b.AddCommand<SessionRevertCommand>("revert").WithDescription("Roll a session back to a checkpoint --message <id> (SPEC-011).");
+        b.AddCommand<SessionUnrevertCommand>("unrevert").WithDescription("Undo the most recent revert (SPEC-011).");
+    });
+    config.AddBranch("pr", b =>
+    {
+        b.SetDescription("Diff-review gate (SPEC-011).");
+        b.AddCommand<PrApproveCommand>("approve").WithDescription("Approve a session's diff so the coordinator opens its PR.");
     });
     config.AddCommand<PromptCommand>("prompt").WithDescription("Send (or --async dispatch) a prompt to a session as an agent role at a tier.");
     config.AddCommand<WatchCommand>("watch").WithDescription("Stream normalised domain events as NDJSON.");
