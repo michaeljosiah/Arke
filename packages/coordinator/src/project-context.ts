@@ -681,32 +681,33 @@ export class ProjectContext {
 
   // ---- session detail: rescue / steering / diff-gate (SPEC-011) -----------
 
-  /** The specId that owns a session, from the read model — or null if the session is unknown. */
-  private sessionOwner(sessionId: string): string | null {
-    return this.read.snapshot().find((c) => c.id === sessionId)?.specId ?? null;
+  /** True when a session exists in the read model (the ownership guard — not specId truthiness). */
+  private sessionExists(sessionId: string): boolean {
+    return this.read.snapshot().some((c) => c.id === sessionId);
   }
 
   /** `revert` / `unrevert` (SPEC-011) — git-checkpoint rescue, routed to the adapter, ownership-checked. */
   private async rescue(verb: "revert" | "unrevert", sessionId: string, messageId?: string): Promise<{ ok: boolean; error?: string }> {
-    if (!this.sessionOwner(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (!this.sessionExists(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (verb === "revert" && !messageId) return { ok: false, error: "revert requires a target messageId (checkpoint)" };
     if (!this.adapter.capabilities().has("revert") || !this.adapter[verb]) {
       return { ok: false, error: `harness does not support ${verb}` };
     }
     await this.trace.write({ kind: "client.request", projectId: this.projectId, verb, sessionId, ...(messageId ? { messageId } : {}) });
     try {
-      if (verb === "revert") await this.adapter.revert!({ sessionId }, String(messageId ?? ""));
+      if (verb === "revert") await this.adapter.revert!({ sessionId }, messageId!);
       else await this.adapter.unrevert!({ sessionId });
       return { ok: true };
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId, specId: this.sessionOwner(sessionId) ?? sessionId, kind: "task", status: "error" } as DomainEvent);
-      return { ok: false, error };
+      // A transient rescue failure must NOT corrupt the card's real status — surface it in the
+      // response only; the harness will report the true status via the event stream.
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
   /** `pr.approve` (SPEC-011) — the diff-review gate. Idempotent per session: a second approve is a no-op. */
   private async approvePr(sessionId: string): Promise<{ ok: boolean; opened: boolean; error?: string }> {
-    if (!this.sessionOwner(sessionId)) return { ok: false, opened: false, error: `unknown session '${sessionId}'` };
+    if (!this.sessionExists(sessionId)) return { ok: false, opened: false, error: `unknown session '${sessionId}'` };
     if (this.prApproved.has(sessionId)) return { ok: true, opened: false }; // already approved → no double PR
     this.prApproved.add(sessionId);
     await this.trace.write({ kind: "client.request", projectId: this.projectId, verb: "pr.approve", sessionId });
@@ -715,7 +716,7 @@ export class ProjectContext {
 
   /** `diff.refresh` (SPEC-011) — re-fetch the diff via the adapter and re-emit `diff.finalized`. */
   private async refreshDiff(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-    if (!this.sessionOwner(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (!this.sessionExists(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
     if (!this.adapter.getDiff) return { ok: false, error: "harness does not support diff" };
     try {
       const d = await this.adapter.getDiff({ sessionId });
@@ -1067,9 +1068,11 @@ export class ProjectContext {
    */
   private async reconstructReviewGate(): Promise<void> {
     // Read through the Trace abstraction (the single owner of the path/format) rather than
-    // re-deriving the trace location here.
+    // re-deriving the trace location here. One pass rebuilds both the review gate (SPEC-007) and the
+    // pr.approve idempotency set (SPEC-011) so a restart can't re-open a second PR for a session.
     for (const rec of await this.trace.readAll()) {
       if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
+      if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
     }
   }
 

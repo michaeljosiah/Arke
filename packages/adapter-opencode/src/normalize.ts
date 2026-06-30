@@ -54,9 +54,6 @@ const IGNORED_TYPES = new Set([
   "session.diff", // carries no counts; coordinator pairs with GET /diff → diff.finalized
   "message.part.delta", // incremental text; the message.part.updated snapshot carries the full text
   "message.removed",
-  "question.asked",
-  "question.replied",
-  "question.rejected",
   "file.edited",
   "file.watcher.updated",
   "lsp.client.diagnostics",
@@ -234,6 +231,37 @@ export function normalize(
           permissionId: permId,
           granted,
         },
+      };
+    }
+
+    // ---- agent elicitation (SPEC-011): OpenCode question.* → canonical elicitation.* ----
+    case "question.asked": {
+      const sid = sessionIdOf(p);
+      const qid = (p.question_id ?? p.questionID ?? p.id ?? p.request_id) as string | undefined;
+      if (!sid || !qid) return { kind: "dead-letter", reason: "question.asked without session/question id" };
+      const options = Array.isArray(p.options) ? (p.options as unknown[]).map(String) : undefined;
+      return {
+        kind: "event",
+        event: {
+          ...env,
+          type: "elicitation.asked",
+          sessionId: sid,
+          elicitationId: qid,
+          question: typeof p.question === "string" ? p.question : typeof p.text === "string" ? p.text : "Question",
+          ...(options ? { options } : {}),
+        },
+      };
+    }
+    case "question.replied":
+    case "question.rejected": {
+      const sid = sessionIdOf(p);
+      const qid = (p.question_id ?? p.questionID ?? p.id ?? p.request_id) as string | undefined;
+      if (!sid || !qid) return { kind: "dead-letter", reason: `${e.type} without session/question id` };
+      return {
+        kind: "event",
+        event: e.type === "question.replied"
+          ? { ...env, type: "elicitation.replied", sessionId: sid, elicitationId: qid, answer: typeof p.answer === "string" ? p.answer : String(p.response ?? "") }
+          : { ...env, type: "elicitation.rejected", sessionId: sid, elicitationId: qid },
       };
     }
 

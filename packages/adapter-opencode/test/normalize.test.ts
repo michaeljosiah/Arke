@@ -167,3 +167,26 @@ test("a mapped event missing required fields is dead-lettered", () => {
     "dead-letter",
   );
 });
+
+test("question.asked maps to elicitation.asked (SPEC-011)", () => {
+  const out = normalize(
+    { type: "question.asked", properties: { session_id: "ses_task", question_id: "q1", question: "Proceed?", options: ["yes", "no"] } },
+    lookup,
+    HARNESS,
+  );
+  assert.equal(out.kind, "event");
+  if (out.kind !== "event") return;
+  assert.equal(out.event.type, "elicitation.asked");
+  assert.equal((out.event as any).elicitationId, "q1");
+  assert.equal((out.event as any).question, "Proceed?");
+  assert.deepEqual((out.event as any).options, ["yes", "no"]);
+});
+
+test("question.replied / question.rejected map to elicitation.replied / .rejected (SPEC-011)", () => {
+  const replied = normalize({ type: "question.replied", properties: { session_id: "ses_task", question_id: "q1", answer: "yes" } }, lookup, HARNESS);
+  assert.equal(replied.kind, "event");
+  if (replied.kind === "event") assert.equal(replied.event.type, "elicitation.replied");
+  const rejected = normalize({ type: "question.rejected", properties: { session_id: "ses_task", question_id: "q1" } }, lookup, HARNESS);
+  assert.equal(rejected.kind, "event");
+  if (rejected.kind === "event") assert.equal(rejected.event.type, "elicitation.rejected");
+});

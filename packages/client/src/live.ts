@@ -640,9 +640,15 @@ export function liveSend(msg: unknown): void {
 }
 
 // ---- session detail: rescue / steering / diff-gate (SPEC-011) ----
-// All governed mutations: refused while offline (not queued), routed coordinator → adapter.
-const governed = (op: string, args: unknown) =>
-  isCoordinatorConnected() ? liveRequest(op, args, 30000) : Promise.resolve({ ok: false, error: "offline" });
+// All governed mutations: refused while offline (not queued), routed coordinator → adapter. Returns a
+// CONSISTENT business-result shape `{ ok, ... }` in every case (offline, transport failure, or the
+// coordinator's unwrapped result) so callers never have to special-case the WS frame vs the result.
+const governed = async (op: string, args: unknown): Promise<any> => {
+  if (!isCoordinatorConnected()) return { ok: false, error: "offline" };
+  const res = await liveRequest(op, args, 30000);
+  if (!res?.ok) return { ok: false, error: res?.error ?? "request failed" }; // transport-level failure
+  return res.result ?? { ok: true }; // the coordinator's business result
+};
 
 /** Approve a session's diff so the coordinator may open its PR (idempotent server-side). */
 export const approvePrLive = (sessionId: string) => governed("pr.approve", { sessionId });

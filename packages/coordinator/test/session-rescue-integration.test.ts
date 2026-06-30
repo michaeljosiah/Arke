@@ -133,6 +133,43 @@ test("revert is refused when the harness lacks the revert capability", async () 
   ws.close();
 });
 
+test("revert without a target messageId is refused (checkpoint integrity)", async () => {
+  const adapter = new RescueMockAdapter(true);
+  const { c, port } = await start(repo(), adapter);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "event" && f.event?.type === "session.status");
+  const res = await request("revert", { sessionId: "S1" }); // no messageId
+  assert.equal(res.result.ok, false);
+  assert.match(res.result.error, /messageId|checkpoint/i);
+  assert.equal(adapter.reverts.length, 0);
+  ws.close();
+});
+
+test("pr.approve idempotency survives a coordinator restart (durable via trace)", async () => {
+  const dir = repo();
+  const a1 = new RescueMockAdapter(true);
+  const c1 = await start(dir, a1);
+  const conn1 = connect(c1.port);
+  await conn1.ready;
+  await conn1.waitFor((f) => f.type === "event" && f.event?.type === "session.status");
+  assert.equal((await conn1.request("pr.approve", { sessionId: "S1" })).result.opened, true);
+  conn1.ws.close();
+  await c1.c.stop();
+
+  // Restart against the same project dir (same trace) — the approve must NOT re-open a second PR.
+  const a2 = new RescueMockAdapter(true);
+  const c2 = await start(dir, a2);
+  after(() => c2.c.stop());
+  const conn2 = connect(c2.port);
+  await conn2.ready;
+  await conn2.waitFor((f) => f.type === "event" && f.event?.type === "session.status");
+  const after2 = await conn2.request("pr.approve", { sessionId: "S1" });
+  assert.equal(after2.result.opened, false, "reconstructed from trace → no second PR after restart");
+  conn2.ws.close();
+});
+
 test("diff.refresh re-emits diff.finalized from the adapter", async () => {
   const adapter = new RescueMockAdapter(true);
   const { c, port } = await start(repo(), adapter);
