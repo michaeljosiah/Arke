@@ -2,7 +2,8 @@ import React from 'react';
 import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Tabs } from '../ds';
 import { Page, SectionHead } from '../utils';
-import { store, engine } from '../store';
+import { store, engine, useStore } from '../store';
+import { adjudicateIssueLive } from '../live';
 
 const e = React.createElement;
 
@@ -20,7 +21,121 @@ const FINDINGS = [
   { key: 'atomic-ok', section: 'Tasks', sev: 'agree', text: 'Tasks are atomic enough to dispatch independently.', by: ['C'] },
 ];
 
+/** The review panel renders live (wired to the coordinator) once a snapshot has arrived, else the demo. */
 export function Review() {
+  const live = useStore((s: any) => s.live);
+  return live ? e(LiveReview) : e(DemoReview);
+}
+
+const SEV_STATUS: Record<string, string> = { blocking: 'diverge', suggestion: 'agree', question: 'agree' };
+
+/**
+ * Live multi-model review panel (SPEC-007). Renders one column per reviewer with the issues each
+ * raised (severity-coded), surfaces cross-model agreement, and lets the human adjudicate — accept
+ * (routed to the spec author), send back, or dismiss. Approval stays gated in the cockpit until the
+ * panel completes; this screen drives the panel, the coordinator enforces the gate.
+ */
+function LiveReview() {
+  const { panel, cockpit } = useStore();
+  const [decisions, setDecisions] = React.useState({} as Record<string, string>);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [confirmNeeded, setConfirmNeeded] = React.useState({} as Record<string, boolean>);
+
+  if (!panel) {
+    return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 40 } },
+      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'No review panel running'),
+      e('p', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 460, textAlign: 'center', lineHeight: 1.5 } }, 'Convene a multi-model review from the authoring cockpit. Each reviewer critiques the same specification on a distinct model; their issues and agreement appear here for you to adjudicate.'),
+      e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring'));
+  }
+
+  const reviewers = panel.reviewers || [];
+  const agreed = new Set<string>(panel.agreedIds || []);
+  const running = panel.status === 'running';
+  const allIssues = reviewers.flatMap((r: any) => (r.issues || []).map((i: any) => ({ ...i, role: r.role })));
+  // Adjudicate the issues that matter: anything blocking, or anything two reviewers concur on.
+  const adjudicable = allIssues.filter((i: any) => i.severity === 'blocking' || agreed.has(i.issueId));
+  const seenAdj = new Set<string>();
+  const adjList = adjudicable.filter((i: any) => (seenAdj.has(i.issueId) ? false : (seenAdj.add(i.issueId), true)));
+
+  const decide = async (issueId: string, action: 'accepted' | 'dismissed' | 'sent-back') => {
+    setBusy(issueId);
+    const confirm = !!confirmNeeded[issueId];
+    const res = await adjudicateIssueLive(panel.panelId, issueId, action, undefined, confirm);
+    setBusy(null);
+    if (res?.ok && res.result?.staleWarning) {
+      setConfirmNeeded((x) => ({ ...x, [issueId]: true }));
+      return; // user must re-click to confirm routing against the changed section
+    }
+    if (res?.ok) {
+      setDecisions((x) => ({ ...x, [issueId]: action }));
+      setConfirmNeeded((x) => ({ ...x, [issueId]: false }));
+    } else if (res?.error) {
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `adjudication failed — ${res.error}` } }));
+    }
+  };
+
+  const acceptedCount = Object.values(decisions).filter((d) => d === 'accepted').length;
+
+  return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
+    e('div', { style: { padding: '18px var(--page-pad) 14px', borderBottom: '1px solid var(--border)' } },
+      e('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 16 } },
+        e('div', { style: { flex: 1 } },
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 6 } }, panel.specId + ' · Review panel'),
+          e('h1', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 21, fontWeight: 600, letterSpacing: '-0.02em' } }, 'Cross-model review, grounded in the source'),
+          e('p', { style: { margin: '6px 0 0', fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 640, lineHeight: 1.5 } }, 'Different models have different blind spots. Each reviewer critiques the same specification independently; agreement is surfaced, and accepted points are routed back to the spec author.')),
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+          e(Badge, { variant: running ? 'secondary' : panel.status === 'failed' ? 'outline' : 'default' }, running ? 'Reviewing…' : panel.status === 'failed' ? 'Panel failed' : 'Review complete'),
+          e(Button, { variant: 'outline', size: 'sm', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring'))),
+      panel.notice ? e(Callout, { variant: 'default', style: { marginTop: 12 } }, panel.notice) : null,
+      e('div', { style: { display: 'flex', gap: 10, marginTop: 14, alignItems: 'center' } },
+        e(Badge, { variant: 'secondary' }, allIssues.length + ' issues'),
+        e('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, e(StatusDot, { status: 'agree' }), e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } }, agreed.size + ' in agreement')),
+        e('div', { style: { flex: 1 } }),
+        acceptedCount ? e(Badge, { variant: 'default' }, acceptedCount + ' routed to authoring') : null)),
+    e('div', { style: { flex: 1, overflowY: 'auto', padding: 'var(--page-pad)' } },
+      e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(' + Math.max(reviewers.length, 1) + ', 1fr)', gap: 14, marginBottom: 18 } },
+        reviewers.map((r: any) => e(Card, { key: r.role, padding: 0 },
+          e('div', { style: { padding: '12px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 } },
+            e('div', { style: { flex: 1 } },
+              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600 } }, r.role),
+              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, r.model)),
+            r.status === 'error' ? e(Badge, { variant: 'outline' }, 'errored')
+              : r.status === 'running' ? e(StatusDot, { status: 'running', pulse: true })
+              : e('span', { style: { display: 'flex', color: 'var(--success)' } }, e(Icon, { name: 'check', size: 15 }))),
+          e('div', { style: { padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
+            r.status === 'error' ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--destructive)', padding: '6px 0' } }, r.error || 'reviewer failed')
+            : (r.issues || []).length === 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', padding: '6px 0' } }, r.status === 'running' ? 'reading the spec & source…' : 'no issues raised')
+            : (r.issues || []).map((f: any) => e('div', { key: f.issueId, style: { display: 'flex', gap: 8, alignItems: 'flex-start' } },
+                e('span', { style: { marginTop: 3, flex: 'none' } }, e(StatusDot, { status: agreed.has(f.issueId) ? 'agree' : SEV_STATUS[f.severity] || 'diverge' })),
+                e('div', null,
+                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, lineHeight: 1.5, color: 'var(--foreground)' } }, f.text),
+                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', marginTop: 2 } }, (f.section || '').toLowerCase() + ' · ' + f.severity + (agreed.has(f.issueId) ? ' · concurred' : '')))))),
+        ))),
+      adjList.length
+        ? e('div', null,
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, 'Adjudicate — the reviewers propose, the human decides'),
+            e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+              adjList.map((f: any) => {
+                const d = decisions[f.issueId];
+                const isBusy = busy === f.issueId;
+                const needsConfirm = confirmNeeded[f.issueId];
+                return e('div', { key: f.issueId, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1px solid ' + (d === 'accepted' ? 'var(--success)' : 'var(--border)'), borderRadius: 'var(--radius-lg)', background: d === 'accepted' ? 'var(--success-bg)' : d === 'dismissed' ? 'var(--muted)' : 'var(--card)', opacity: d === 'dismissed' ? 0.6 : 1 } },
+                  e(StatusDot, { status: agreed.has(f.issueId) ? 'agree' : 'diverge' }),
+                  e('div', { style: { flex: 1, minWidth: 0 } },
+                    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--foreground)' } }, f.text),
+                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', marginTop: 2 } }, (f.section || '').toLowerCase() + ' · ' + f.severity + ' · raised by ' + f.role + (agreed.has(f.issueId) ? ' (concurred)' : ''))),
+                  needsConfirm ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--destructive)' } }, 'section changed — confirm') : null,
+                  d ? e(Badge, { variant: d === 'accepted' ? 'default' : 'outline' }, d === 'accepted' ? 'routed' : d === 'sent-back' ? 'sent back' : 'dismissed')
+                    : e('div', { style: { display: 'flex', gap: 6 } },
+                        e(Button, { size: 'sm', disabled: isBusy, onClick: () => decide(f.issueId, 'accepted') }, needsConfirm ? 'Confirm accept' : isBusy ? '…' : 'Accept'),
+                        e(Button, { size: 'sm', variant: 'outline', disabled: isBusy, onClick: () => decide(f.issueId, 'sent-back') }, 'Send back'),
+                        e(Button, { size: 'sm', variant: 'ghost', disabled: isBusy, onClick: () => decide(f.issueId, 'dismissed') }, 'Dismiss')));
+              })))
+        : e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, running ? 'Waiting for reviewers to surface blocking or concurred issues…' : 'No blocking or concurred issues to adjudicate.')),
+  );
+}
+
+function DemoReview() {
   const [n, setN] = React.useState(3);
   const [running, setRunning] = React.useState(false);
   const [shown, setShown] = React.useState(FINDINGS.length);

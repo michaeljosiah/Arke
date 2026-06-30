@@ -56,7 +56,7 @@ function PreviewSection({ section, requirements }: any) {
       : e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--foreground)', whiteSpace: 'pre-wrap' } }, section.markdown));
 }
 
-function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: any) {
+function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving, reviewed }: any) {
   const fm = doc?.frontmatter ?? {};
   const chip = (t: string, v?: string) => v ? e('span', { key: t, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `${t}: ${v}`) : null;
   return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)', borderLeft: '1px solid var(--border)' } },
@@ -65,8 +65,11 @@ function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: a
       e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--foreground)' } }, file?.path ?? 'specification'),
       inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'writing…')) : null,
       refreshed ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'refreshed') : null,
-      e('span', { style: { marginLeft: 'auto' } },
-        e(Button, { size: 'sm', disabled: inFlight || approving || !file?.exists, iconLeft: e(Icon, { name: 'check', size: 14 }), onClick: onApprove }, approving ? 'Approving…' : 'Approve & persist'))),
+      e('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 } },
+        // The finalisation gate (SPEC-007) is enforced server-side; mirror it here so the button is
+        // disabled until a panel has completed for this spec, with a hint at why.
+        !reviewed && file?.exists ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' }, title: 'A multi-model review must complete before this draft can be approved.' }, 'review required') : null,
+        e(Button, { size: 'sm', disabled: inFlight || approving || !file?.exists || !reviewed, iconLeft: e(Icon, { name: 'check', size: 14 }), onClick: onApprove }, approving ? 'Approving…' : 'Approve & persist'))),
     e('div', { style: { padding: '9px 20px', background: 'var(--secondary)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 16, flexWrap: 'wrap' } },
       chip('spec', fm.spec_id || file?.specId), chip('status', fm.status || file?.status), chip('branch', fm.branch || file?.branch)),
     e('div', { style: { padding: '20px 22px', overflowY: 'auto', flex: 1 } },
@@ -77,7 +80,7 @@ function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving }: a
 }
 
 function LiveCockpit() {
-  const { activeSpec, activeCard, cards, cockpit } = useStore();
+  const { activeSpec, activeCard, cards, cockpit, reviewedSpecs } = useStore();
   // Resolve the spec to author: prefer the ACTIVE board/session card's spec when one is selected (so
   // "Go to authoring" from a card opens that card's spec, not a stale activeSpec), then activeSpec,
   // then the first spec card (PR #18 review rounds 5–6).
@@ -255,7 +258,7 @@ function LiveCockpit() {
   const convene = async () => {
     if (!specId) return;
     const res = await convenePanelLive(specId, file?.branch);
-    if (res?.ok) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `review requested for ${specId}` } }));
+    if (res?.ok) store.set((s: any) => ({ view: 'review', cockpit: { ...s.cockpit, notice: `review requested for ${specId}` } }));
     else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `convene failed — ${res.error}` } }));
   };
 
@@ -284,7 +287,7 @@ function LiveCockpit() {
           e('div', { style: { flex: 1 } }),
           e(Button, { size: 'sm', disabled: !specId || sending, onClick: () => void send() }, sending ? 'Sending…' : 'Send'))),
     ),
-    e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve }),
+    e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId) }),
   );
 }
 

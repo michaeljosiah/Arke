@@ -201,6 +201,80 @@ function applyEvent(ev: any) {
       rail('registry.warning', `registry.warning · ${ev.reason}${ev.detail ? ' · ' + ev.detail : ''}`, ts);
       break;
     }
+    case 'panel.started': {
+      // A multi-model review panel began (SPEC-007). `reviewers[].model` is a tier LABEL, never a
+      // vendor model id (SPEC-005). Replace any prior panel for this spec.
+      store.set({
+        panel: {
+          panelId: ev.panelId, specId: ev.specId, status: 'running',
+          reviewers: (ev.reviewers || []).map((r: any) => ({ role: r.role, model: r.model, status: 'running', issues: [] })),
+          agreedIds: [], agreed: [], notice: null,
+        },
+      });
+      rail('panel.started', `panel.started · ${ev.specId} · ${(ev.reviewers || []).length} reviewers`, ts);
+      break;
+    }
+    case 'panel.issue': {
+      updatePanel(ev.panelId, (p: any) => {
+        const r = p.reviewers.find((x: any) => x.role === ev.reviewerRole);
+        if (r && !r.issues.some((i: any) => i.issueId === ev.issueId)) {
+          r.issues = [...r.issues, { issueId: ev.issueId, section: ev.section, sectionHash: ev.sectionHash, text: ev.text, severity: ev.severity, decision: null }];
+        }
+      });
+      break;
+    }
+    case 'panel.agreed': {
+      updatePanel(ev.panelId, (p: any) => {
+        const ids = new Set([...(p.agreedIds || []), ...(ev.issueIds || [])]);
+        p.agreedIds = [...ids];
+        if (!(p.agreed || []).some((a: any) => a.section === ev.section && sameIds(a.issueIds, ev.issueIds)))
+          p.agreed = [...(p.agreed || []), { section: ev.section, issueIds: ev.issueIds || [] }];
+      });
+      rail('panel.agreed', `panel.agreed · ${ev.section} · ${(ev.issueIds || []).length} reviewers concur`, ts);
+      break;
+    }
+    case 'panel.reviewer-error': {
+      updatePanel(ev.panelId, (p: any) => {
+        const r = p.reviewers.find((x: any) => x.role === ev.reviewerRole);
+        if (r) { r.status = 'error'; r.error = ev.reason; }
+      });
+      rail('panel.reviewer-error', `panel.reviewer-error · ${ev.reviewerRole} · ${ev.reason}`, ts);
+      break;
+    }
+    case 'panel.complete': {
+      updatePanel(ev.panelId, (p: any) => {
+        p.status = ev.status;
+        for (const r of p.reviewers) if (r.status === 'running') r.status = 'done';
+      });
+      if (ev.status === 'complete') {
+        const sid = (store.get() as any).panel?.specId;
+        if (sid) store.set((s: any) => ({ reviewedSpecs: s.reviewedSpecs.includes(sid) ? s.reviewedSpecs : [...s.reviewedSpecs, sid] }));
+      }
+      rail('panel.complete', `panel.complete · ${ev.status} · ${ev.issueCount} issues`, ts);
+      break;
+    }
+    case 'panel.config-error': {
+      // The panel could not start (same-model pair, too few distinct capable models). Surface it on
+      // the panel projection if one exists, and always on the cockpit notice line.
+      store.set((s: any) => ({
+        cockpit: { ...s.cockpit, notice: `review panel could not start — ${ev.reason}` },
+        panel: s.panel && s.panel.specId === ev.specId ? { ...s.panel, status: 'failed', notice: ev.reason } : s.panel,
+      }));
+      rail('panel.config-error', `panel.config-error · ${ev.reason}`, ts);
+      break;
+    }
+    case 'panel.stale-file-warning': {
+      // Accepting an issue when the reviewed section changed since panel start needs confirmation.
+      updatePanel(ev.panelId, (p: any) => { p.notice = `the reviewed section changed since the panel ran — re-confirm to route issue ${ev.issueId}`; });
+      rail('panel.stale-file-warning', `panel.stale-file-warning · ${ev.specId} · ${ev.issueId}`, ts);
+      break;
+    }
+    case 'review.gate-failed': {
+      // The finalisation gate rejected an approve issued without a completed review (SPEC-007).
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval blocked — ${ev.reason}` } }));
+      rail('review.gate-failed', `review.gate-failed · ${ev.specId} · ${ev.reason}`, ts);
+      break;
+    }
     case 'harness.reachability': {
       // Per-endpoint probe result. Track each endpoint and recompute the aggregate (any reachable
       // → reachable) so a live "Retry connection" updates the gate without a reconnect (SPEC-004).
@@ -223,6 +297,20 @@ function applyEvent(ev: any) {
 
 function publish() {
   store.set({ cards: [...cards.values()] });
+}
+
+/** Immutably mutate the current panel projection if it matches `panelId`. */
+function updatePanel(panelId: string, fn: (p: any) => void) {
+  store.set((s: any) => {
+    if (!s.panel || s.panel.panelId !== panelId) return {};
+    const next = { ...s.panel, reviewers: s.panel.reviewers.map((r: any) => ({ ...r })) };
+    fn(next);
+    return { panel: next };
+  });
+}
+
+function sameIds(a: string[] = [], b: string[] = []): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ---- registry projection (SPEC-005) ----
@@ -496,6 +584,18 @@ export function convenePanelLive(specId: string, branch?: string): Promise<any> 
     return Promise.resolve({ ok: false, error: 'offline — reconnect to convene a review' });
   }
   return liveRequest('convenePanel', { specId, branch });
+}
+
+/**
+ * Adjudicate a review issue (SPEC-007): accept (route to the spec author), dismiss, or send back.
+ * A governed action like approve/convene — refused while offline rather than queued. Pass
+ * `confirm: true` to override a stale-file warning when the reviewed section changed since the panel ran.
+ */
+export function adjudicateIssueLive(panelId: string, issueId: string, action: 'accepted' | 'dismissed' | 'sent-back', rationale?: string, confirm?: boolean): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to adjudicate' });
+  }
+  return liveRequest('adjudicateIssue', { panelId, issueId, action, rationale, confirm }, 30000);
 }
 
 export function stopLive(): void {
