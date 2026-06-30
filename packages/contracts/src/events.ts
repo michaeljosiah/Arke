@@ -233,6 +233,80 @@ export const SpecApprovalFailedEvent = base.extend({
   reason: z.string(),
 });
 
+// ---- multi-model review panel (SPEC-007) -----------------------------------
+
+/** Severity a reviewer assigns to an issue. */
+export const ReviewSeverity = z.enum(["blocking", "suggestion", "question"]);
+export type ReviewSeverity = z.infer<typeof ReviewSeverity>;
+
+/** A panel started: the reviewers and the model LABEL each runs on (never a vendor id — SPEC-005). */
+export const PanelStartedEvent = base.extend({
+  type: z.literal("panel.started"),
+  panelId: z.string(),
+  specId: z.string(),
+  reviewers: z.array(z.object({ role: z.string(), model: z.string() })),
+});
+
+/** One issue a reviewer raised, anchored to a spec section (by key + content hash). */
+export const PanelIssueEvent = base.extend({
+  type: z.literal("panel.issue"),
+  panelId: z.string(),
+  issueId: z.string(),
+  reviewerRole: z.string(),
+  section: z.string(),
+  sectionHash: z.string(),
+  text: z.string(),
+  severity: ReviewSeverity,
+});
+
+/** Two or more reviewers raised substantially the same concern on the same section. */
+export const PanelAgreedEvent = base.extend({
+  type: z.literal("panel.agreed"),
+  panelId: z.string(),
+  issueIds: z.array(z.string()),
+  section: z.string(),
+});
+
+/** A panel finished: all reviewer sessions are done (or every one errored → failed). */
+export const PanelCompleteEvent = base.extend({
+  type: z.literal("panel.complete"),
+  panelId: z.string(),
+  status: z.enum(["complete", "failed"]),
+  issueCount: z.number().int().nonnegative(),
+  adjudicatedCount: z.number().int().nonnegative(),
+});
+
+/** One reviewer errored/timed out; the panel continues with the rest. */
+export const PanelReviewerErrorEvent = base.extend({
+  type: z.literal("panel.reviewer-error"),
+  panelId: z.string(),
+  reviewerRole: z.string(),
+  reason: z.string(),
+});
+
+/** A panel could not start: a same-model pair, or too few distinct capable models. */
+export const PanelConfigErrorEvent = base.extend({
+  type: z.literal("panel.config-error"),
+  panelId: z.string().optional(),
+  specId: z.string().optional(),
+  reason: z.string(),
+});
+
+/** On accept: the reviewed section changed since panel start — confirm before routing the critique. */
+export const PanelStaleFileWarningEvent = base.extend({
+  type: z.literal("panel.stale-file-warning"),
+  panelId: z.string(),
+  issueId: z.string(),
+  specId: z.string(),
+});
+
+/** The finalisation gate rejected an `approveDraft` issued without a completed review (SPEC-007). */
+export const ReviewGateFailedEvent = base.extend({
+  type: z.literal("review.gate-failed"),
+  specId: z.string(),
+  reason: z.string(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -251,6 +325,14 @@ export const DomainEvent = z.discriminatedUnion("type", [
   RegistryUpdatedEvent,
   RegistryWarningEvent,
   SpecApprovalFailedEvent,
+  PanelStartedEvent,
+  PanelIssueEvent,
+  PanelAgreedEvent,
+  PanelCompleteEvent,
+  PanelReviewerErrorEvent,
+  PanelConfigErrorEvent,
+  PanelStaleFileWarningEvent,
+  ReviewGateFailedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   DomainEvent,
@@ -25,6 +25,15 @@ import {
   type RegistryWarning,
   type RegistryWarningReason,
 } from "./registry.js";
+import {
+  ISSUE_EXTRACTION_PROMPT_VERSION,
+  buildReviewerPrompt,
+  detectAgreement,
+  parseReviewerIssues,
+  sectionHashOf,
+  validateReviewers,
+  type ReviewerConfig,
+} from "./review-panel.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import type { Trace } from "./trace.js";
@@ -60,6 +69,36 @@ export interface ProjectContextInit {
   probe?: HarnessReachabilityProbe;
 }
 
+/** In-memory state for one review panel (SPEC-007); adjudications are also written to the trace. */
+interface PanelIssueState {
+  issueId: string;
+  reviewerRole: string;
+  section: string;
+  sectionHash: string;
+  text: string;
+  severity: string;
+  adjudication?: "accepted" | "dismissed" | "sent-back";
+}
+interface PanelReviewerState {
+  role: string;
+  sessionId: string;
+  instanceId: string;
+  model: string;
+  label: string;
+  status: "running" | "done" | "error";
+}
+interface ReviewPanel {
+  panelId: string;
+  specId: string; // canonical
+  branch?: string;
+  startedAt: number;
+  requirementsSectionHash: string;
+  reviewers: PanelReviewerState[];
+  issues: PanelIssueState[];
+  agreedHashes: Set<string>;
+  status: "running" | "complete" | "failed";
+}
+
 export class ProjectContext {
   readonly projectId: string;
   readonly root: string;
@@ -77,6 +116,12 @@ export class ProjectContext {
   private registrySnapshot: RegistrySnapshot | null = null;
   /** Serialises approveDraft per project so two concurrent approvals can't race the commit/rollback. */
   private approvalInFlight = false;
+  /** Live review panels by id (SPEC-007); in-memory, durable adjudication via the trace. */
+  private readonly panels = new Map<string, ReviewPanel>();
+  /** Reviewer session id → its panel + role, so the pump routes reviewer output to the panel. */
+  private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
+  /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
+  private readonly completedReviews = new Set<string>();
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -124,6 +169,7 @@ export class ProjectContext {
   /** Classify the folder, register it as a recent, probe reachability, and start the pump if ready. */
   async start(): Promise<void> {
     this.classify();
+    this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -421,6 +467,14 @@ export class ProjectContext {
     if (current && current !== "draft") {
       return fail(`cannot approve: specification '${cid}' is '${current}', expected 'draft'`);
     }
+    // Finalisation gate (SPEC-007): a draft cannot be approved until at least one review panel has
+    // completed for it. Enforced server-side so a direct approveDraft (CLI/op) can't bypass the UI.
+    if (!this.completedReviews.has(cid)) {
+      const reason = "no completed review panel — convene and complete a review before approving";
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.gate-failed", specId: cid, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: false, reason: "review.gate-failed" });
+      throw new Error(reason);
+    }
     // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
     // while a spec-author/architect AUTHORING session for this spec is running — an unrelated
     // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7).
@@ -484,34 +538,243 @@ export class ProjectContext {
   }
 
   /**
-   * `convenePanel` — request a multi-model review of the working draft (SPEC-006). Passes a
-   * reference (`specId`/`branch`), never file content; the coordinator reads the authoritative file.
-   * The review panel itself is SPEC-007 (not yet implemented), so this records intent and acks.
+   * `convenePanel` — start a multi-model review of the working draft (SPEC-007). Validates the
+   * reviewer configuration against the registry (pairwise-distinct models, enough distinct capable
+   * models), dispatches each reviewer as a parallel read-only session, and emits `panel.started`.
+   * Passes a reference (`specId`/`branch`), never file content; the coordinator reads the file.
    */
-  private async convenePanel(specId: string, branch?: string): Promise<{ specId: string; branch?: string; convened: boolean; note: string }> {
+  private async convenePanel(
+    specId: string,
+    branch?: string,
+    reviewersArg?: ReviewerConfig[],
+  ): Promise<{ panelId: string; specId: string; branch?: string; convened: boolean; reviewers: Array<{ role: string; model: string }> }> {
     const found = this.findSpecFile(specId);
-    // No authoritative working draft → refuse, rather than acking a review of nothing (PR #18 review).
     if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
-    // A review needs something to review: require at least one requirement (SPEC-006) — mirrors the
-    // cockpit's disabled state so the CLI/op path can't convene an empty draft (PR #18 review round 6).
-    if (parseSpecDoc(found.text).requirements.length === 0) {
+    const doc = parseSpecDoc(found.text);
+    if (doc.requirements.length === 0) {
       throw new Error(`specification '${specId}' has no requirements yet — nothing to review`);
     }
     const fmBranch = found.frontmatter.branch;
-    // The frontmatter branch is the source of truth. A client-supplied branch that disagrees (a stale
-    // preview, or `--branch` on the CLI) is rejected rather than recorded against the wrong branch
-    // (PR #18 review). When no client branch is given, resolve from the spec file.
     if (branch && fmBranch && branch !== fmBranch) {
       throw new Error(`branch mismatch: client sent '${branch}' but spec '${specId}' is on '${fmBranch}'`);
     }
+    const cid = found.canonicalId;
     const resolvedBranch = fmBranch ?? branch;
-    await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId: found.canonicalId, branch: resolvedBranch ?? null });
+
+    // Validate reviewers against the registry (SPEC-007). Without a registry we can't guarantee
+    // distinct models, so refuse rather than run a panel with unverifiable independence.
+    if (!this.registryResolver) {
+      const reason = "no registry configured — cannot resolve distinct reviewer models";
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.config-error", specId: cid, reason } as DomainEvent);
+      throw new Error(reason);
+    }
+    const reviewers = reviewersArg && reviewersArg.length > 0 ? reviewersArg : [{ role: "reviewer-a" }, { role: "reviewer-b" }];
+    const validation = validateReviewers(this.registryResolver, reviewers);
+    if (!validation.ok) {
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.config-error", specId: cid, reason: validation.reason ?? "invalid reviewer configuration" } as DomainEvent);
+      throw new Error(validation.reason ?? "invalid reviewer configuration");
+    }
+
+    const panelId = `panel-${randomUUID()}`;
+    const requirementsSectionHash = sectionHashOf(doc.sections.find((s) => s.key === "requirements")?.markdown ?? "");
+    const grounding = this.groundingSummary();
+    const prompt = buildReviewerPrompt(found.text, grounding);
+    const panel: ReviewPanel = {
+      panelId,
+      specId: cid,
+      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
+      startedAt: Date.now(),
+      requirementsSectionHash,
+      reviewers: [],
+      issues: [],
+      agreedHashes: new Set(),
+      status: "running",
+    };
+
+    // Dispatch each reviewer as a parallel, read-only session (HarnessAdapter.dispatchAsync).
+    for (const r of validation.reviewers) {
+      const ref = await this.adapter.createSession({ specId: cid });
+      this.reviewerSessions.set(ref.sessionId, { panelId, role: r.role });
+      panel.reviewers.push({ role: r.role, sessionId: ref.sessionId, instanceId: r.instanceId, model: r.model, label: r.label, status: "running" });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: r.role, tier: "capable", parts: [{ type: "text", text: prompt }] });
+    }
+    this.panels.set(panelId, panel);
+
+    await this.trace.write({
+      kind: "panel.started",
+      projectId: this.projectId,
+      panelId,
+      specId: cid,
+      branch: resolvedBranch ?? null,
+      promptVersion: ISSUE_EXTRACTION_PROMPT_VERSION,
+      reviewers: panel.reviewers.map((r) => ({ role: r.role, instanceId: r.instanceId, model: r.model })), // host-side audit may include the model
+    });
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "panel.started",
+      panelId,
+      specId: cid,
+      reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })), // client sees the tier LABEL, never the vendor model id
+    } as DomainEvent);
+
     return {
-      specId: found.canonicalId, // canonical id even when the caller passed an alias (round 7)
+      panelId,
+      specId: cid,
       ...(resolvedBranch ? { branch: resolvedBranch } : {}),
       convened: true,
-      note: "review panel (SPEC-007) is not yet implemented; the request was recorded",
+      reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })),
     };
+  }
+
+  /**
+   * Rebuild the finalisation-gate state from the durable trace on startup (SPEC-007): the live panel
+   * view is in-memory and lost on restart, but every completed panel wrote a `review.complete` record,
+   * so the gate (which specs have a completed review) survives a coordinator restart.
+   */
+  private reconstructReviewGate(): void {
+    const tracePath = resolve(this.root, ".arke", "trace.ndjson");
+    if (!existsSync(tracePath)) return;
+    let lines: string[];
+    try {
+      lines = readFileSync(tracePath, "utf8").split("\n");
+    } catch {
+      return;
+    }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line) as { kind?: string; specId?: string };
+        if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
+      } catch {
+        /* skip malformed trace lines */
+      }
+    }
+  }
+
+  /** A short grounding summary for reviewers: the AGENTS.md head, if present (host-side, SPEC-007). */
+  private groundingSummary(): string {
+    try {
+      const agents = readFileSync(resolve(this.root, "AGENTS.md"), "utf8");
+      return agents.slice(0, 2000);
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Route a reviewer session's completed turn into its panel (SPEC-007): parse issues, emit
+   * `panel.issue` + any new `panel.agreed`, and complete the panel when every reviewer is done.
+   * Called from the pump for reviewer sessions only.
+   */
+  private async ingestReviewerMessage(sessionId: string, text: string): Promise<void> {
+    const link = this.reviewerSessions.get(sessionId);
+    if (!link) return;
+    const panel = this.panels.get(link.panelId);
+    if (!panel) return;
+    const reviewer = panel.reviewers.find((r) => r.sessionId === sessionId);
+    if (!reviewer || reviewer.status !== "running") return;
+
+    for (const parsed of parseReviewerIssues(text)) {
+      const issueId = `issue-${randomUUID()}`;
+      const sectionHash = sectionHashOf(parsed.section);
+      panel.issues.push({ issueId, reviewerRole: link.role, section: parsed.section, sectionHash, text: parsed.text, severity: parsed.severity });
+      await this.emit({
+        seq: 0, ts: 0, harness: this.adapter.id, type: "panel.issue",
+        panelId: panel.panelId, issueId, reviewerRole: link.role, section: parsed.section, sectionHash, text: parsed.text, severity: parsed.severity,
+      } as DomainEvent);
+    }
+    // Emit agreement for any newly-agreed section (deduped by section hash).
+    for (const group of detectAgreement(panel.issues)) {
+      if (panel.agreedHashes.has(group.sectionHash)) continue;
+      panel.agreedHashes.add(group.sectionHash);
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.agreed", panelId: panel.panelId, issueIds: group.issueIds, section: group.section } as DomainEvent);
+    }
+    reviewer.status = "done";
+    await this.maybeCompletePanel(panel);
+  }
+
+  /** Mark a reviewer errored and continue the panel; complete (failed) if all reviewers errored. */
+  private async failReviewer(sessionId: string, reason: string): Promise<void> {
+    const link = this.reviewerSessions.get(sessionId);
+    if (!link) return;
+    const panel = this.panels.get(link.panelId);
+    const reviewer = panel?.reviewers.find((r) => r.sessionId === sessionId);
+    if (!panel || !reviewer || reviewer.status !== "running") return;
+    reviewer.status = "error";
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.reviewer-error", panelId: panel.panelId, reviewerRole: link.role, reason } as DomainEvent);
+    await this.maybeCompletePanel(panel);
+  }
+
+  /** Complete a panel once no reviewer is still running; satisfy the review gate unless all errored. */
+  private async maybeCompletePanel(panel: ReviewPanel): Promise<void> {
+    if (panel.reviewers.some((r) => r.status === "running")) return;
+    const anySucceeded = panel.reviewers.some((r) => r.status === "done");
+    panel.status = anySucceeded ? "complete" : "failed";
+    for (const r of panel.reviewers) this.reviewerSessions.delete(r.sessionId);
+    if (panel.status === "complete") {
+      this.completedReviews.add(panel.specId); // satisfies the finalisation gate
+      await this.trace.write({ kind: "review.complete", projectId: this.projectId, specId: panel.specId, panelId: panel.panelId });
+    }
+    await this.emit({
+      seq: 0, ts: 0, harness: this.adapter.id, type: "panel.complete",
+      panelId: panel.panelId, status: panel.status, issueCount: panel.issues.length,
+      adjudicatedCount: panel.issues.filter((i) => i.adjudication).length,
+    } as DomainEvent);
+  }
+
+  /**
+   * `adjudicateIssue` — accept / dismiss / send-back one panel issue (SPEC-007). Accept routes the
+   * critique to the `spec-author` agent (after a stale-file check); all three are written to the
+   * trace. Returns `{ staleWarning: true }` when accept is blocked pending confirmation.
+   */
+  private async adjudicateIssue(
+    panelId: string,
+    issueId: string,
+    action: "accepted" | "dismissed" | "sent-back",
+    rationale?: string,
+    confirm?: boolean,
+  ): Promise<{ ok: boolean; staleWarning?: boolean }> {
+    const panel = this.panels.get(panelId);
+    if (!panel) throw new Error(`unknown panel '${panelId}'`);
+    const issue = panel.issues.find((i) => i.issueId === issueId);
+    if (!issue) throw new Error(`unknown issue '${issueId}' in panel '${panelId}'`);
+
+    if (action === "accepted") {
+      // Stale-file guard: if the Requirements section changed since panel start, warn + require
+      // confirmation before routing the critique to the authoring agent (SPEC-007).
+      const found = this.findSpecFile(panel.specId);
+      const currentHash = found ? sectionHashOf(parseSpecDoc(found.text).sections.find((s) => s.key === "requirements")?.markdown ?? "") : panel.requirementsSectionHash;
+      if (currentHash !== panel.requirementsSectionHash && !confirm) {
+        await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.stale-file-warning", panelId, issueId, specId: panel.specId } as DomainEvent);
+        return { ok: false, staleWarning: true };
+      }
+      // Route the accepted critique to the authoring agent — the singular write path (reviewers never
+      // write). Best-effort dispatch; the agent revises the section on the working file.
+      const session = await this.adapter.createSession({ specId: panel.specId });
+      await this.adapter.dispatchAsync({
+        sessionId: session.sessionId,
+        agent: "spec-author",
+        tier: "capable",
+        parts: [{ type: "text", text: `Apply this reviewer critique to the specification section "${issue.section}":\n\n${issue.text}` }],
+      });
+    }
+
+    issue.adjudication = action;
+    await this.trace.write({
+      kind: "review.adjudicate",
+      projectId: this.projectId,
+      panelId,
+      issueId,
+      specId: panel.specId,
+      section: issue.section,
+      sectionHash: issue.sectionHash,
+      reviewerRole: issue.reviewerRole,
+      action,
+      ...(rationale ? { rationale } : {}),
+    });
+    return { ok: true };
   }
 
   // ---- classification + reachability --------------------------------------
@@ -655,7 +918,24 @@ export class ProjectContext {
       case "approveDraft":
         return this.approveDraft(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "convenePanel":
-        return this.convenePanel(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
+        return this.convenePanel(
+          String(a.specId ?? ""),
+          a.branch ? String(a.branch) : undefined,
+          Array.isArray(a.reviewers) ? (a.reviewers as ReviewerConfig[]) : undefined,
+        );
+      case "adjudicateIssue": {
+        const action = String(a.action ?? "");
+        if (action !== "accepted" && action !== "dismissed" && action !== "sent-back") {
+          throw new Error(`invalid adjudication action '${action}': must be accepted | dismissed | sent-back`);
+        }
+        return this.adjudicateIssue(
+          String(a.panelId ?? ""),
+          String(a.issueId ?? ""),
+          action,
+          a.rationale ? String(a.rationale) : undefined,
+          a.confirm === true,
+        );
+      }
       case "folder.inspect":
         return this.inspectFolder(a.path);
       case "repo.clone":
@@ -840,6 +1120,7 @@ export class ProjectContext {
       }
 
       await this.emit(event);
+      await this.observeReviewerEvent(event);
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
@@ -854,6 +1135,27 @@ export class ProjectContext {
           turnId: event.messageId,
         });
       }
+    }
+  }
+
+  /**
+   * Route harness events that belong to a review-panel reviewer session into its panel (SPEC-007):
+   * a completed turn → parse issues; an errored session → mark the reviewer errored; a write/diff
+   * from a read-only reviewer → log a `policy.violation`. No-op for non-reviewer sessions.
+   */
+  private async observeReviewerEvent(event: DomainEvent): Promise<void> {
+    if (!("sessionId" in event)) return;
+    const sessionId = (event as { sessionId: string }).sessionId;
+    if (!this.reviewerSessions.has(sessionId)) return;
+    if (event.type === "message.updated" && !event.isStreaming) {
+      await this.ingestReviewerMessage(sessionId, event.text);
+    } else if (event.type === "session.status" && event.status === "error") {
+      await this.failReviewer(sessionId, "reviewer session reported error");
+    } else if (event.type === "diff.finalized") {
+      // Reviewers are read-only (edit/bash deny). A diff from a reviewer means the permission profile
+      // was bypassed — record it as a governed-policy violation (SPEC-007).
+      const link = this.reviewerSessions.get(sessionId);
+      await this.trace.write({ kind: "policy.violation", projectId: this.projectId, panelId: link?.panelId, reviewerRole: link?.role, action: "diff.finalized", sessionId });
     }
   }
 

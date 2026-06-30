@@ -343,26 +343,32 @@ interface RosterRole {
   mode: "primary" | "subagent" | "all";
   writes: string;
   description: string;
+  /** Per-capability permission posture written to the harness profile (SPEC-007 read-only reviewers). */
+  permission?: Record<string, "allow" | "deny" | "ask">;
 }
 
 /** The six canonical roles. Each references a logical `tier`, never a vendor model id (FR-4). */
 const ROSTER: RosterRole[] = [
   { name: "spec-author", role: "Specification Author", tier: "capable", mode: "primary", writes: "Requirements", description: "Co-authors the requirements section of a specification with the engineer." },
   { name: "architect", role: "Technical Architect", tier: "capable", mode: "primary", writes: "Design", description: "Designs the target architecture, data model, and contracts for a specification." },
-  { name: "reviewer-a", role: "Reviewer (panel A)", tier: "capable", mode: "subagent", writes: "Critique", description: "Independent review-panel member; critiques a specification or generated change." },
-  { name: "reviewer-b", role: "Reviewer (panel B)", tier: "capable", mode: "subagent", writes: "Critique", description: "Second independent review-panel member; surfaces divergent findings." },
+  // Reviewers are READ-ONLY (SPEC-007): they critique into the panel only and never write/commit.
+  { name: "reviewer-a", role: "Reviewer (panel A)", tier: "capable", mode: "subagent", writes: "Critique", description: "Independent review-panel member; critiques a specification or generated change.", permission: { edit: "deny", bash: "deny" } },
+  { name: "reviewer-b", role: "Reviewer (panel B)", tier: "capable", mode: "subagent", writes: "Critique", description: "Second independent review-panel member; surfaces divergent findings.", permission: { edit: "deny", bash: "deny" } },
   { name: "implementer", role: "Implementer", tier: "mid", mode: "subagent", writes: "Code", description: "Implements an approved task: edits source, runs checks, opens a pull request (gated)." },
   { name: "researcher", role: "Researcher", tier: "mid", mode: "subagent", writes: "Grounding", description: "Analyses the repository to produce or refresh the AGENTS.md grounding baseline." },
 ];
 
 function agentFile(r: RosterRole): string {
-  // OpenCode-native agent markdown: YAML frontmatter (tier, mode, description) + instruction body.
+  // OpenCode-native agent markdown: YAML frontmatter (tier, mode, description, permission) + body.
+  const permission = r.permission
+    ? `permission:\n${Object.entries(r.permission).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\n`
+    : "";
   return `---
 name: ${r.name}
 description: ${r.description}
 tier: ${r.tier}
 mode: ${r.mode}
----
+${permission}---
 
 # ${r.role}
 

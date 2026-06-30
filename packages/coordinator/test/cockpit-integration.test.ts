@@ -63,6 +63,11 @@ function repoWith(specBranch: string, headBranch = BRANCH): string {
   writeFileSync(resolve(dir, "docs", "specifications", "test.md"), specDoc(specBranch), "utf8");
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", "init");
+  // Seed a completed review so the SPEC-007 finalisation gate is satisfied for the approve-path tests
+  // here (the gate itself is exercised in review-panel-integration.test.ts). The trace appends, so
+  // reconstructReviewGate() picks this up on startup.
+  mkdirSync(resolve(dir, ".arke"), { recursive: true });
+  writeFileSync(resolve(dir, ".arke", "trace.ndjson"), JSON.stringify({ kind: "review.complete", specId: "SPEC-TEST" }) + "\n", "utf8");
   return dir;
 }
 
@@ -210,15 +215,16 @@ test("approveDraft rolls back the working tree AND the index when the commit fai
   ws.close();
 });
 
-test("convenePanel acks with the resolved branch reference (no file content)", async () => {
+test("convenePanel refuses without a registry (can't guarantee distinct reviewer models, SPEC-007)", async () => {
+  // This coordinator is built with no registryConfig, so the panel cannot resolve distinct models.
+  // (The full convene→panel flow with a registry is covered in review-panel-integration.test.ts.)
   const { c, port } = await coordinatorAt(repoWith(BRANCH));
   after(() => c.stop());
   const { ws, ready, request } = connect(port);
   await ready;
   const res = await request("convenePanel", { specId: "SPEC-TEST" });
-  assert.equal(res.ok, true);
-  assert.equal(res.result.convened, true);
-  assert.equal(res.result.branch, BRANCH);
+  assert.equal(res.ok, false);
+  assert.match(res.error, /no registry configured/);
   ws.close();
 });
 
