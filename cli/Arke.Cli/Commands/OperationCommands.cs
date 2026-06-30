@@ -389,6 +389,51 @@ public sealed class PrApproveCommand : AsyncCommand<PrApproveCommand.Settings>
         Ops.RunAsync(s, "pr.approve", new { sessionId = s.SessionId });
 }
 
+/// <summary>`arke spec generate` — propose downstream artefacts from an approved spec (SPEC-013).</summary>
+public sealed class SpecGenerateCommand : AsyncCommand<SpecGenerateCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "spec.generate", new { specId = s.SpecId });
+}
+
+/// <summary>`arke generation approve` — approve a generation proposal (SPEC-013).</summary>
+public sealed class GenerationApproveCommand : AsyncCommand<GenerationApproveCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--proposal <PROPOSAL_ID>")]
+        public string ProposalId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "generation.approve", new { specId = s.SpecId, proposalId = s.ProposalId });
+}
+
+/// <summary>`arke generation reject` — reject a generation proposal (SPEC-013).</summary>
+public sealed class GenerationRejectCommand : AsyncCommand<GenerationRejectCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--proposal <PROPOSAL_ID>")]
+        public string ProposalId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "generation.reject", new { specId = s.SpecId, proposalId = s.ProposalId });
+}
+
 /// <summary>`arke spec promote` — human board correction: advance a draft to in-review (SPEC-010).</summary>
 public sealed class SpecPromoteCommand : AsyncCommand<SpecPromoteCommand.Settings>
 {

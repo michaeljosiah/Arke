@@ -102,6 +102,23 @@ function applyEvent(ev: any) {
       if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
       break;
     }
+    case 'generation.proposed': {
+      // SPEC-013: the agent's pre-write artefact proposal for review.
+      store.set({ generation: { specId: ev.specId, proposalId: ev.sessionId, artifacts: ev.artifacts, status: 'pending-review' } });
+      rail('generation.proposed', `generation.proposed · ${ev.specId} · ${(ev.artifacts || []).length} artefacts`, ts);
+      break;
+    }
+    case 'generation.decided': {
+      const cur: any = store.get().generation;
+      if (cur && cur.proposalId === ev.sessionId) store.set({ generation: null });
+      rail('generation.decided', `generation.decided · ${ev.specId} · ${ev.decision}`, ts);
+      break;
+    }
+    case 'generation.error': {
+      store.set((s: any) => ({ generation: s.generation && s.generation.specId === ev.specId ? { ...s.generation, status: 'error', error: ev.reason } : s.generation, cockpit: { ...s.cockpit, notice: `generation failed — ${ev.reason}` } }));
+      rail('generation.error', `generation.error · ${ev.specId} · ${ev.reason}`, ts);
+      break;
+    }
     case 'elicitation.asked': {
       // SPEC-011: an agent's structured question — surfaced as an overlay for the session, not a chat line.
       store.set({ elicitation: { sessionId: ev.sessionId, elicitationId: ev.elicitationId, question: ev.question, options: ev.options || [] } });
@@ -662,6 +679,13 @@ export const refreshDiffLive = (sessionId: string) => governed("diff.refresh", {
 export const elicitationReplyLive = (sessionId: string, questionId: string, answer: string) => governed("elicitation.reply", { sessionId, questionId, answer });
 /** Decline an agent elicitation question (SPEC-012). */
 export const elicitationRejectLive = (sessionId: string, questionId: string) => governed("elicitation.reject", { sessionId, questionId });
+/** Trigger/regenerate the downstream-artefact proposal for a spec (SPEC-013). */
+export const triggerGenerationLive = (specId: string) => governed("spec.generate", { specId });
+/** Approve a generation proposal (optionally a subset + edits) — governed (SPEC-013). */
+export const approveGenerationLive = (specId: string, proposalId: string, approvedArtifactIds?: string[], edits?: Array<{ id: string; content: string }>) =>
+  governed("generation.approve", { specId, proposalId, approvedArtifactIds, edits });
+/** Reject a generation proposal (SPEC-013). */
+export const rejectGenerationLive = (specId: string, proposalId: string) => governed("generation.reject", { specId, proposalId });
 
 /** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
 export function reconnectLive(): void {
