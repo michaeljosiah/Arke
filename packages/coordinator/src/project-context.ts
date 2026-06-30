@@ -64,6 +64,7 @@ import {
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
+import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
 import type { GrantStore } from "./grant-store.js";
 import { InputValidator, ValidationError } from "./input-validator.js";
@@ -252,6 +253,7 @@ export class ProjectContext {
   /** Stop this context's pump and any harness it started (never an attached one — SPEC-016). */
   async stop(): Promise<void> {
     this.abort.abort();
+    await this.trace.drain(); // SPEC-015: flush enqueued trace appends before exit (no dropped records)
     await this.adapter.stopServer?.();
   }
 
@@ -764,7 +766,10 @@ export class ProjectContext {
     this.generationSessions.set(ref.sessionId, cid);
     this.generationProposals.set(cid, { sessionId: ref.sessionId, artifacts: [], specContentHash: specContentHash(found.text), status: "generating" });
     await this.trace.write({ kind: "generation.started", projectId: this.projectId, specId: cid, sessionId: ref.sessionId });
-    await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: buildGenerationPrompt(found.text) }] });
+    // SPEC-015: span the adapter boundary (attributes carry ids only — never the spec markdown prompt).
+    await this.withSpan("dispatchAsync", { "arke.specId": cid, "arke.sessionId": ref.sessionId, "arke.harness": this.adapter.id }, () =>
+      this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: buildGenerationPrompt(found.text) }] }),
+    );
     const timeoutMs = Number(process.env.ARKE_GENERATION_TIMEOUT_MS) || DEFAULT_GENERATION_TIMEOUT_MS;
     const timer = setTimeout(() => void this.failGeneration(cid, ref.sessionId, "generation timed out"), timeoutMs);
     timer.unref?.();
@@ -896,6 +901,32 @@ export class ProjectContext {
     const all = records.filter((r) => r.kind === "event" && (r.event as { type?: string } | undefined)?.type === "projection.write" && (!specId || (r.event as { specId?: string }).specId === specId)).map((r) => r.event);
     const newestFirst = all.reverse();
     return { rows: newestFirst.slice(0, limit), total: all.length, capped: all.length > limit };
+  }
+
+  // ---- audit / observability (SPEC-015) -----------------------------------
+
+  /**
+   * Run `fn` bracketed by a persisted span record (SPEC-015). Attributes pass through the allowlist
+   * (no spec content / secrets), `error.message` is truncated; the span write is best-effort and never
+   * blocks or fails the operation. A lightweight, OTLP-exportable local span — the durable audit path.
+   */
+  async withSpan<T>(name: string, attrs: Record<string, unknown>, fn: () => Promise<T>): Promise<T> {
+    const startTime = Date.now();
+    try {
+      const result = await fn();
+      void this.trace.write({ kind: "span", name, startTime, endTime: Date.now(), status: "ok", attributes: sanitizeSpanAttributes({ "arke.operation": name, ...attrs }) });
+      return result;
+    } catch (err) {
+      void this.trace.write({ kind: "span", name, startTime, endTime: Date.now(), status: "error", attributes: sanitizeSpanAttributes({ "arke.operation": name, ...attrs, "error.message": err instanceof Error ? err.message : String(err) }) });
+      throw err;
+    }
+  }
+
+  /** `get-audit-records` (SPEC-015): this project's trace for a spec, capped, with the total + projectId. */
+  async auditRecords(specId: string, since?: number): Promise<{ projectId: string; specId: string; records: unknown[]; total: number }> {
+    const limit = Number(process.env.ARKE_AUDIT_QUERY_LIMIT) || 500;
+    const { records, total } = await this.trace.query(specId, since ?? 0, limit);
+    return { projectId: this.projectId, specId, records, total };
   }
 
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
@@ -1548,6 +1579,8 @@ export class ProjectContext {
         return this.retryProjection(String(a.specId ?? ""), String(a.artifactId ?? ""), String(a.target ?? ""));
       case "projections.query":
         return this.projectionsQuery(a.specId ? String(a.specId) : undefined);
+      case "get-audit-records": // SPEC-015
+        return this.auditRecords(String(a.specId ?? ""), a.since != null ? Number(a.since) : undefined);
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);

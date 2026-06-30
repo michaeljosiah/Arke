@@ -90,4 +90,14 @@ test("approve → projection.write with idempotency key → projections.query li
   assert.equal(retry.result.ok, true, "retry authorised by the original approval");
   const badRetry = await request("retry-projection", { specId: "SPEC-PROJ", artifactId: "art-nope", target: "github" });
   assert.equal(badRetry.result.ok, false, "retry refused without an approval record");
+
+  // SPEC-015: the audit query returns the full causal chain for the spec, scoped to this project.
+  const audit = await request("get-audit-records", { specId: "SPEC-PROJ" });
+  assert.ok(audit.result.projectId, "response carries its projectId (SPEC-018 disambiguation)");
+  const kinds = new Set(audit.result.records.map((r: any) => r.kind === "event" ? r.event.type : r.kind));
+  assert.ok(kinds.has("generation.decision"), "approval decision is in the audit trace");
+  assert.ok(kinds.has("projection.write") || [...kinds].some((k) => k === "projection.write"), "projection write is in the audit trace");
+  const seqs = audit.result.records.map((r: any) => r.seq);
+  assert.deepEqual([...seqs].sort((a, b) => a - b), seqs, "records are monotonically sequenced");
+  ws.close();
 });
