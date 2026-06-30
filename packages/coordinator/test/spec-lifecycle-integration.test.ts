@@ -11,6 +11,9 @@ import { Trace } from "../src/trace.js";
 import { GrantStore } from "../src/grant-store.js";
 import { ProjectRegistry } from "../src/project-registry.js";
 
+// The webhook endpoint fails closed without a secret; opt into unsigned for these local tests.
+process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED = "1";
+
 const BRANCH = "feat/lifecycle-demo";
 const OWNER = "dana";
 
@@ -172,4 +175,79 @@ test("PR closed without merge regresses status to draft", async () => {
   const r = await hook(port, "pull_request", pr("closed", false));
   assert.equal(r.routed[0].applied, "draft");
   assert.equal((await libraryVia(port))[0].status, "draft");
+});
+
+test("a status transition is persisted to frontmatter, so no false divergence warning", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  await hook(port, "pull_request", pr("opened"));
+  const onDisk = readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8");
+  assert.ok(/status:\s*in-review/.test(onDisk), "frontmatter status follows PR state");
+  assert.equal((await libraryVia(port))[0].hasDivergence, false, "no divergence: read model and file agree");
+});
+
+test("synchronize regresses an approved spec only on a MATERIAL change", async () => {
+  const dir = repo();
+  const file = resolve(dir, "docs", "specifications", "life.md");
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  await hook(port, "pull_request", pr("opened"));
+  await hook(port, "pull_request_review", review("rae")); // approved, baseline hash captured
+  assert.equal((await libraryVia(port))[0].status, "approved");
+
+  // Trivial push (Change history only) → stays approved.
+  writeFileSync(file, readFileSync(file, "utf8") + "- trivial note\n", "utf8");
+  let r = await hook(port, "pull_request", pr("synchronize"));
+  assert.equal(r.routed[0]?.applied ?? "no-op", "no-op");
+  assert.equal((await libraryVia(port))[0].status, "approved", "trivial push keeps approval");
+
+  // Material push (Design section changed) → regresses to in-review.
+  writeFileSync(file, readFileSync(file, "utf8").replace("Simple.", "A materially different design."), "utf8");
+  r = await hook(port, "pull_request", pr("synchronize"));
+  assert.equal(r.routed[0].applied, "material-change");
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+});
+
+test("approval is rejected (fail closed) when the spec has no owner to verify against", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "arke-noowner-"));
+  git(dir, "init", "-q");
+  git(dir, "config", "user.email", "t@example.com");
+  git(dir, "config", "user.name", "Tester");
+  git(dir, "config", "commit.gpgsign", "false");
+  git(dir, "checkout", "-q", "-b", BRANCH);
+  mkdirSync(resolve(dir, "docs", "specifications"), { recursive: true });
+  writeFileSync(resolve(dir, "docs", "specifications", "no.md"), specDoc("draft").replace(/owner: .*\n/, ""), "utf8");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "init");
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  await hook(port, "pull_request", pr("opened"));
+  const r = await hook(port, "pull_request_review", review("anyone"));
+  assert.equal(r.routed[0].applied, "approval-rejected-no-owner");
+  assert.equal((await libraryVia(port))[0].status, "in-review", "ungovernable approval does not advance");
+});
+
+test("an empty-branch payload is ignored, not routed to an unrelated spec", async () => {
+  const { c, port } = await start(repo());
+  after(() => c.stop());
+  const r = await hook(port, "pull_request", { action: "opened", pull_request: { number: 9, head: {} } });
+  assert.equal(r.routed.length, 0, "no spec transitioned");
+});
+
+test("webhook fails closed: unsigned rejected without opt-in; bad signature rejected with a secret", async () => {
+  const { c, port } = await start(repo());
+  after(() => c.stop());
+  const post = (headers: Record<string, string>) =>
+    fetch(`http://127.0.0.1:${port}/webhooks/github`, { method: "POST", headers: { "content-type": "application/json", "x-github-event": "pull_request", ...headers }, body: JSON.stringify(pr("opened")) });
+
+  delete process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED;
+  try {
+    assert.equal((await post({})).status, 401, "unsigned + no opt-in → 401");
+    process.env.ARKE_WEBHOOK_SECRET = "s3cr3t";
+    assert.equal((await post({ "x-hub-signature-256": "sha256=deadbeef" })).status, 401, "wrong signature → 401");
+  } finally {
+    delete process.env.ARKE_WEBHOOK_SECRET;
+    process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED = "1"; // restore for any later tests
+  }
 });

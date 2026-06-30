@@ -128,6 +128,7 @@ test("mapWebhookEvent maps PR lifecycle actions", () => {
   const pr = (action: string, merged = false) => ({ action, pull_request: { number: 7, merged, head: { ref: BRANCH } } });
   assert.deepEqual(mapWebhookEvent("pull_request", pr("opened")), { kind: "opened", branch: BRANCH, prNumber: 7 });
   assert.deepEqual(mapWebhookEvent("pull_request", pr("reopened")), { kind: "reopened", branch: BRANCH, prNumber: 7 });
+  assert.equal(mapWebhookEvent("pull_request", pr("synchronize")).kind, "synchronized"); // a push, not a re-open
   assert.equal(mapWebhookEvent("pull_request", pr("closed", false)).kind, "closed-unmerged");
   assert.equal(mapWebhookEvent("pull_request", pr("closed", true)).kind, "merged");
 });

@@ -20,6 +20,7 @@ import {
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
   flattenDeltaTags,
+  isMaterialChange,
   isSelfApproval,
   mapWebhookEvent,
   normativeHash,
@@ -532,13 +533,23 @@ export class ProjectContext {
   async handleWebhook(eventName: string, payload: unknown): Promise<{ applied: string; specId?: string }> {
     const t = mapWebhookEvent(eventName, payload);
     if (t.kind === "ignored") return { applied: `ignored: ${t.reason}` };
+    if (!t.branch) return { applied: "ignored: empty branch" }; // a malformed payload must not route by ""
     const found = this.findSpecByBranch(t.branch);
     if (!found) return { applied: `no spec on branch '${t.branch}'` };
     const specId = found.canonicalId;
     const owner = found.frontmatter.owner;
 
-    const setStatus = async (status: SpecStatus, reason: string) => {
-      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), status, ...(("prNumber" in t) ? { prNumber: (t as any).prNumber } : {}) });
+    // Advance status in the read model AND persist it to the file frontmatter, so the library's
+    // divergence check (read-model vs. frontmatter) only fires on genuine drift, not after every
+    // transition (the spec calls for the frontmatter status to follow PR state).
+    const setStatus = async (status: SpecStatus, reason: string, extra?: Partial<SpecRecordState>) => {
+      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), status, ...(("prNumber" in t) ? { prNumber: (t as any).prNumber } : {}), ...extra });
+      try {
+        const cur = this.findSpecFile(specId);
+        if (cur && (cur.frontmatter.status ?? "draft") !== status) writeFileSync(cur.absPath, setFrontmatterStatus(cur.text, status), "utf8");
+      } catch {
+        /* best-effort: the read model is authoritative for the gate; a write failure surfaces as divergence */
+      }
       await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason } as DomainEvent);
     };
@@ -553,14 +564,25 @@ export class ProjectContext {
       case "closed-unmerged":
         await setStatus("draft", "pr-closed");
         return { applied: "draft", specId };
-      case "approved": {
-        if (isSelfApproval(t.approver, owner)) {
-          await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId, approver: t.approver, prNumber: t.prNumber });
-          return { applied: "self-approval-rejected", specId };
+      case "synchronized": {
+        // A new push to an open PR. Only an APPROVED spec is affected, and only when the push changed
+        // the normative sections — the material-change gate (SPEC-008). Trivial pushes keep approval.
+        const rec = this.specRecords.get(specId);
+        if (rec?.status === "approved" && isMaterialChange(rec.normativeHash, found.text)) {
+          await setStatus("in-review", "material-change");
+          return { applied: "material-change", specId };
         }
-        await setStatus("approved", "pr-approved");
+        return { applied: "no-op", specId };
+      }
+      case "approved": {
+        // Second-human gate, fail CLOSED: an approval from the owner, OR a spec with no `owner` to check
+        // against, must NOT advance to approved (the governance invariant can't be verified).
+        if (!owner || isSelfApproval(t.approver, owner)) {
+          await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId, approver: t.approver, prNumber: t.prNumber, reason: owner ? "self-approval" : "no-owner-to-verify" });
+          return { applied: owner ? "self-approval-rejected" : "approval-rejected-no-owner", specId };
+        }
         // Record the normative baseline so a later material change can be detected.
-        this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? { status: "approved" }), status: "approved", normativeHash: normativeHash(found.text) });
+        await setStatus("approved", "pr-approved", { normativeHash: normativeHash(found.text) });
         return { applied: "approved", specId };
       }
       case "merged":

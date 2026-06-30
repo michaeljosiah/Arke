@@ -163,6 +163,7 @@ export function verifyGithubSignature(secret: string, rawBody: string, signature
 
 export type LifecycleTransition =
   | { kind: "opened"; branch: string; prNumber: number }
+  | { kind: "synchronized"; branch: string; prNumber: number }
   | { kind: "approved"; branch: string; prNumber: number; approver: string }
   | { kind: "closed-unmerged"; branch: string; prNumber: number }
   | { kind: "reopened"; branch: string; prNumber: number }
@@ -179,7 +180,10 @@ export function mapWebhookEvent(eventName: string, payload: any): LifecycleTrans
     const branch = String(payload?.pull_request?.head?.ref ?? "");
     const prNumber = Number(payload?.pull_request?.number ?? 0);
     const action = String(payload?.action ?? "");
-    if (action === "opened" || action === "synchronize" || action === "ready_for_review") return { kind: "opened", branch, prNumber };
+    if (action === "opened" || action === "ready_for_review") return { kind: "opened", branch, prNumber };
+    // A new push to an open PR is NOT a re-open: it only regresses an APPROVED spec, and only when the
+    // push changed the normative sections (the coordinator runs the material-change check).
+    if (action === "synchronize") return { kind: "synchronized", branch, prNumber };
     if (action === "reopened") return { kind: "reopened", branch, prNumber };
     if (action === "closed") {
       return payload?.pull_request?.merged ? { kind: "merged", branch, prNumber } : { kind: "closed-unmerged", branch, prNumber };

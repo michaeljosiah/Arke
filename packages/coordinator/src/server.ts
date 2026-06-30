@@ -194,10 +194,20 @@ export class Coordinator {
       let body = "";
       for await (const chunk of req) body += chunk;
       const secret = process.env.ARKE_WEBHOOK_SECRET;
+      const allowUnsigned = process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "1" || process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "true";
       const sig = req.headers["x-hub-signature-256"];
-      if (secret && !verifyGithubSignature(secret, body, Array.isArray(sig) ? sig[0] : sig)) {
+      if (secret) {
+        if (!verifyGithubSignature(secret, body, Array.isArray(sig) ? sig[0] : sig)) {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "invalid signature" }));
+          return;
+        }
+      } else if (!allowUnsigned) {
+        // Fail CLOSED: an unconfigured webhook secret must not let unauthenticated POSTs drive lifecycle
+        // mutations (status transitions, merge-time file writes). Set ARKE_WEBHOOK_SECRET in production,
+        // or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 to explicitly opt in for local/dev.
         res.writeHead(401, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "invalid signature" }));
+        res.end(JSON.stringify({ ok: false, error: "webhook secret not configured (set ARKE_WEBHOOK_SECRET, or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 for local/dev)" }));
         return;
       }
       let payload: unknown;
