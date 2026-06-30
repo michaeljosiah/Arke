@@ -1,5 +1,6 @@
 import { store, engine } from './store';
 import { ArkeTransport, type TransportState } from './transport';
+import { OutboundQueue } from './outbound-queue';
 
 /**
  * Live coordinator wiring (SPEC-003). Connects the client to the coordinator over
@@ -183,6 +184,12 @@ function applyEvent(ev: any) {
       applyRegistryInstances(ev.instances);
       break;
     }
+    case 'spec.approval-failed': {
+      // Surface an approval failure (branch guard, dirty tree, git error) in the cockpit (SPEC-006).
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval failed — ${ev.reason}` } }));
+      rail('spec.approval-failed', `spec.approval-failed · ${ev.specId} · ${ev.reason}`, ts);
+      break;
+    }
     case 'registry.warning': {
       // Surface unsolicited live warnings in the store (deduped by reason+detail); the snapshot /
       // re-probe path is authoritative and replaces the list.
@@ -303,6 +310,11 @@ function applySnapshot(snap: any) {
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();
   void refreshRecents(); // SPEC-018: populate the picker's real recents
+  // Run a deferred cockpit-queue drain now that the post-reconnect snapshot has been applied.
+  if (drainPending) {
+    drainPending = false;
+    void drainCockpitQueue();
+  }
 }
 
 // ---- request/response over the same WS (SPEC-017/018) ----
@@ -359,8 +371,131 @@ export function startLive(): ArkeTransport {
     maxDelayMs: 8000,
   });
   store.set({ connection: transport.state });
-  transport.subscribe((state: TransportState) => store.set({ connection: state }));
+  transport.subscribe((state: TransportState) => {
+    store.set({ connection: state });
+    // On reconnect, defer the cockpit-queue drain until AFTER the first snapshot is processed: the
+    // transport fires 'open' before the snapshot, and a drain that re-binds the project here can race
+    // ahead of the coordinator's default-project snapshot (which would then overwrite connectedProject
+    // and drop the replayed prompt's events). applySnapshot() triggers the deferred drain (PR #18
+    // review round 5).
+    if (state === 'open' && outbound.size > 0) drainPending = true;
+  });
   return transport;
+}
+
+// ---- authoring cockpit (SPEC-006) ----
+const outbound = new OutboundQueue<any>(50);
+// Set on reconnect-with-queue; the drain is run by applySnapshot once the first snapshot lands.
+let drainPending = false;
+// The projectId the offline prompts were authored against — the drain re-binds to THIS, not the
+// post-reconnect default snapshot's project (PR #18 review round 5).
+let queuedForProject: string | null = null;
+// prompt.send resolves only when the agent's turn completes, which routinely exceeds the default
+// request window — use a long ceiling so a normal turn is not reported as a spurious timeout.
+const PROMPT_TIMEOUT_MS = 10 * 60_000;
+
+/** True when the coordinator socket is connected (used to decide send-now vs. queue). */
+export function isCoordinatorConnected(): boolean {
+  return !!transport && transport.state === 'open';
+}
+
+/** Re-bind to the project the prompts were queued for, then drain them SEQUENTIALLY against it. */
+async function drainCockpitQueue(): Promise<void> {
+  if (outbound.size === 0) { queuedForProject = null; return; }
+  // Re-bind this fresh socket to the project the prompts were authored against (NOT the post-reconnect
+  // default). If the rebind fails (project forgotten/unopenable), keep the queue intact rather than
+  // dispatching against the wrong project (PR #18 review rounds 3 & 5).
+  const target = queuedForProject ?? (store.get() as any).connectedProject?.projectId;
+  if (target) {
+    const reopened = await liveRequest('project.open', { projectId: target }, 90000);
+    if (!reopened?.ok) {
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `reconnected, but couldn't reopen the project — ${outbound.size} message${outbound.size === 1 ? '' : 's'} held` } }));
+      return; // queue + queuedForProject intact for the next attempt
+    }
+  }
+  const items = outbound.takeAll();
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
+  // Await each in order so FIFO holds. On a rejection, drop the rejected one and RE-QUEUE the unsent
+  // remainder so other-session prompts aren't lost (PR #18 review rounds 2–3).
+  let rejected = false;
+  for (let i = 0; i < items.length; i++) {
+    const res = await submitCockpitPrompt(items[i]);
+    if (!res?.ok) {
+      for (const cmd of items.slice(i + 1)) outbound.enqueue(cmd);
+      rejected = true;
+      break;
+    }
+  }
+  if (outbound.size === 0) {
+    queuedForProject = null; // fully drained → release the binding (PR #18 review round 6)
+    return;
+  }
+  // Items remain (re-queued after a stale rejection). The rejected head was dropped, so a follow-up
+  // drain can flush the remainder for still-valid sessions immediately rather than waiting for the
+  // next reconnect — queuedForProject is preserved so it still targets the right project (round 7).
+  if (rejected && isCoordinatorConnected()) {
+    store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `a queued message was rejected — retrying ${outbound.size} remaining` } }));
+    void drainCockpitQueue();
+  }
+}
+
+/** Issue a prompt.send request and surface a stale-session (or other) rejection in the cockpit. */
+async function submitCockpitPrompt(args: any): Promise<any> {
+  const res = await liveRequest('prompt.send', args, PROMPT_TIMEOUT_MS);
+  if (!res?.ok) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `message rejected — ${res?.error ?? 'unknown error'}` } }));
+  return res;
+}
+
+/**
+ * Send a cockpit prompt (SPEC-006). When connected it goes straight through (returning the
+ * coordinator's response so a stale-session rejection is visible); when offline it is queued,
+ * bounded at 50 — a full queue is refused, never silently dropped.
+ */
+export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
+  if (transport && transport.state === 'open') {
+    const res = await submitCockpitPrompt(args);
+    return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId ?? args.correlationId } : { status: 'rejected', error: res?.error };
+  }
+  const accepted = outbound.enqueue(args);
+  // Remember which project these offline prompts belong to, so the reconnect drain re-binds to it.
+  if (accepted && !queuedForProject) queuedForProject = (store.get() as any).connectedProject?.projectId ?? null;
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: accepted ? `offline — queued ${outbound.size} message${outbound.size === 1 ? '' : 's'}` : 'offline — queue full (50); message not queued' } }));
+  return { status: accepted ? 'queued' : 'full' };
+}
+
+/**
+ * Read the working specification file for the preview (SPEC-006). Fails fast while offline rather
+ * than queuing in the transport — a queued read would replay against the coordinator's default
+ * project on a fresh socket and could replace the preview with another project's spec (PR #18
+ * review round 4). The 30s poll simply retries once reconnected.
+ */
+export function fetchSpecFile(specId: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: 'offline' });
+  return liveRequest('spec.file', { specId });
+}
+
+/**
+ * Approve the working draft: branch-guarded commit + status advance on the host (SPEC-006). A
+ * governed write must NOT be queued in the reconnecting transport — a queued approval could replay
+ * on a later reconnect and commit without a visible result (PR #18 review round 3). Refuse offline.
+ */
+export function approveDraftLive(specId: string, branch?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to approve (approval is not queued)' });
+  }
+  return liveRequest('approveDraft', { specId, branch }, 30000);
+}
+
+/**
+ * Convene the review panel on the current draft — passes a reference, never file content (SPEC-006).
+ * Like approval, a governed action: refuse while offline rather than letting the transport queue and
+ * replay it later with no visible response (PR #18 review round 4).
+ */
+export function convenePanelLive(specId: string, branch?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to convene a review' });
+  }
+  return liveRequest('convenePanel', { specId, branch });
 }
 
 export function stopLive(): void {

@@ -312,6 +312,71 @@ public sealed class AgentsMaterializeCommand : AsyncCommand<AgentsMaterializeCom
         Ops.RunAsync(s, "agents.materialize", new { dir = s.Dir });
 }
 
+/// <summary>`arke spec file` — the working specification text + metadata for a spec (SPEC-006).</summary>
+public sealed class SpecFileCommand : AsyncCommand<SpecFileCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "spec.file", new { specId = s.SpecId });
+}
+
+/// <summary>`arke spec approve` — branch-guarded commit + status advance to in-review (SPEC-006).</summary>
+public sealed class SpecApproveCommand : AsyncCommand<SpecApproveCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--branch <BRANCH>")]
+        public string? Branch { get; set; }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "approveDraft", new { specId = s.SpecId, branch = s.Branch });
+}
+
+/// <summary>`arke spec convene` — convene the review panel on a draft; passes a reference (SPEC-006/007).</summary>
+public sealed class SpecConveneCommand : AsyncCommand<SpecConveneCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings
+    {
+        [CommandArgument(0, "<SPEC_ID>")]
+        public string SpecId { get; set; } = "";
+
+        [CommandOption("--branch <BRANCH>")]
+        public string? Branch { get; set; }
+    }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "convenePanel", new { specId = s.SpecId, branch = s.Branch });
+}
+
+/// <summary>`arke harnesses list` — the live harness/model registry projection (SPEC-005): instances,
+/// tier labels, reachability, roster resolution. Tier labels only; no vendor model ids or credentials.</summary>
+public sealed class HarnessesListCommand : AsyncCommand<HarnessesListCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings { }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "registry.get", null);
+}
+
+/// <summary>`arke harnesses probe` — re-probe the live adapter (readiness/caps/catalog) and return the
+/// refreshed registry projection (SPEC-005).</summary>
+public sealed class HarnessesProbeCommand : AsyncCommand<HarnessesProbeCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings { }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "registry.probe", null);
+}
+
 /// <summary>`arke trace tail` — read the local append-only audit trace (no coordinator needed).</summary>
 public sealed class TraceTailCommand : Command<TraceTailCommand.Settings>
 {

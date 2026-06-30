@@ -1,9 +1,13 @@
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   DomainEvent,
+  appendChangeHistory,
+  parseFrontmatter,
+  parseSpecDoc,
+  setFrontmatterStatus,
   type AgentImage,
   type HarnessAdapter,
   type ModelInfo,
@@ -12,7 +16,7 @@ import {
   type PermissionDecision,
   type ScaffoldStep,
 } from "@arke/contracts";
-import { resolveDirectory } from "@arke/adapter-opencode";
+import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
   RegistryResolver,
   type RegistryConfig,
@@ -71,6 +75,8 @@ export class ProjectContext {
   private readonly registryResolver?: RegistryResolver;
   private readonly connectedInstanceId?: string;
   private registrySnapshot: RegistrySnapshot | null = null;
+  /** Serialises approveDraft per project so two concurrent approvals can't race the commit/rollback. */
+  private approvalInFlight = false;
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -285,6 +291,229 @@ export class ProjectContext {
     } as DomainEvent);
   }
 
+  // ---- authoring cockpit (SPEC-006) ---------------------------------------
+
+  /**
+   * Locate a working specification file under this project's `docs/specifications/` by spec id
+   * (matched against the frontmatter `spec_id`/`slug`/`title` or the filename stem). Host-side read,
+   * confined to the project root. Returns the file's text + parsed frontmatter, or null if absent.
+   */
+  private findSpecFile(specId: string): { relPath: string; absPath: string; text: string; frontmatter: Record<string, string>; canonicalId: string } | null {
+    if (!specId) return null;
+    const dir = resolve(this.root, "docs", "specifications");
+    if (!existsSync(dir)) return null;
+    // Canonicalise both the project root and the specifications dir, then require the specs dir to
+    // resolve INSIDE the canonical root — otherwise a `docs/specifications -> /outside` symlink would
+    // make realDir an external directory and authorise every file under it (PR #18 review round 3).
+    let realRoot: string;
+    let realDir: string;
+    try {
+      realRoot = realpathSync.native(this.root);
+      realDir = realpathSync.native(dir);
+    } catch {
+      return null;
+    }
+    if (!isWithinRoot(realRoot, realDir)) return null;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
+    } catch {
+      return null;
+    }
+    for (const f of entries) {
+      const absPath = resolve(dir, f);
+      // Confine reads to `docs/specifications/` itself (not merely the repo root): resolve symlinks
+      // first, so a planted entry like `secret.md -> /etc/passwd` OR `leak.md -> ../../in-repo-file`
+      // is skipped — only files that actually live under the specifications dir are served/written
+      // (PR #18 review, rounds 1–2).
+      let real: string;
+      try {
+        real = realpathSync.native(absPath);
+      } catch {
+        continue;
+      }
+      if (!isWithinRoot(realDir, real)) continue;
+      let text: string;
+      try {
+        text = readFileSync(real, "utf8");
+      } catch {
+        continue;
+      }
+      const { data } = parseFrontmatter(text);
+      const stem = f.replace(/\.md$/, "");
+      // Match either frontmatter convention: `spec_id` (the spec files' YAML) or `specId` (the
+      // SpecFrontmatter contract shape), plus slug / title / filename stem.
+      if (data.spec_id === specId || data.specId === specId || data.slug === specId || data.title === specId || stem === specId) {
+        // Derive the git pathspec from the CANONICAL root, so a project opened via a symlinked dir
+        // still yields `docs/specifications/foo.md` (not `../real-repo/…`, which `git add` rejects).
+        // `canonicalId` is the frontmatter spec id, so results/events use it even when the caller
+        // passed a slug/title/filename alias (PR #18 review round 7).
+        const canonicalId = data.spec_id ?? data.specId ?? specId;
+        return { relPath: relative(realRoot, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data, canonicalId };
+      }
+    }
+    return null;
+  }
+
+  /** `spec.file` — the working specification text + metadata for the cockpit preview (SPEC-006). */
+  private readSpecFile(specId: string): {
+    specId: string;
+    exists: boolean;
+    path?: string;
+    text?: string;
+    branch?: string;
+    status?: string;
+  } {
+    const found = this.findSpecFile(specId);
+    if (!found) return { specId, exists: false };
+    return {
+      specId: found.canonicalId, // canonical id even when the caller passed an alias (round 7)
+      exists: true,
+      path: found.relPath,
+      text: found.text,
+      ...(found.frontmatter.branch ? { branch: found.frontmatter.branch } : {}),
+      ...(found.frontmatter.status ? { status: found.frontmatter.status } : {}),
+    };
+  }
+
+  /**
+   * `approveDraft` — atomically advance a draft to `in-review` (SPEC-006). Verifies the git HEAD
+   * branch equals the frontmatter `branch`, writes the updated status + a Change history line,
+   * commits the file on the branch, and emits `spec.status`. Any failure emits `spec.approval-failed`,
+   * leaves the on-disk status unchanged (rolling back a written-but-uncommitted file), and throws so
+   * the client sees an error and can retry. A single transaction — no partial success.
+   */
+  private async approveDraft(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
+    // Serialise approvals: a concurrent second approval could otherwise capture the same draft text
+    // and, on a git no-op/failure, roll its stale copy back over the just-committed file (PR #18
+    // review round 3). One at a time per project.
+    if (this.approvalInFlight) {
+      // Route the concurrency rejection through the same governed-failure path (event + trace) as any
+      // other approval failure, so the cockpit and audit log stay complete (PR #18 review round 4).
+      const reason = `an approval is already in progress for '${specId}'`;
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
+      throw new Error(reason);
+    }
+    this.approvalInFlight = true;
+    try {
+      return await this.approveDraftLocked(specId, clientBranch);
+    } finally {
+      this.approvalInFlight = false;
+    }
+  }
+
+  private async approveDraftLocked(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
+    const fail = async (reason: string): Promise<never> => {
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
+      throw new Error(reason);
+    };
+
+    const found = this.findSpecFile(specId);
+    if (!found) return fail(`no specification file found for '${specId}' under docs/specifications`);
+    // Use the frontmatter's canonical spec id for all events/results/trace, even if the caller passed
+    // a slug/title/filename alias — so the right board card advances (PR #18 review round 7).
+    const cid = found.canonicalId;
+    // Only a draft may be approved into review — never regress an already-approved/merged spec back
+    // to in-review (PR #18 review). A spec with no status is treated as a draft.
+    const current = found.frontmatter.status;
+    if (current && current !== "draft") {
+      return fail(`cannot approve: specification '${cid}' is '${current}', expected 'draft'`);
+    }
+    // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
+    // while a spec-author/architect AUTHORING session for this spec is running — an unrelated
+    // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7).
+    if (this.read.snapshot().some((c) => c.specId === cid && c.id !== cid && c.kind === "spec" && c.status === "running")) {
+      return fail(`an authoring session for '${cid}' is still running — wait for it to finish before approving`);
+    }
+    const fmBranch = found.frontmatter.branch;
+    if (!fmBranch) return fail(`specification '${specId}' has no 'branch' in its frontmatter`);
+    if (clientBranch && clientBranch !== fmBranch) {
+      return fail(`branch mismatch: client sent '${clientBranch}' but frontmatter is '${fmBranch}'`);
+    }
+    if (!gitAvailable()) return fail("git not found on PATH; cannot commit the approval");
+    const head = gitHeadBranch(this.root);
+    if (head === null) return fail("could not determine the git HEAD branch (not a git repository?)");
+    if (head !== fmBranch) return fail(`branch guard: HEAD is '${head}' but the spec's branch is '${fmBranch}'`);
+
+    const date = new Date().toISOString().slice(0, 10);
+    const updated = appendChangeHistory(
+      setFrontmatterStatus(found.text, "in-review"),
+      `${date} · ${fmBranch} · in-review — approved via the authoring cockpit`,
+    );
+    try {
+      writeFileSync(found.absPath, updated, "utf8");
+    } catch (err) {
+      return fail(`could not write the specification file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // Preflight the audit trace BEFORE committing: a governed action must be recorded, so if the
+    // append-only trace is unwritable we refuse (and roll back the file) rather than commit something
+    // we can't audit (PR #18 review round 6, per AGENTS.md/SPEC-006).
+    try {
+      await this.trace.write({ kind: "spec.approve.preflight", projectId: this.projectId, specId: cid, branch: fmBranch });
+    } catch (err) {
+      try {
+        writeFileSync(found.absPath, found.text, "utf8");
+      } catch {
+        /* best-effort rollback */
+      }
+      return fail(`audit trace is unwritable — refusing to approve (${err instanceof Error ? err.message : String(err)})`);
+    }
+    const committed = gitCommit(this.root, found.relPath, `spec(${cid}): approve → in-review`);
+    if (!committed.ok) {
+      // Roll back the write so the on-disk status is unchanged (the approval did not happen).
+      try {
+        writeFileSync(found.absPath, found.text, "utf8");
+      } catch {
+        /* best-effort rollback */
+      }
+      return fail(`git commit failed: ${committed.error}`);
+    }
+
+    // The commit is permanent — the approval succeeded. Publish the status FIRST (emit() publishes
+    // even if its own trace write fails), then record the final audit best-effort: a post-commit
+    // trace failure must not report an already-committed approval as failed (PR #18 review rounds 4–7).
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId: cid, status: "in-review" } as DomainEvent);
+    try {
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: true, branch: fmBranch, commit: committed.sha });
+    } catch {
+      /* committed + published already — the preflight recorded the governed action; this is bonus */
+    }
+    return { ok: true, specId: cid, status: "in-review", branch: fmBranch };
+  }
+
+  /**
+   * `convenePanel` — request a multi-model review of the working draft (SPEC-006). Passes a
+   * reference (`specId`/`branch`), never file content; the coordinator reads the authoritative file.
+   * The review panel itself is SPEC-007 (not yet implemented), so this records intent and acks.
+   */
+  private async convenePanel(specId: string, branch?: string): Promise<{ specId: string; branch?: string; convened: boolean; note: string }> {
+    const found = this.findSpecFile(specId);
+    // No authoritative working draft → refuse, rather than acking a review of nothing (PR #18 review).
+    if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    // A review needs something to review: require at least one requirement (SPEC-006) — mirrors the
+    // cockpit's disabled state so the CLI/op path can't convene an empty draft (PR #18 review round 6).
+    if (parseSpecDoc(found.text).requirements.length === 0) {
+      throw new Error(`specification '${specId}' has no requirements yet — nothing to review`);
+    }
+    const fmBranch = found.frontmatter.branch;
+    // The frontmatter branch is the source of truth. A client-supplied branch that disagrees (a stale
+    // preview, or `--branch` on the CLI) is rejected rather than recorded against the wrong branch
+    // (PR #18 review). When no client branch is given, resolve from the spec file.
+    if (branch && fmBranch && branch !== fmBranch) {
+      throw new Error(`branch mismatch: client sent '${branch}' but spec '${specId}' is on '${fmBranch}'`);
+    }
+    const resolvedBranch = fmBranch ?? branch;
+    await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId: found.canonicalId, branch: resolvedBranch ?? null });
+    return {
+      specId: found.canonicalId, // canonical id even when the caller passed an alias (round 7)
+      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
+      convened: true,
+      note: "review panel (SPEC-007) is not yet implemented; the request was recorded",
+    };
+  }
+
   // ---- classification + reachability --------------------------------------
 
   private classify(target: string = this.root): void {
@@ -360,8 +589,17 @@ export class ProjectContext {
           requested === "capable" || requested === "mid" || requested === "fast"
             ? (requested as ModelTier)
             : "mid";
+        const sessionId = String(a.sessionId ?? "");
+        // Stale-session guard (SPEC-006): a queued message that targets a session no longer idle or
+        // running (e.g. it went waiting/done/error while the client was offline) is rejected with its
+        // current status rather than silently executed. Unknown sessions (not yet in the read model)
+        // are allowed — a brand-new session's first prompt must not be blocked.
+        const known = this.read.snapshot().find((c) => c.id === sessionId);
+        if (known && known.status !== "idle" && known.status !== "running") {
+          throw new Error(`session '${sessionId}' is '${known.status}', not idle/running — message rejected`);
+        }
         const input = {
-          sessionId: String(a.sessionId ?? ""),
+          sessionId,
           agent: String(a.agent ?? ""),
           tier,
           parts: [{ type: "text" as const, text: String(a.message ?? "") }],
@@ -407,9 +645,17 @@ export class ProjectContext {
       case "harness.probe":
         await this.refreshReachability();
         return this.reachableSummary();
+      case "registry.get":
+        return this.registrySnapshot; // current projection, no re-probe (read-only)
       case "registry.probe":
         await this.refreshRegistry(true); // explicit user action → re-probe the live adapter
         return this.registrySnapshot;
+      case "spec.file":
+        return this.readSpecFile(String(a.specId ?? ""));
+      case "approveDraft":
+        return this.approveDraft(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
+      case "convenePanel":
+        return this.convenePanel(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "folder.inspect":
         return this.inspectFolder(a.path);
       case "repo.clone":
@@ -620,7 +866,14 @@ export class ProjectContext {
       projectId: string;
     };
     this.read.apply(stamped);
-    await this.trace.write({ kind: "event", projectId: this.projectId, event: stamped });
+    // The audit trace is best-effort: an unwritable `.arke/trace.ndjson` must NOT stop the live event
+    // from reaching clients (e.g. an approval's spec.status after the commit already landed) — the
+    // read model + publish are the live path; the trace is durable audit (PR #18 review round 5).
+    try {
+      await this.trace.write({ kind: "event", projectId: this.projectId, event: stamped });
+    } catch {
+      /* trace unavailable — still publish the live event */
+    }
     this.publish(stamped);
   }
 }
@@ -647,6 +900,46 @@ export function gitAvailable(): boolean {
     return spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
   } catch {
     return false;
+  }
+}
+
+/** The current git HEAD branch name in `cwd`, or null when it can't be determined (SPEC-006). */
+export function gitHeadBranch(cwd: string): string | null {
+  try {
+    const res = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], gitOpts(cwd));
+    if (res.status !== 0) return null;
+    const branch = (res.stdout ?? "").trim();
+    return branch.length > 0 && branch !== "HEAD" ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Bound git invocations so a hanging hook / credential or GPG prompt can't wedge the event loop. */
+const GIT_TIMEOUT_MS = Number(process.env.ARKE_GIT_TIMEOUT_MS ?? 20_000);
+/** Non-interactive git: never block on a terminal credential prompt (PR #18 review round 6). */
+function gitOpts(cwd: string) {
+  return { cwd, encoding: "utf8" as const, timeout: GIT_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+}
+
+/** Stage and commit a single file in `cwd` (SPEC-006). Returns the new sha or the failure reason. */
+export function gitCommit(cwd: string, relPath: string, message: string): { ok: true; sha: string } | { ok: false; error: string } {
+  try {
+    const add = spawnSync("git", ["add", "--", relPath], gitOpts(cwd));
+    if (add.status !== 0) return { ok: false, error: (add.stderr || "git add failed").trim() };
+    const commit = spawnSync("git", ["commit", "-m", message, "--", relPath], gitOpts(cwd));
+    if (commit.status !== 0) {
+      // Unstage what `git add` staged so a commit failure leaves the index clean too — otherwise the
+      // approval change sits staged and a later commit could include it (PR #18 review). The caller
+      // restores the working-tree file; this restores the index. (A timeout yields status null →
+      // treated as failure, and the bounded wait means a hung hook can't block forever.)
+      spawnSync("git", ["reset", "-q", "--", relPath], gitOpts(cwd));
+      return { ok: false, error: (commit.error?.message || commit.stderr || commit.stdout || "git commit failed").trim() };
+    }
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], gitOpts(cwd));
+    return { ok: true, sha: (sha.stdout ?? "").trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
