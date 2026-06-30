@@ -1361,6 +1361,10 @@ export class ProjectContext {
         return this.approvePr(String(a.sessionId ?? ""));
       case "diff.refresh":
         return this.refreshDiff(String(a.sessionId ?? ""));
+      case "elicitation.reply": // SPEC-012
+        return this.decideElicitation("reply", String(a.sessionId ?? ""), String(a.questionId ?? ""), a.answer != null ? String(a.answer) : undefined);
+      case "elicitation.reject":
+        return this.decideElicitation("reject", String(a.sessionId ?? ""), String(a.questionId ?? ""));
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);
@@ -1400,22 +1404,67 @@ export class ProjectContext {
 
   // ---- permissions ---------------------------------------------------------
 
-  async decidePermission(decision: PermissionDecision): Promise<PermissionAck> {
+  async decidePermission(decision: PermissionDecision, identity = "anonymous"): Promise<PermissionAck> {
     if (!this.adapter.respondToPermission) throw new Error("harness does not support permissions");
+    // Validate the decision against an OPEN permission (SPEC-012): reject an unknown id with a warn
+    // trace and NO adapter call — preventing a relay for a permission that isn't pending.
+    const pending = this.pendingPerms.get(decision.permissionId);
+    if (!pending) {
+      await this.trace.write({ kind: "permission.warn", projectId: this.projectId, reason: "unknown-permission", permissionId: decision.permissionId });
+      throw new Error(`unknown permissionId '${decision.permissionId}'`);
+    }
+    // Trace-BEFORE-relay, fail-safe (SPEC-012): the audit record must exist before the adapter acts.
+    // This write is intentionally NOT best-effort — if it throws, the relay below never runs.
+    await this.trace.write({
+      kind: "permission.decision",
+      at: Date.now(),
+      projectId: this.projectId,
+      permissionId: decision.permissionId,
+      sessionId: pending.sessionId,
+      granted: decision.decision !== "reject",
+      decision: decision.decision,
+      identity,
+      harness: this.adapter.id,
+    });
     if (decision.decision === "always") {
-      const pending = this.pendingPerms.get(decision.permissionId);
-      if (pending) {
-        const grant = this.grants.remember({
-          sessionId: pending.sessionId,
-          actionClass: pending.actionClass,
-          createdBy: "human",
-        });
-        await this.trace.write({ kind: "grant.remembered", grant, projectId: this.projectId });
-      }
+      const grant = this.grants.remember({ sessionId: pending.sessionId, actionClass: pending.actionClass, createdBy: "human" });
+      await this.trace.write({ kind: "grant.remembered", grant, projectId: this.projectId });
     }
     const ack = await this.adapter.respondToPermission(decision);
     await this.trace.write({ kind: "permission.ack", ack, projectId: this.projectId });
     return ack;
+  }
+
+  /**
+   * `elicitation.reply` / `elicitation.reject` (SPEC-012) — relay an agent-question decision to the
+   * adapter, trace-before-relay (fail-safe) with identity. Ownership-checked; capability-gated.
+   */
+  async decideElicitation(verb: "reply" | "reject", sessionId: string, questionId: string, answer?: string, identity = "anonymous"): Promise<{ ok: boolean; error?: string }> {
+    if (!this.sessionExists(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    const a = this.adapter as HarnessAdapter & {
+      respondToElicitation?: (q: string, ans: string) => Promise<void>;
+      rejectElicitation?: (q: string) => Promise<void>;
+    };
+    if (verb === "reply" ? !a.respondToElicitation : !a.rejectElicitation) {
+      return { ok: false, error: "harness does not support elicitation" };
+    }
+    await this.trace.write({
+      kind: "elicitation.decision",
+      at: Date.now(),
+      projectId: this.projectId,
+      questionId,
+      sessionId,
+      replied: verb === "reply",
+      ...(answer ? { answer } : {}),
+      identity,
+    });
+    try {
+      if (verb === "reply") await a.respondToElicitation!(questionId, answer ?? "");
+      else await a.rejectElicitation!(questionId);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   revokeGrant(grantId: string): Promise<void> {

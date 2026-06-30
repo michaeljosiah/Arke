@@ -307,6 +307,16 @@ export class OpenCodeAdapter implements HarnessAdapter {
     await this.http.req("POST", `/session/${ref.sessionId}/unrevert`);
   }
 
+  /** Answer an agent elicitation question (SPEC-012; maps to OpenCode `POST /question/:id/reply`). */
+  async respondToElicitation(questionId: string, answer: string): Promise<void> {
+    await this.http.req("POST", `/question/${questionId}/reply`, { answer });
+  }
+
+  /** Decline an agent elicitation question (SPEC-012; `POST /question/:id/reject`). */
+  async rejectElicitation(questionId: string): Promise<void> {
+    await this.http.req("POST", `/question/${questionId}/reject`);
+  }
+
   /**
    * The live model catalog the connected `opencode serve` can serve (capability: models, SPEC-005).
    * Reads `GET /config/providers` and flattens each provider's models into `ModelInfo`. The registry
