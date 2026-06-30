@@ -74,6 +74,8 @@ export class ProjectContext {
   private readonly registryResolver?: RegistryResolver;
   private readonly connectedInstanceId?: string;
   private registrySnapshot: RegistrySnapshot | null = null;
+  /** Serialises approveDraft per project so two concurrent approvals can't race the commit/rollback. */
+  private approvalInFlight = false;
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -299,12 +301,18 @@ export class ProjectContext {
     if (!specId) return null;
     const dir = resolve(this.root, "docs", "specifications");
     if (!existsSync(dir)) return null;
+    // Canonicalise both the project root and the specifications dir, then require the specs dir to
+    // resolve INSIDE the canonical root — otherwise a `docs/specifications -> /outside` symlink would
+    // make realDir an external directory and authorise every file under it (PR #18 review round 3).
+    let realRoot: string;
     let realDir: string;
     try {
+      realRoot = realpathSync.native(this.root);
       realDir = realpathSync.native(dir);
     } catch {
       return null;
     }
+    if (!isWithinRoot(realRoot, realDir)) return null;
     let entries: string[];
     try {
       entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
@@ -370,6 +378,19 @@ export class ProjectContext {
    * the client sees an error and can retry. A single transaction — no partial success.
    */
   private async approveDraft(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
+    // Serialise approvals: a concurrent second approval could otherwise capture the same draft text
+    // and, on a git no-op/failure, roll its stale copy back over the just-committed file (PR #18
+    // review round 3). One at a time per project.
+    if (this.approvalInFlight) throw new Error(`an approval is already in progress for '${specId}'`);
+    this.approvalInFlight = true;
+    try {
+      return await this.approveDraftLocked(specId, clientBranch);
+    } finally {
+      this.approvalInFlight = false;
+    }
+  }
+
+  private async approveDraftLocked(specId: string, clientBranch?: string): Promise<{ ok: true; specId: string; status: string; branch: string }> {
     const fail = async (reason: string): Promise<never> => {
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
       await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
@@ -427,7 +448,9 @@ export class ProjectContext {
    */
   private async convenePanel(specId: string, branch?: string): Promise<{ specId: string; branch?: string; convened: boolean; note: string }> {
     const found = this.findSpecFile(specId);
-    const fmBranch = found?.frontmatter.branch;
+    // No authoritative working draft → refuse, rather than acking a review of nothing (PR #18 review).
+    if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    const fmBranch = found.frontmatter.branch;
     // The frontmatter branch is the source of truth. A client-supplied branch that disagrees (a stale
     // preview, or `--branch` on the CLI) is rejected rather than recorded against the wrong branch
     // (PR #18 review). When no client branch is given, resolve from the spec file.

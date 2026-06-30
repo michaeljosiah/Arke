@@ -222,6 +222,17 @@ test("convenePanel acks with the resolved branch reference (no file content)", a
   ws.close();
 });
 
+test("convenePanel rejects a missing/typoed spec (no ack for a non-existent draft)", async () => {
+  const { c, port } = await coordinatorAt(repoWith(BRANCH));
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+  const res = await request("convenePanel", { specId: "SPEC-NOPE" });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /no specification file/);
+  ws.close();
+});
+
 test("convenePanel rejects a client branch that disagrees with the spec frontmatter", async () => {
   const { c, port } = await coordinatorAt(repoWith(BRANCH)); // frontmatter branch = feat/authoring-cockpit
   after(() => c.stop());

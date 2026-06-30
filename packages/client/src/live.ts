@@ -391,21 +391,29 @@ export function isCoordinatorConnected(): boolean {
 /** Re-activate the stored active project, then drain queued prompts SEQUENTIALLY against it. */
 async function drainCockpitQueue(): Promise<void> {
   if (outbound.size === 0) return;
+  // Re-bind this fresh socket to the active project BEFORE sending. If the rebind fails (project
+  // forgotten/unopenable), keep the queue intact rather than dispatching against the coordinator's
+  // default project (PR #18 review round 3).
   const active = (store.get() as any).connectedProject?.projectId;
-  if (active) await liveRequest('project.open', { projectId: active }, 90000); // re-bind before sending
+  if (active) {
+    const reopened = await liveRequest('project.open', { projectId: active }, 90000);
+    if (!reopened?.ok) {
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `reconnected, but couldn't reopen the project — ${outbound.size} message${outbound.size === 1 ? '' : 's'} held` } }));
+      return;
+    }
+  }
   const items = outbound.takeAll();
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
-  // Await each in order so FIFO holds and a stale-session rejection stops the rest, rather than
-  // firing every prompt.send concurrently (PR #18 review round 2).
-  let sent = 0;
-  for (const cmd of items) {
-    const res = await submitCockpitPrompt(cmd);
+  // Await each in order so FIFO holds. On a rejection, stop and RE-QUEUE the still-unsent remainder
+  // so other-session prompts aren't lost (PR #18 review rounds 2–3); the rejected one is dropped.
+  for (let i = 0; i < items.length; i++) {
+    const res = await submitCockpitPrompt(items[i]);
     if (!res?.ok) {
-      const remaining = items.length - sent - 1;
-      if (remaining > 0) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `replay stopped after a rejection — ${remaining} queued message${remaining === 1 ? '' : 's'} not sent` } }));
+      const remaining = items.slice(i + 1);
+      for (const cmd of remaining) outbound.enqueue(cmd);
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: `replay stopped after a rejection — ${remaining.length} message${remaining.length === 1 ? '' : 's'} re-queued for retry` } }));
       break;
     }
-    sent += 1;
   }
 }
 
@@ -436,8 +444,15 @@ export function fetchSpecFile(specId: string): Promise<any> {
   return liveRequest('spec.file', { specId });
 }
 
-/** Approve the working draft: branch-guarded commit + status advance on the host (SPEC-006). */
+/**
+ * Approve the working draft: branch-guarded commit + status advance on the host (SPEC-006). A
+ * governed write must NOT be queued in the reconnecting transport — a queued approval could replay
+ * on a later reconnect and commit without a visible result (PR #18 review round 3). Refuse offline.
+ */
 export function approveDraftLive(specId: string, branch?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to approve (approval is not queued)' });
+  }
   return liveRequest('approveDraft', { specId, branch }, 30000);
 }
 

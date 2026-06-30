@@ -182,7 +182,8 @@ function LiveCockpit() {
     const res = await approveDraftLive(specId, file?.branch);
     setApproving(false);
     if (res?.ok) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approved — ${specId} is now in-review` } })); void refresh(); }
-    // failure is surfaced via the spec.approval-failed event handler in live.ts
+    else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval failed — ${res.error}` } }));
+    // server-side failures also arrive via the spec.approval-failed event handler in live.ts
   };
 
   React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length]);
