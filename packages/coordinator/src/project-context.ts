@@ -162,6 +162,8 @@ export class ProjectContext {
   private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
   /** Spec lifecycle state by canonical specId, driven by PR webhooks (SPEC-008). */
   private readonly specRecords = new Map<string, SpecRecordState>();
+  /** Sessions whose diff a human has approved for PR (SPEC-011 diff-gate; idempotency guard). */
+  private readonly prApproved = new Set<string>();
   /** Durable fan-out records for restart idempotency (SPEC-009). */
   private fanoutStore?: FanOutStore;
   /** Per-spec queue of task commands held back by the concurrency cap (SPEC-009). */
@@ -675,6 +677,53 @@ export class ProjectContext {
     this.specRecords.set(cid, { ...(this.specRecords.get(cid) ?? {}), status: "in-review" });
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId: cid, status: "in-review", reason: "promoted" } as DomainEvent);
     return { ok: true, specId: cid, status: "in-review" };
+  }
+
+  // ---- session detail: rescue / steering / diff-gate (SPEC-011) -----------
+
+  /** The specId that owns a session, from the read model — or null if the session is unknown. */
+  private sessionOwner(sessionId: string): string | null {
+    return this.read.snapshot().find((c) => c.id === sessionId)?.specId ?? null;
+  }
+
+  /** `revert` / `unrevert` (SPEC-011) — git-checkpoint rescue, routed to the adapter, ownership-checked. */
+  private async rescue(verb: "revert" | "unrevert", sessionId: string, messageId?: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.sessionOwner(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (!this.adapter.capabilities().has("revert") || !this.adapter[verb]) {
+      return { ok: false, error: `harness does not support ${verb}` };
+    }
+    await this.trace.write({ kind: "client.request", projectId: this.projectId, verb, sessionId, ...(messageId ? { messageId } : {}) });
+    try {
+      if (verb === "revert") await this.adapter.revert!({ sessionId }, String(messageId ?? ""));
+      else await this.adapter.unrevert!({ sessionId });
+      return { ok: true };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId, specId: this.sessionOwner(sessionId) ?? sessionId, kind: "task", status: "error" } as DomainEvent);
+      return { ok: false, error };
+    }
+  }
+
+  /** `pr.approve` (SPEC-011) — the diff-review gate. Idempotent per session: a second approve is a no-op. */
+  private async approvePr(sessionId: string): Promise<{ ok: boolean; opened: boolean; error?: string }> {
+    if (!this.sessionOwner(sessionId)) return { ok: false, opened: false, error: `unknown session '${sessionId}'` };
+    if (this.prApproved.has(sessionId)) return { ok: true, opened: false }; // already approved → no double PR
+    this.prApproved.add(sessionId);
+    await this.trace.write({ kind: "client.request", projectId: this.projectId, verb: "pr.approve", sessionId });
+    return { ok: true, opened: true };
+  }
+
+  /** `diff.refresh` (SPEC-011) — re-fetch the diff via the adapter and re-emit `diff.finalized`. */
+  private async refreshDiff(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.sessionOwner(sessionId)) return { ok: false, error: `unknown session '${sessionId}'` };
+    if (!this.adapter.getDiff) return { ok: false, error: "harness does not support diff" };
+    try {
+      const d = await this.adapter.getDiff({ sessionId });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "diff.finalized", sessionId, added: d.added, removed: d.removed, files: d.files } as DomainEvent);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
@@ -1301,6 +1350,14 @@ export class ProjectContext {
         return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
       case "spec.promote":
         return this.promoteSpec(String(a.specId ?? "")); // SPEC-010: human board correction draft→in-review
+      case "revert": // SPEC-011 rescue
+        return this.rescue("revert", String(a.sessionId ?? ""), a.messageId ? String(a.messageId) : undefined);
+      case "unrevert":
+        return this.rescue("unrevert", String(a.sessionId ?? ""));
+      case "pr.approve": // SPEC-011 diff-review gate (idempotent)
+        return this.approvePr(String(a.sessionId ?? ""));
+      case "diff.refresh":
+        return this.refreshDiff(String(a.sessionId ?? ""));
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);

@@ -26,6 +26,7 @@ const CAPABILITY_ENDPOINTS: ReadonlyArray<{ cap: Capability; match: RegExp }> = 
   { cap: "permissions", match: /^\/permission\/\*\/reply$/ },
   { cap: "commands", match: /^\/session\/\*\/command$/ },
   { cap: "models", match: /^\/config\/providers$/ }, // listModels() — provider/model catalog (SPEC-005)
+  { cap: "revert", match: /^\/session\/\*\/revert$/ }, // revert()/unrevert() — git-checkpoint rescue (SPEC-011)
 ];
 
 /** Capabilities without which the adapter cannot serve its purpose. */

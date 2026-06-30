@@ -131,6 +131,8 @@ export const store = createStore({
   // that have a completed review (the cockpit approval gate reads this).
   panel: null,
   reviewedSpecs: [],
+  // Pending agent elicitation (SPEC-011): a structured question overlay for the active session.
+  elicitation: null,
   permission: null,
   entryFolder: null,
   theme: 'light',

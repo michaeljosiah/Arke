@@ -65,6 +65,30 @@ export const SpecBranchMismatchEvent = base.extend({
   pushedBranch: z.string(),
 });
 
+/** SPEC-011: an agent asks the human a structured question mid-run (maps to OpenCode `question.asked`). */
+export const ElicitationAskedEvent = base.extend({
+  type: z.literal("elicitation.asked"),
+  sessionId: z.string(),
+  elicitationId: z.string(),
+  question: z.string(),
+  options: z.array(z.string()).optional(),
+});
+
+/** SPEC-011: the human answered an elicitation. */
+export const ElicitationRepliedEvent = base.extend({
+  type: z.literal("elicitation.replied"),
+  sessionId: z.string(),
+  elicitationId: z.string(),
+  answer: z.string(),
+});
+
+/** SPEC-011: the human dismissed/rejected an elicitation without answering. */
+export const ElicitationRejectedEvent = base.extend({
+  type: z.literal("elicitation.rejected"),
+  sessionId: z.string(),
+  elicitationId: z.string(),
+});
+
 /** SPEC-008: the read-model status diverged from the file's frontmatter status (reconciliation). */
 export const SpecDivergenceWarningEvent = base.extend({
   type: z.literal("spec.divergence-warning"),
@@ -340,6 +364,9 @@ export const DomainEvent = z.discriminatedUnion("type", [
   ProjectionStaleEvent,
   SpecBranchMismatchEvent,
   SpecDivergenceWarningEvent,
+  ElicitationAskedEvent,
+  ElicitationRepliedEvent,
+  ElicitationRejectedEvent,
   SessionStatusEvent,
   TodoUpdatedEvent,
   DiffFinalizedEvent,

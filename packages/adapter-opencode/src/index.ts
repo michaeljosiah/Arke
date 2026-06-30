@@ -297,6 +297,16 @@ export class OpenCodeAdapter implements HarnessAdapter {
     };
   }
 
+  /** Roll a session back to the checkpoint before `messageId`'s turn (capability: revert, SPEC-011). */
+  async revert(ref: SessionRef, messageId: string): Promise<void> {
+    await this.http.req("POST", `/session/${ref.sessionId}/revert`, { messageID: messageId });
+  }
+
+  /** Undo the most recent revert (capability: revert, SPEC-011). */
+  async unrevert(ref: SessionRef): Promise<void> {
+    await this.http.req("POST", `/session/${ref.sessionId}/unrevert`);
+  }
+
   /**
    * The live model catalog the connected `opencode serve` can serve (capability: models, SPEC-005).
    * Reads `GET /config/providers` and flattens each provider's models into `ModelInfo`. The registry

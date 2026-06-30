@@ -102,6 +102,18 @@ function applyEvent(ev: any) {
       if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
       break;
     }
+    case 'elicitation.asked': {
+      // SPEC-011: an agent's structured question — surfaced as an overlay for the session, not a chat line.
+      store.set({ elicitation: { sessionId: ev.sessionId, elicitationId: ev.elicitationId, question: ev.question, options: ev.options || [] } });
+      rail('elicitation.asked', `elicitation.asked · ${ev.sessionId} · ${ev.question}`, ts);
+      break;
+    }
+    case 'elicitation.replied':
+    case 'elicitation.rejected': {
+      const cur: any = store.get().elicitation;
+      if (cur && cur.elicitationId === ev.elicitationId) store.set({ elicitation: null });
+      break;
+    }
     case 'spec.branch-mismatch': {
       store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `branch mismatch on ${ev.specId}: frontmatter '${ev.frontmatterBranch}' ≠ pushed '${ev.pushedBranch}'` } }));
       rail('spec.branch-mismatch', `spec.branch-mismatch · ${ev.specId}`, ts);
@@ -626,6 +638,20 @@ export function stopLive(): void {
 export function liveSend(msg: unknown): void {
   transport?.send(msg);
 }
+
+// ---- session detail: rescue / steering / diff-gate (SPEC-011) ----
+// All governed mutations: refused while offline (not queued), routed coordinator → adapter.
+const governed = (op: string, args: unknown) =>
+  isCoordinatorConnected() ? liveRequest(op, args, 30000) : Promise.resolve({ ok: false, error: "offline" });
+
+/** Approve a session's diff so the coordinator may open its PR (idempotent server-side). */
+export const approvePrLive = (sessionId: string) => governed("pr.approve", { sessionId });
+/** Roll a session back to the checkpoint before `messageId` (needs the harness `revert` capability). */
+export const revertSessionLive = (sessionId: string, messageId: string) => governed("revert", { sessionId, messageId });
+/** Undo the most recent revert. */
+export const unrevertSessionLive = (sessionId: string) => governed("unrevert", { sessionId });
+/** Re-fetch the diff from the adapter and re-emit diff.finalized. */
+export const refreshDiffLive = (sessionId: string) => governed("diff.refresh", { sessionId });
 
 /** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
 export function reconnectLive(): void {
