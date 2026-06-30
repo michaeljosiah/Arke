@@ -27,6 +27,15 @@ import {
   parseCapabilities,
 } from "./spec-lifecycle.js";
 import {
+  maxConcurrentTasks,
+  parseTasks,
+  planFanOut,
+  type FanOutRecord,
+  type FanOutTask,
+  type TaskCommand,
+} from "./fanout.js";
+import { FanOutStore } from "./fanout-store.js";
+import {
   RegistryResolver,
   type RegistryConfig,
   type RegistryInstanceStatus,
@@ -153,6 +162,14 @@ export class ProjectContext {
   private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
   /** Spec lifecycle state by canonical specId, driven by PR webhooks (SPEC-008). */
   private readonly specRecords = new Map<string, SpecRecordState>();
+  /** Durable fan-out records for restart idempotency (SPEC-009). */
+  private fanoutStore?: FanOutStore;
+  /** Per-spec queue of task commands held back by the concurrency cap (SPEC-009). */
+  private readonly fanoutQueues = new Map<string, TaskCommand[]>();
+  /** Specs whose fan-out is halted because the spec was demoted away from approved (SPEC-009). */
+  private readonly fanoutHalted = new Set<string>();
+  /** task sessionId → its specId, so a task's session.idle can drain the spec's queue (SPEC-009). */
+  private readonly taskSessions = new Map<string, { specId: string; taskIndex: number }>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
 
@@ -203,6 +220,8 @@ export class ProjectContext {
   async start(): Promise<void> {
     this.classify();
     await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
+    this.fanoutStore = new FanOutStore(resolve(this.root, ".arke", "fanout.ndjson")); // SPEC-009
+    this.fanoutStore.load();
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -551,6 +570,12 @@ export class ProjectContext {
         /* best-effort: the read model is authoritative for the gate; a write failure surfaces as divergence */
       }
       await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason });
+      // SPEC-009 demotion guard: leaving `approved` while tasks are still queued halts the queue —
+      // queued tasks for a no-longer-approved spec must not be dispatched.
+      if (status !== "approved" && (this.fanoutQueues.get(specId)?.length ?? 0) > 0) {
+        this.fanoutHalted.add(specId);
+        await this.trace.write({ kind: "fanout.halted", projectId: this.projectId, specId, reason: "spec-demoted" });
+      }
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason } as DomainEvent);
     };
 
@@ -583,6 +608,8 @@ export class ProjectContext {
         }
         // Record the normative baseline so a later material change can be detected.
         await setStatus("approved", "pr-approved", { normativeHash: normativeHash(found.text) });
+        this.fanoutHalted.delete(specId);
+        void this.fanOut(specId); // SPEC-009: fan the task list out concurrently (non-blocking)
         return { applied: "approved", specId };
       }
       case "merged":
@@ -624,6 +651,105 @@ export class ProjectContext {
       }
     }
     return null;
+  }
+
+  // ---- parallel task fan-out (SPEC-009) -----------------------------------
+
+  /**
+   * Fan an approved spec's task list out into concurrent child task sessions (SPEC-009). Each task
+   * runs in its own git worktree off the feature branch. Idempotent across restart (FanOutStore),
+   * non-blocking (commands dispatch concurrently), and capped at `ARKE_MAX_CONCURRENT_TASKS` with the
+   * excess queued and drained as task sessions complete.
+   */
+  async fanOut(specId: string): Promise<{ dispatched: number; queued: number; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { dispatched: 0, queued: 0, error: "spec not found" };
+    const cid = found.canonicalId;
+    const featureBranch = found.frontmatter.branch ?? "";
+    const tasks = parseTasks(found.text);
+    if (tasks.filter((t) => !t.done).length === 0) {
+      // Graceful failure: no actionable tasks (SPEC-009). Error on the spec session + warn trace.
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: cid, specId: cid, kind: "spec", status: "error" } as DomainEvent);
+      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cid, reason: "no-tasks" });
+      return { dispatched: 0, queued: 0, error: "no-tasks" };
+    }
+    const store = this.fanoutStore;
+    const already = store?.dispatchedIndices(cid) ?? new Set<number>();
+    const record: FanOutRecord = store?.get(cid) ?? { specId: cid, specSessionId: cid, featureBranch, tasks: [], startedAt: Date.now() };
+    const runningCount = record.tasks.filter((t) => t.status === "running" || t.status === "dispatching").length;
+    const plan = planFanOut({ specId: cid, specSessionId: cid, featureBranch, tasks, alreadyDispatched: already, runningCount, limit: maxConcurrentTasks() });
+
+    // Queue the excess (drained on task completion).
+    if (plan.queued.length) {
+      this.fanoutQueues.set(cid, [...(this.fanoutQueues.get(cid) ?? []), ...plan.queued]);
+      for (const cmd of plan.queued) record.tasks.push({ taskIndex: cmd.taskIndex, taskText: cmd.taskText, status: "queued", worktreeBranch: cmd.worktreeBranch });
+    }
+    store?.put(record);
+
+    // Dispatch the immediate set concurrently — never await one before starting the next. Each task is
+    // isolated: a per-task failure (collision/worktree/dispatch) does not abort the others.
+    const results = await Promise.allSettled(plan.dispatch.map((cmd) => this.dispatchTask(cmd)));
+    const dispatched = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+    return { dispatched, queued: plan.queued.length };
+  }
+
+  /** Execute one task command: collision check → worktree → session → dispatchAsync, fully isolated.
+   *  Returns true only when the task was actually dispatched (false on any per-task failure). */
+  private async dispatchTask(cmd: TaskCommand): Promise<boolean> {
+    const store = this.fanoutStore;
+    const record = store?.get(cmd.specId) ?? { specId: cmd.specId, specSessionId: cmd.specSessionId, featureBranch: cmd.featureBranch, tasks: [], startedAt: Date.now() };
+    const upsert = (patch: Partial<FanOutTask>) => {
+      const existing = record.tasks.find((t) => t.taskIndex === cmd.taskIndex);
+      if (existing) Object.assign(existing, patch);
+      else record.tasks.push({ taskIndex: cmd.taskIndex, taskText: cmd.taskText, status: "dispatching", ...patch });
+      store?.put(record);
+    };
+    const fail = async (reason: string) => {
+      upsert({ status: "failed", error: reason });
+      await this.trace.write({ kind: "dispatch.failed", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, worktreeBranch: cmd.worktreeBranch, reason });
+      // The task card moves to needs-human via a waiting status the read model maps to that column.
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: `${cmd.specId}#task-${cmd.taskIndex}`, specId: cmd.specId, kind: "task", status: "error" } as DomainEvent);
+    };
+
+    upsert({ status: "dispatching", worktreeBranch: cmd.worktreeBranch });
+    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, worktreeBranch: cmd.worktreeBranch });
+
+    // Branch-collision guard: an existing branch means an orphaned worktree from a prior run.
+    const exists = spawnSync("git", ["branch", "--list", cmd.worktreeBranch], gitOpts(this.root));
+    if ((exists.stdout ?? "").trim().length > 0) {
+      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, reason: "branch-collision", branch: cmd.worktreeBranch });
+      await fail(`worktree branch '${cmd.worktreeBranch}' already exists`);
+      return false;
+    }
+    // Create the isolated worktree off the feature branch (coordinator-derived branch name; no user input).
+    const wtPath = resolve(this.root, ".arke", "worktrees", cmd.worktreeBranch.replace(/[^a-zA-Z0-9-]+/g, "_"));
+    const add = spawnSync("git", ["worktree", "add", "-b", cmd.worktreeBranch, wtPath, cmd.featureBranch], gitOpts(this.root));
+    if (add.status !== 0) {
+      await fail(`git worktree add failed: ${(add.stderr || add.stdout || "").toString().trim().slice(0, 200)}`);
+      return false;
+    }
+
+    try {
+      const ref = await this.adapter.createSession({ specId: cmd.specId, parent: cmd.specSessionId });
+      this.taskSessions.set(ref.sessionId, { specId: cmd.specId, taskIndex: cmd.taskIndex });
+      upsert({ status: "running", sessionId: ref.sessionId });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: cmd.taskText }] });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cmd.specId, kind: "task", status: "running" } as DomainEvent);
+      await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, sessionId: ref.sessionId });
+      return true;
+    } catch (err) {
+      await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /** Drain one queued task for a spec when a running task completes (respecting the demotion halt). */
+  private async drainFanOut(specId: string): Promise<void> {
+    if (this.fanoutHalted.has(specId)) return; // spec demoted → hold queued tasks
+    const queue = this.fanoutQueues.get(specId);
+    if (!queue || queue.length === 0) return;
+    const next = queue.shift()!;
+    await this.dispatchTask(next);
   }
 
   /**
@@ -1138,6 +1264,8 @@ export class ProjectContext {
         return this.readSpecFile(String(a.specId ?? ""));
       case "spec.library":
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
+      case "spec.fanout":
+        return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);
@@ -1347,6 +1475,7 @@ export class ProjectContext {
 
       await this.emit(event);
       await this.observeReviewerEvent(event);
+      await this.observeTaskCompletion(event); // SPEC-009: drain the fan-out queue on task completion
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
@@ -1383,6 +1512,25 @@ export class ProjectContext {
       const link = this.reviewerSessions.get(sessionId);
       await this.trace.write({ kind: "policy.violation", projectId: this.projectId, panelId: link?.panelId, reviewerRole: link?.role, action: "diff.finalized", sessionId });
     }
+  }
+
+  /** When a task session completes (idle/done), mark its FanOutRecord and drain a queued task (SPEC-009). */
+  private async observeTaskCompletion(event: DomainEvent): Promise<void> {
+    if (event.type !== "session.status") return;
+    if (event.status !== "done" && event.status !== "idle") return;
+    const link = this.taskSessions.get(event.sessionId);
+    if (!link) return;
+    const store = this.fanoutStore;
+    const record = store?.get(link.specId);
+    if (record) {
+      const task = record.tasks.find((t) => t.taskIndex === link.taskIndex);
+      if (task && task.status === "running") {
+        task.status = "done";
+        store?.put(record);
+      }
+    }
+    this.taskSessions.delete(event.sessionId);
+    await this.drainFanOut(link.specId);
   }
 
   /** Stamp ingest seq + ts + projectId, fold into the read model, trace (before push), publish. */
