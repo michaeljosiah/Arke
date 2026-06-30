@@ -32,6 +32,16 @@ export class OutboundQueue<T = unknown> {
     return drained;
   }
 
+  /**
+   * Remove and return every queued command without sending — the caller drives the sends itself
+   * (e.g. sequentially, awaiting each, so FIFO order and stale-session stops are preserved).
+   */
+  takeAll(): T[] {
+    const taken = this.q.slice();
+    this.q = [];
+    return taken;
+  }
+
   clear(): void {
     this.q = [];
   }

@@ -222,6 +222,17 @@ test("convenePanel acks with the resolved branch reference (no file content)", a
   ws.close();
 });
 
+test("convenePanel rejects a client branch that disagrees with the spec frontmatter", async () => {
+  const { c, port } = await coordinatorAt(repoWith(BRANCH)); // frontmatter branch = feat/authoring-cockpit
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+  const res = await request("convenePanel", { specId: "SPEC-TEST", branch: "feat/wrong" });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /branch mismatch/);
+  ws.close();
+});
+
 /** An adapter that parks one session in `waiting` so the stale-session guard can be exercised. */
 class WaitingAdapter implements HarnessAdapter {
   readonly id = "Waiting";

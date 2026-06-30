@@ -388,13 +388,25 @@ export function isCoordinatorConnected(): boolean {
   return !!transport && transport.state === 'open';
 }
 
-/** Re-activate the stored active project, then drain queued prompts in order against it. */
+/** Re-activate the stored active project, then drain queued prompts SEQUENTIALLY against it. */
 async function drainCockpitQueue(): Promise<void> {
   if (outbound.size === 0) return;
   const active = (store.get() as any).connectedProject?.projectId;
   if (active) await liveRequest('project.open', { projectId: active }, 90000); // re-bind before sending
-  const drained = outbound.drain((cmd) => { void submitCockpitPrompt(cmd); });
-  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${drained.length} queued message${drained.length === 1 ? '' : 's'}` } }));
+  const items = outbound.takeAll();
+  store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: 0, notice: `reconnected — replaying ${items.length} queued message${items.length === 1 ? '' : 's'}` } }));
+  // Await each in order so FIFO holds and a stale-session rejection stops the rest, rather than
+  // firing every prompt.send concurrently (PR #18 review round 2).
+  let sent = 0;
+  for (const cmd of items) {
+    const res = await submitCockpitPrompt(cmd);
+    if (!res?.ok) {
+      const remaining = items.length - sent - 1;
+      if (remaining > 0) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `replay stopped after a rejection — ${remaining} queued message${remaining === 1 ? '' : 's'} not sent` } }));
+      break;
+    }
+    sent += 1;
+  }
 }
 
 /** Issue a prompt.send request and surface a stale-session (or other) rejection in the cockpit. */
@@ -409,10 +421,10 @@ async function submitCockpitPrompt(args: any): Promise<any> {
  * coordinator's response so a stale-session rejection is visible); when offline it is queued,
  * bounded at 50 — a full queue is refused, never silently dropped.
  */
-export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string }> {
+export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
   if (transport && transport.state === 'open') {
     const res = await submitCockpitPrompt(args);
-    return res?.ok ? { status: 'sent' } : { status: 'rejected', error: res?.error };
+    return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId } : { status: 'rejected', error: res?.error };
   }
   const accepted = outbound.enqueue(args);
   store.set((s: any) => ({ cockpit: { ...s.cockpit, queued: outbound.size, notice: accepted ? `offline — queued ${outbound.size} message${outbound.size === 1 ? '' : 's'}` : 'offline — queue full (50); message not queued' } }));

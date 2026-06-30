@@ -299,6 +299,12 @@ export class ProjectContext {
     if (!specId) return null;
     const dir = resolve(this.root, "docs", "specifications");
     if (!existsSync(dir)) return null;
+    let realDir: string;
+    try {
+      realDir = realpathSync.native(dir);
+    } catch {
+      return null;
+    }
     let entries: string[];
     try {
       entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
@@ -307,17 +313,17 @@ export class ProjectContext {
     }
     for (const f of entries) {
       const absPath = resolve(dir, f);
-      // Confine reads to the project root — and resolve symlinks first, so a planted entry like
-      // `docs/specifications/secret.md -> /etc/passwd` cannot exfiltrate a file outside the root
-      // (PR #18 review). The lexical path AND the realpath must both stay within the root.
-      if (!isWithinRoot(this.root, absPath)) continue;
+      // Confine reads to `docs/specifications/` itself (not merely the repo root): resolve symlinks
+      // first, so a planted entry like `secret.md -> /etc/passwd` OR `leak.md -> ../../in-repo-file`
+      // is skipped — only files that actually live under the specifications dir are served/written
+      // (PR #18 review, rounds 1–2).
       let real: string;
       try {
         real = realpathSync.native(absPath);
       } catch {
         continue;
       }
-      if (!isWithinRoot(this.root, real)) continue;
+      if (!isWithinRoot(realDir, real)) continue;
       let text: string;
       try {
         text = readFileSync(real, "utf8");
@@ -421,7 +427,14 @@ export class ProjectContext {
    */
   private async convenePanel(specId: string, branch?: string): Promise<{ specId: string; branch?: string; convened: boolean; note: string }> {
     const found = this.findSpecFile(specId);
-    const resolvedBranch = branch ?? found?.frontmatter.branch;
+    const fmBranch = found?.frontmatter.branch;
+    // The frontmatter branch is the source of truth. A client-supplied branch that disagrees (a stale
+    // preview, or `--branch` on the CLI) is rejected rather than recorded against the wrong branch
+    // (PR #18 review). When no client branch is given, resolve from the spec file.
+    if (branch && fmBranch && branch !== fmBranch) {
+      throw new Error(`branch mismatch: client sent '${branch}' but spec '${specId}' is on '${fmBranch}'`);
+    }
+    const resolvedBranch = fmBranch ?? branch;
     await this.trace.write({ kind: "panel.convene", projectId: this.projectId, specId, branch: resolvedBranch ?? null });
     return {
       specId,

@@ -23,6 +23,15 @@ test("drains in FIFO order and empties the queue", () => {
   assert.equal(q.isFull, false);
 });
 
+test("takeAll returns items in order and empties without sending", () => {
+  const q = new OutboundQueue<string>(10);
+  q.enqueue("x");
+  q.enqueue("y");
+  const taken = q.takeAll();
+  assert.deepEqual(taken, ["x", "y"]); // FIFO, caller drives the sends (e.g. sequentially)
+  assert.equal(q.size, 0);
+});
+
 test("a refused enqueue can succeed again after a drain frees space", () => {
   const q = new OutboundQueue<number>(1);
   assert.equal(q.enqueue(1), true);

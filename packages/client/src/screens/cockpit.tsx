@@ -85,7 +85,12 @@ function LiveCockpit() {
   const [role, setRole] = React.useState('spec-author');
   const [tier, setTier] = React.useState('capable');
   const [sessionId, setSessionId] = React.useState<string | null>(null);
-  const [humanMsgs, setHumanMsgs] = React.useState<any[]>([]);
+  // A single ordered conversation: human turns are appended when accepted, agent turns are merged
+  // from the live transcript as they arrive — so order is chronological (PR #18 review round 2).
+  const [convo, setConvo] = React.useState<any[]>([]);
+  // messageId → the agent role that produced it, captured at send time, so each agent turn keeps its
+  // own attribution even if the composer's role selector changes later (PR #18 review round 2).
+  const roleByMsgId = React.useRef<Map<string, string>>(new Map());
   const [approving, setApproving] = React.useState(false);
   const scroller = React.useRef<any>(null);
 
@@ -123,9 +128,32 @@ function LiveCockpit() {
 
   const doc = React.useMemo(() => (file?.text ? parseSpecDoc(file.text) : null), [file?.text]);
 
+  // Merge live transcript entries into the ordered conversation as they arrive/update — appended
+  // after the human turn that prompted them, so the chat stays chronological. Each agent turn keeps
+  // the role it was sent to (roleByMsgId), independent of the current composer selection.
+  React.useEffect(() => {
+    if (!transcript.length) return;
+    const modelLabel = liveCard?.model;
+    setConvo((prev) => {
+      let next = prev;
+      for (const t of transcript) {
+        const key = 'a:' + t.messageId;
+        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? 'agent', model: modelLabel, streaming: t.isStreaming };
+        const idx = next.findIndex((x: any) => x.key === key);
+        if (idx === -1) next = [...next, entry];
+        else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) {
+          next = next.slice();
+          next[idx] = { ...next[idx], text: entry.text, streaming: entry.streaming, model: modelLabel };
+        }
+      }
+      return next;
+    });
+  }, [transcriptSig, liveCard?.model]);
+
   const send = async () => {
     if (!draft.trim() || !specId) return;
     const text = draft.trim();
+    const sentAs = role;
     let sid = sessionId;
     if (!sid) {
       // Don't attempt session.create while offline — it would time out and the message would be
@@ -139,10 +167,13 @@ function LiveCockpit() {
       if (sid) setSessionId(sid);
     }
     if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
-    // A session exists — now it's safe to clear the composer and dispatch/queue the prompt.
-    setHumanMsgs((m) => [...m, { id: 'h' + Date.now(), role: 'human', text }]);
+    // Dispatch/queue FIRST; only clear the composer + record the turn once it was actually accepted,
+    // so a rejected/queue-full prompt stays editable (PR #18 review rounds 1–2).
+    const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text });
+    if (outcome.status === 'rejected' || outcome.status === 'full') return; // notice already set; keep draft
+    if (outcome.correlationId) roleByMsgId.current.set(outcome.correlationId, sentAs); // attribute the reply
+    setConvo((c) => [...c, { key: 'h:' + Date.now(), kind: 'human', text }]);
     setDraft('');
-    await sendCockpitPrompt({ sessionId: sid, agent: role, tier, message: text });
   };
 
   const approve = async () => {
@@ -154,13 +185,9 @@ function LiveCockpit() {
     // failure is surfaced via the spec.approval-failed event handler in live.ts
   };
 
-  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [transcript.length, humanMsgs.length]);
+  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length]);
 
-  // Interleave the live agent transcript with the engineer's own messages, in arrival order.
-  const turns = [
-    ...transcript.map((t: any) => ({ kind: 'agent', text: t.text, model: liveCard?.model, agent: 'agent', streaming: t.isStreaming })),
-    ...humanMsgs.map((h: any) => ({ kind: 'human', text: h.text })),
-  ];
+  const turns = convo;
 
   return e('div', { style: { display: 'flex', height: '100%' } },
     e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
@@ -172,7 +199,7 @@ function LiveCockpit() {
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
         turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
-          : turns.map((m: any, i: number) => e(AgentMessage, { key: i, role: m.kind, agent: m.kind === 'agent' ? role : undefined, model: m.model }, m.text || '…'))),
+          : turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'))),
       e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
         e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
           e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
