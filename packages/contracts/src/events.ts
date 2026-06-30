@@ -271,6 +271,7 @@ export const PanelAgreedEvent = base.extend({
 export const PanelCompleteEvent = base.extend({
   type: z.literal("panel.complete"),
   panelId: z.string(),
+  specId: z.string(),
   status: z.enum(["complete", "failed"]),
   issueCount: z.number().int().nonnegative(),
   adjudicatedCount: z.number().int().nonnegative(),

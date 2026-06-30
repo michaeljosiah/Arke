@@ -208,7 +208,7 @@ function applyEvent(ev: any) {
         panel: {
           panelId: ev.panelId, specId: ev.specId, status: 'running',
           reviewers: (ev.reviewers || []).map((r: any) => ({ role: r.role, model: r.model, status: 'running', issues: [] })),
-          agreedIds: [], agreed: [], notice: null,
+          agreedIds: [], notice: null,
         },
       });
       rail('panel.started', `panel.started · ${ev.specId} · ${(ev.reviewers || []).length} reviewers`, ts);
@@ -225,10 +225,7 @@ function applyEvent(ev: any) {
     }
     case 'panel.agreed': {
       updatePanel(ev.panelId, (p: any) => {
-        const ids = new Set([...(p.agreedIds || []), ...(ev.issueIds || [])]);
-        p.agreedIds = [...ids];
-        if (!(p.agreed || []).some((a: any) => a.section === ev.section && sameIds(a.issueIds, ev.issueIds)))
-          p.agreed = [...(p.agreed || []), { section: ev.section, issueIds: ev.issueIds || [] }];
+        p.agreedIds = [...new Set([...(p.agreedIds || []), ...(ev.issueIds || [])])];
       });
       rail('panel.agreed', `panel.agreed · ${ev.section} · ${(ev.issueIds || []).length} reviewers concur`, ts);
       break;
@@ -246,9 +243,10 @@ function applyEvent(ev: any) {
         p.status = ev.status;
         for (const r of p.reviewers) if (r.status === 'running') r.status = 'done';
       });
-      if (ev.status === 'complete') {
-        const sid = (store.get() as any).panel?.specId;
-        if (sid) store.set((s: any) => ({ reviewedSpecs: s.reviewedSpecs.includes(sid) ? s.reviewedSpecs : [...s.reviewedSpecs, sid] }));
+      // Key the gate off the completed panel's OWN specId (carried on the event), not the current
+      // store slot — a late completion of a superseded panel must not mark a different spec reviewed.
+      if (ev.status === 'complete' && ev.specId) {
+        store.set((s: any) => ({ reviewedSpecs: s.reviewedSpecs.includes(ev.specId) ? s.reviewedSpecs : [...s.reviewedSpecs, ev.specId] }));
       }
       rail('panel.complete', `panel.complete · ${ev.status} · ${ev.issueCount} issues`, ts);
       break;
@@ -307,10 +305,6 @@ function updatePanel(panelId: string, fn: (p: any) => void) {
     fn(next);
     return { panel: next };
   });
-}
-
-function sameIds(a: string[] = [], b: string[] = []): boolean {
-  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ---- registry projection (SPEC-005) ----

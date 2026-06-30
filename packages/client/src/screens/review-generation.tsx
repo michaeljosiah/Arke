@@ -52,10 +52,11 @@ function LiveReview() {
   const agreed = new Set<string>(panel.agreedIds || []);
   const running = panel.status === 'running';
   const allIssues = reviewers.flatMap((r: any) => (r.issues || []).map((i: any) => ({ ...i, role: r.role })));
-  // Adjudicate the issues that matter: anything blocking, or anything two reviewers concur on.
-  const adjudicable = allIssues.filter((i: any) => i.severity === 'blocking' || agreed.has(i.issueId));
-  const seenAdj = new Set<string>();
-  const adjList = adjudicable.filter((i: any) => (seenAdj.has(i.issueId) ? false : (seenAdj.add(i.issueId), true)));
+  // Adjudicate the issues that matter: anything blocking, or anything two reviewers concur on — each
+  // issueId once (dedup by id, first occurrence wins).
+  const byId = new Map<string, any>();
+  for (const i of allIssues) if (!byId.has(i.issueId)) byId.set(i.issueId, i);
+  const adjList = [...byId.values()].filter((i: any) => i.severity === 'blocking' || agreed.has(i.issueId));
 
   const decide = async (issueId: string, action: 'accepted' | 'dismissed' | 'sent-back') => {
     setBusy(issueId);

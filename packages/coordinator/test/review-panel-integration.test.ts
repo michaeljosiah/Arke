@@ -165,14 +165,14 @@ function connect(port: number) {
     return waitFor((f) => f.type === "response" && f.id === id);
   };
   const ev = (t: string, extra: (e: any) => boolean = () => true) => waitFor((f) => f.type === "event" && f.event?.type === t && extra(f.event));
-  return { ws, ready, waitFor, request, ev };
+  return { ws, ready, waitFor, request, ev, frames };
 }
 
 test("a panel runs end to end: issues, agreement, completion — and satisfies the approval gate", async () => {
   const dir = repoWithSpec();
   const { c, port } = await start(dir, registryConfig());
   after(() => c.stop());
-  const { ws, ready, request, ev } = connect(port);
+  const { ws, ready, request, ev, frames } = connect(port);
   await ready;
 
   const conv = await request("convenePanel", { specId: "SPEC-TEST" });
@@ -182,9 +182,15 @@ test("a panel runs end to end: issues, agreement, completion — and satisfies t
 
   await ev("panel.started");
   await ev("panel.issue", (e) => e.reviewerRole === "reviewer-a");
+  await ev("panel.issue", (e) => e.reviewerRole === "reviewer-b"); // BOTH reviewers' issues captured (no dropped-on-race)
   await ev("panel.agreed", (e) => e.section === SECTION); // both reviewers hit the same section
   const complete = await ev("panel.complete");
   assert.equal(complete.event.status, "complete");
+  assert.equal(complete.event.specId, "SPEC-TEST"); // panel.complete carries its own specId (gate keys off it)
+
+  // panel.started must reach the client before any panel.issue, so the UI has columns to fold into.
+  const idx = (pred: (e: any) => boolean) => frames.findIndex((f) => f.type === "event" && pred(f.event));
+  assert.ok(idx((e) => e.type === "panel.started") < idx((e) => e.type === "panel.issue"));
 
   // The finalisation gate is now satisfied → approveDraft commits.
   const appr = await request("approveDraft", { specId: "SPEC-TEST" });

@@ -93,6 +93,9 @@ interface ReviewPanel {
   branch?: string;
   startedAt: number;
   requirementsSectionHash: string;
+  /** Normalised section identifier (anatomy key + title, lowercased) → hash of that section's CONTENT
+   *  at panel start. Used to anchor issues by section content rather than the reviewer's label string. */
+  sectionHashes: Map<string, string>;
   reviewers: PanelReviewerState[];
   issues: PanelIssueState[];
   agreedHashes: Set<string>;
@@ -169,7 +172,7 @@ export class ProjectContext {
   /** Classify the folder, register it as a recent, probe reachability, and start the pump if ready. */
   async start(): Promise<void> {
     this.classify();
-    this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
+    await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -576,7 +579,15 @@ export class ProjectContext {
     }
 
     const panelId = `panel-${randomUUID()}`;
-    const requirementsSectionHash = sectionHashOf(doc.sections.find((s) => s.key === "requirements")?.markdown ?? "");
+    // Hash each section's CONTENT (not its label) so agreement anchors to the reviewed text. Key by
+    // both the anatomy key and the lowercased title, since a reviewer may cite either.
+    const sectionHashes = new Map<string, string>();
+    for (const s of doc.sections) {
+      const h = sectionHashOf(s.markdown);
+      sectionHashes.set(s.key.toLowerCase(), h);
+      sectionHashes.set(s.title.toLowerCase(), h);
+    }
+    const requirementsSectionHash = sectionHashes.get("requirements") ?? sectionHashOf("");
     const grounding = this.groundingSummary();
     const prompt = buildReviewerPrompt(found.text, grounding);
     const panel: ReviewPanel = {
@@ -585,21 +596,24 @@ export class ProjectContext {
       ...(resolvedBranch ? { branch: resolvedBranch } : {}),
       startedAt: Date.now(),
       requirementsSectionHash,
+      sectionHashes,
       reviewers: [],
       issues: [],
       agreedHashes: new Set(),
       status: "running",
     };
 
-    // Dispatch each reviewer as a parallel, read-only session (HarnessAdapter.dispatchAsync).
+    // Create every reviewer session and register the FULLY-POPULATED panel before dispatching anything.
+    // dispatchAsync yields, so an early reviewer message must find a panel that already knows all its
+    // reviewers — otherwise its issues are dropped, or maybeCompletePanel completes a half-built panel.
     for (const r of validation.reviewers) {
       const ref = await this.adapter.createSession({ specId: cid });
       this.reviewerSessions.set(ref.sessionId, { panelId, role: r.role });
       panel.reviewers.push({ role: r.role, sessionId: ref.sessionId, instanceId: r.instanceId, model: r.model, label: r.label, status: "running" });
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: r.role, tier: "capable", parts: [{ type: "text", text: prompt }] });
     }
     this.panels.set(panelId, panel);
 
+    // Announce the panel BEFORE dispatching, so panel.started reaches the client ahead of any panel.issue.
     await this.trace.write({
       kind: "panel.started",
       projectId: this.projectId,
@@ -619,6 +633,11 @@ export class ProjectContext {
       reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })), // client sees the tier LABEL, never the vendor model id
     } as DomainEvent);
 
+    // Now dispatch each reviewer as a parallel, read-only turn (HarnessAdapter.dispatchAsync).
+    for (const r of panel.reviewers) {
+      await this.adapter.dispatchAsync({ sessionId: r.sessionId, agent: r.role, tier: "capable", parts: [{ type: "text", text: prompt }] });
+    }
+
     return {
       panelId,
       specId: cid,
@@ -633,23 +652,11 @@ export class ProjectContext {
    * view is in-memory and lost on restart, but every completed panel wrote a `review.complete` record,
    * so the gate (which specs have a completed review) survives a coordinator restart.
    */
-  private reconstructReviewGate(): void {
-    const tracePath = resolve(this.root, ".arke", "trace.ndjson");
-    if (!existsSync(tracePath)) return;
-    let lines: string[];
-    try {
-      lines = readFileSync(tracePath, "utf8").split("\n");
-    } catch {
-      return;
-    }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line) as { kind?: string; specId?: string };
-        if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
-      } catch {
-        /* skip malformed trace lines */
-      }
+  private async reconstructReviewGate(): Promise<void> {
+    // Read through the Trace abstraction (the single owner of the path/format) rather than
+    // re-deriving the trace location here.
+    for (const rec of await this.trace.readAll()) {
+      if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
     }
   }
 
@@ -678,7 +685,9 @@ export class ProjectContext {
 
     for (const parsed of parseReviewerIssues(text)) {
       const issueId = `issue-${randomUUID()}`;
-      const sectionHash = sectionHashOf(parsed.section);
+      // Anchor by the section's CONTENT hash when the label resolves to a known section; fall back to
+      // hashing the label so unknown/free-form sections still group consistently across reviewers.
+      const sectionHash = panel.sectionHashes.get(parsed.section.trim().toLowerCase()) ?? sectionHashOf(parsed.section);
       panel.issues.push({ issueId, reviewerRole: link.role, section: parsed.section, sectionHash, text: parsed.text, severity: parsed.severity });
       await this.emit({
         seq: 0, ts: 0, harness: this.adapter.id, type: "panel.issue",
@@ -719,7 +728,7 @@ export class ProjectContext {
     }
     await this.emit({
       seq: 0, ts: 0, harness: this.adapter.id, type: "panel.complete",
-      panelId: panel.panelId, status: panel.status, issueCount: panel.issues.length,
+      panelId: panel.panelId, specId: panel.specId, status: panel.status, issueCount: panel.issues.length,
       adjudicatedCount: panel.issues.filter((i) => i.adjudication).length,
     } as DomainEvent);
   }
