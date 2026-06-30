@@ -872,15 +872,19 @@ export class ProjectContext {
    */
   async retryProjection(specId: string, artifactId: string, target: string): Promise<{ ok: boolean; error?: string }> {
     const records = await this.trace.readAll();
-    const approval = records.find(
+    // Newest-first: re-generation reassigns the same artifactId with NEW content, so the retry must
+    // mirror the LATEST approval's content (not the oldest) — else the idempotency key drifts from the
+    // current SoR write and the plugin's dedup is defeated.
+    const approval = [...records].reverse().find(
       (r) => r.kind === "generation.decision" && r.decision === "approved" && r.specId === specId && Array.isArray(r.approvedArtifactIds) && (r.approvedArtifactIds as string[]).includes(artifactId),
     );
     if (!approval) return { ok: false, error: "cannot retry — original approval not found" };
     const final = (approval.finalContent as Array<{ id: string; content: string }> | undefined)?.find((a) => a.id === artifactId);
+    if (!final) return { ok: false, error: "cannot retry — approved content not found in the trace record" };
     await this.emit({
       seq: 0, ts: 0, harness: this.adapter.id, type: "projection.write",
       target, specId, trigger: String(approval.sessionId ?? "retry"), ok: true, artifactId,
-      idempotencyKey: idempotencyKey(specId, artifactId, final?.content ?? ""),
+      idempotencyKey: idempotencyKey(specId, artifactId, final.content),
     } as DomainEvent);
     return { ok: true };
   }
