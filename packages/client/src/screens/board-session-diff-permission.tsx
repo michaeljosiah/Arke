@@ -3,14 +3,35 @@ import { Icon } from '../icons';
 import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { liveSend } from '../live';
+import { liveSend, reconnectLive, promoteSpecLive } from '../live';
 
 const e = React.createElement;
 
+/** Transport health (SPEC-010): live dot when open, spinner while reconnecting, error banner on a
+ *  permanent close with a manual Reconnect — distinct from the transient reconnecting state. */
+function ConnectionIndicator() {
+  const { connection, live } = useStore();
+  if (!live) return null; // mock/demo mode has no live transport to report
+  if (connection === 'closed' || connection === 'disposed') {
+    return e('div', { role: 'alert', style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 'var(--radius-md)', background: 'var(--destructive-bg, var(--secondary))', border: '1px solid var(--destructive)' } },
+      e('span', { style: { color: 'var(--destructive)', display: 'flex' } }, e(Icon, { name: 'alert', size: 13 })),
+      e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--foreground)' } }, 'Coordinator connection lost'),
+      e(Button, { size: 'sm', variant: 'outline', onClick: () => reconnectLive() }, 'Reconnect'));
+  }
+  const reconnecting = connection === 'reconnecting' || connection === 'connecting';
+  return e('div', { 'aria-live': 'polite', style: { display: 'flex', alignItems: 'center', gap: 6 } },
+    e(StatusDot, { status: reconnecting ? 'running' : 'agree', pulse: reconnecting }),
+    e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, reconnecting ? 'reconnecting…' : 'live'));
+}
+
+// All seven BoardColumn values from @arke/contracts — every derived column must have a container,
+// or cards in `approved`/`needs-human` would be invisible (SPEC-010).
 const COLS = [
   { id: 'authoring', label: 'Authoring' },
   { id: 'review', label: 'In review' },
+  { id: 'approved', label: 'Approved' },
   { id: 'implementing', label: 'Implementing' },
+  { id: 'needs-human', label: 'Needs human' },
   { id: 'diff', label: 'Diff review' },
   { id: 'merged', label: 'Merged' },
 ];
@@ -18,10 +39,23 @@ const COLS = [
 function BoardCard({ c }: any) {
   const open = () => store.set({ activeCard: c.id, view: c.col === 'diff' ? 'diff' : 'session' });
   const showBar = (c.col === 'authoring' || c.col === 'implementing') && !c.needsHuman;
+  // Promote-to-review is a human correction on a draft SPEC card — it sends a governed coordinator
+  // command (spec.promote); the card moves only when the resulting spec.status event arrives, never
+  // by a direct column write (SPEC-010).
+  const canPromote = c.col === 'authoring' && c.kind === 'spec';
+  const promote = async (ev: any) => {
+    ev.stopPropagation();
+    const res = await promoteSpecLive(c.specId || c.id);
+    // Two failure shapes: an offline refusal resolves `{ ok:false, error }` directly, while a
+    // server refusal is the WS frame `{ ok:true, result:{ ok:false, error } }` — surface either.
+    const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+    if (err) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `promote failed — ${err}` } }));
+  };
   return e('div', { className: 'so-enter', onClick: open, style: { cursor: 'pointer', position: 'relative' } },
     showBar ? e('div', { style: { position: 'absolute', left: 11, right: 11, top: 0, height: 2, background: 'var(--secondary)', borderRadius: 999, overflow: 'hidden', zIndex: 2 } },
       e('div', { style: { height: '100%', width: (c.progress || 0) + '%', background: 'var(--foreground)', transition: 'width .6s ease' } })) : null,
     e(KanbanCard, { taskId: c.id, title: c.title, status: c.status, harness: c.harness, model: c.model, needsHuman: c.needsHuman }),
+    canPromote ? e('button', { onClick: promote, title: 'Promote this draft to in-review', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--muted-foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer' } }, 'Promote to review') : null,
   );
 }
 
@@ -63,6 +97,7 @@ export function Board() {
       e('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 } },
         e('p', { style: { margin: 0, maxWidth: 600, fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.5, color: 'var(--muted-foreground)' } }, 'A card moves because the work moved, not because a person dragged it. Columns are computed from frontmatter, session and CI state — projected live from the harness event stream.'),
         e('div', { style: { flex: 1 } }),
+        e(ConnectionIndicator, null),
         e(Badge, { variant: 'secondary' }, 'event-driven')),
       empty
         ? e('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' } },

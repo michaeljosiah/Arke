@@ -654,6 +654,29 @@ export class ProjectContext {
     return null;
   }
 
+  /**
+   * `spec.promote` (SPEC-010) — a human board correction that advances a DRAFT spec to in-review
+   * without going through a PR. The column is still a read-only projection: this writes the underlying
+   * frontmatter status and emits `spec.status`, so the card moves as a result of the event, never a
+   * direct column write. Traced before the change. Refuses a non-draft spec.
+   */
+  private async promoteSpec(specId: string): Promise<{ ok: boolean; specId?: string; status?: string; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { ok: false, error: `no spec '${specId}'` };
+    const cid = found.canonicalId;
+    const current = found.frontmatter.status ?? "draft";
+    if (current !== "draft") return { ok: false, specId: cid, error: `cannot promote: '${cid}' is '${current}', expected 'draft'` };
+    await this.trace.write({ kind: "spec.promote", projectId: this.projectId, specId: cid, from: "draft", to: "in-review" });
+    try {
+      writeFileSync(found.absPath, setFrontmatterStatus(found.text, "in-review"), "utf8");
+    } catch {
+      return { ok: false, specId: cid, error: "could not write spec frontmatter" };
+    }
+    this.specRecords.set(cid, { ...(this.specRecords.get(cid) ?? {}), status: "in-review" });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId: cid, status: "in-review", reason: "promoted" } as DomainEvent);
+    return { ok: true, specId: cid, status: "in-review" };
+  }
+
   // ---- parallel task fan-out (SPEC-009) -----------------------------------
 
   /**
@@ -1276,6 +1299,8 @@ export class ProjectContext {
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
       case "spec.fanout":
         return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
+      case "spec.promote":
+        return this.promoteSpec(String(a.specId ?? "")); // SPEC-010: human board correction draft→in-review
       case "spec.webhook":
         // Test/automation entry to the webhook lifecycle (the HTTP endpoint also routes here).
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);

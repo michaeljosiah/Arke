@@ -102,6 +102,22 @@ function hook(port: number, eventName: string, payload: unknown) {
   }).then((r) => r.json() as Promise<any>);
 }
 
+function op(port: number, op: string, args?: unknown): Promise<any> {
+  return new Promise((resolveP, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on("open", () => ws.send(JSON.stringify({ type: "request", id: "r1", op, args })));
+    ws.on("message", (d) => {
+      const f = JSON.parse(d.toString());
+      if (f.type === "response" && f.id === "r1") {
+        ws.close();
+        resolveP(f);
+      }
+    });
+    ws.on("error", reject);
+    setTimeout(() => reject(new Error("op timeout")), 6000);
+  });
+}
+
 function libraryVia(port: number): Promise<any[]> {
   return new Promise((resolveP, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -226,6 +242,20 @@ test("approval is rejected (fail closed) when the spec has no owner to verify ag
   const r = await hook(port, "pull_request_review", review("anyone"));
   assert.equal(r.routed[0].applied, "approval-rejected-no-owner");
   assert.equal((await libraryVia(port))[0].status, "in-review", "ungovernable approval does not advance");
+});
+
+test("spec.promote advances a draft to in-review and persists frontmatter (SPEC-010)", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const r = await op(port, "spec.promote", { specId: "SPEC-LIFE" });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.status, "in-review");
+  assert.ok(/status:\s*in-review/.test(readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8")));
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+  // A second promote is refused (no longer a draft).
+  const r2 = await op(port, "spec.promote", { specId: "SPEC-LIFE" });
+  assert.equal(r2.result.ok, false);
 });
 
 test("an empty-branch payload is ignored, not routed to an unrelated spec", async () => {
