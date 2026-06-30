@@ -658,6 +658,10 @@ export const revertSessionLive = (sessionId: string, messageId: string) => gover
 export const unrevertSessionLive = (sessionId: string) => governed("unrevert", { sessionId });
 /** Re-fetch the diff from the adapter and re-emit diff.finalized. */
 export const refreshDiffLive = (sessionId: string) => governed("diff.refresh", { sessionId });
+/** Answer an agent elicitation question (SPEC-012). */
+export const elicitationReplyLive = (sessionId: string, questionId: string, answer: string) => governed("elicitation.reply", { sessionId, questionId, answer });
+/** Decline an agent elicitation question (SPEC-012). */
+export const elicitationRejectLive = (sessionId: string, questionId: string) => governed("elicitation.reject", { sessionId, questionId });
 
 /** Manual reconnect from the board's error state (SPEC-010): dispose any dead socket and start fresh. */
 export function reconnectLive(): void {

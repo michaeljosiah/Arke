@@ -36,6 +36,21 @@ export class ReadModel {
   private cards = new Map<string, CardState>();
   /** sessionId → messageId → ordering buffer for out-of-order parts. */
   private buffers = new Map<string, Map<string, PartBuffer>>();
+  /** sessionId → open human-gate ids (permissionIds + elicitation questionIds). `needsHuman` is sticky
+   *  while any gate is open, so an unrelated session.status/todo/message event can't vacate it (SPEC-012). */
+  private openGates = new Map<string, Set<string>>();
+
+  private gateOpen(sessionId: string, gateId: string): void {
+    let s = this.openGates.get(sessionId);
+    if (!s) this.openGates.set(sessionId, (s = new Set()));
+    s.add(gateId);
+  }
+  private gateClose(sessionId: string, gateId: string): void {
+    this.openGates.get(sessionId)?.delete(gateId);
+  }
+  private hasOpenGate(sessionId: string): boolean {
+    return (this.openGates.get(sessionId)?.size ?? 0) > 0;
+  }
 
   apply(event: DomainEvent): void {
     switch (event.type) {
@@ -50,21 +65,49 @@ export class ReadModel {
         card.status = event.status;
         card.model = event.model ?? card.model;
         card.harness = event.harness;
-        card.needsHuman = event.status === "waiting";
+        // needsHuman is sticky while a permission/elicitation gate is open — a `running`/`idle`
+        // status must not vacate needs-human out from under an open human decision (SPEC-012).
+        card.needsHuman = event.status === "waiting" || this.hasOpenGate(event.sessionId);
         card.column = this.deriveColumn(card, this.specStatus.get(event.specId));
         break;
       }
       case "permission.asked": {
+        // Only track a gate for a KNOWN session — a permission for an unknown session is discarded
+        // (SPEC-012), not recorded, so a ghost gate can't pin a later card in needs-human forever.
         const card = this.cards.get(event.sessionId);
         if (card) {
+          this.gateOpen(event.sessionId, event.permissionId);
           card.needsHuman = true;
           card.column = "needs-human";
         }
         break;
       }
       case "permission.replied": {
+        this.gateClose(event.sessionId, event.permissionId);
         const card = this.cards.get(event.sessionId);
-        if (card) card.needsHuman = false;
+        if (card) {
+          card.needsHuman = this.hasOpenGate(event.sessionId); // other gates may still be open
+          card.column = this.deriveColumn(card, this.specStatus.get(card.specId));
+        }
+        break;
+      }
+      case "elicitation.asked": {
+        const card = this.cards.get(event.sessionId);
+        if (card) {
+          this.gateOpen(event.sessionId, event.elicitationId);
+          card.needsHuman = true;
+          card.column = "needs-human";
+        }
+        break;
+      }
+      case "elicitation.replied":
+      case "elicitation.rejected": {
+        this.gateClose(event.sessionId, event.elicitationId);
+        const card = this.cards.get(event.sessionId);
+        if (card) {
+          card.needsHuman = this.hasOpenGate(event.sessionId);
+          card.column = this.deriveColumn(card, this.specStatus.get(card.specId));
+        }
         break;
       }
       case "message.part":
