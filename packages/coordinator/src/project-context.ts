@@ -1455,7 +1455,7 @@ export class ProjectContext {
       questionId,
       sessionId,
       replied: verb === "reply",
-      ...(answer ? { answer } : {}),
+      ...(answer !== undefined ? { answer } : {}), // record an explicit empty-string answer, not just truthy ones
       identity,
     });
     try {

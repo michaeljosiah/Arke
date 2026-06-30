@@ -99,3 +99,14 @@ test("two concurrent gates: needs-human clears only when both resolve (SPEC-012)
   rm.apply({ ...base, type: "elicitation.replied", sessionId: "s3", elicitationId: "q1", answer: "ok" } as DomainEvent);
   assert.equal(rm.snapshot().find((c) => c.id === "s3")!.needsHuman, false, "both resolved");
 });
+
+test("a permission.asked for an unknown session does not pin a later card in needs-human (SPEC-012)", () => {
+  const rm = new ReadModel();
+  // Permission arrives BEFORE any card exists for this session — it must be discarded, not tracked.
+  rm.apply({ ...base, type: "permission.asked", sessionId: "ghost", permissionId: "p1", title: "x" } as DomainEvent);
+  // The card is created later by a normal running status — it must NOT be stuck in needs-human.
+  rm.apply({ ...base, type: "session.status", sessionId: "ghost", specId: "SPEC-1", kind: "task", status: "running" });
+  const card = rm.snapshot().find((c) => c.id === "ghost")!;
+  assert.equal(card.needsHuman, false, "no ghost gate pins the card");
+  assert.notEqual(card.column, "needs-human");
+});

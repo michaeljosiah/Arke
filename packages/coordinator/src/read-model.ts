@@ -72,9 +72,11 @@ export class ReadModel {
         break;
       }
       case "permission.asked": {
-        this.gateOpen(event.sessionId, event.permissionId);
+        // Only track a gate for a KNOWN session — a permission for an unknown session is discarded
+        // (SPEC-012), not recorded, so a ghost gate can't pin a later card in needs-human forever.
         const card = this.cards.get(event.sessionId);
         if (card) {
+          this.gateOpen(event.sessionId, event.permissionId);
           card.needsHuman = true;
           card.column = "needs-human";
         }
@@ -90,9 +92,9 @@ export class ReadModel {
         break;
       }
       case "elicitation.asked": {
-        this.gateOpen(event.sessionId, event.elicitationId);
         const card = this.cards.get(event.sessionId);
         if (card) {
+          this.gateOpen(event.sessionId, event.elicitationId);
           card.needsHuman = true;
           card.column = "needs-human";
         }
