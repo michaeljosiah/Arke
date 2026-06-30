@@ -70,19 +70,22 @@ export function parseFrontmatter(md: string): SplitFrontmatter {
   const data: Record<string, string> = {};
   for (const line of inner.split("\n")) {
     const m = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
-    if (m) data[m[1]!] = stripInlineComment(m[2]!.trim());
+    if (m) data[m[1]!] = normalizeScalar(m[2]!.trim());
   }
   return { data, raw, body };
 }
 
 /**
- * Drop a trailing YAML inline comment from an unquoted scalar (` # …`) — so frontmatter authored
- * from the template's `status: draft # set by …` parses as `draft`, not `draft # set by …`. A
- * quoted value (`'…'` / `"…"`) is returned untouched.
+ * Normalise a YAML scalar value for lifecycle comparisons: unquote a simple `'…'`/`"…"` string
+ * (so `status: "draft"` compares as `draft`), and drop a trailing inline comment (` # …`) from an
+ * unquoted value (so the template's `status: draft # set by …` parses as `draft`).
  */
-function stripInlineComment(value: string): string {
-  if (value.startsWith("'") || value.startsWith('"')) return value;
-  return value.replace(/\s+#.*$/, "").trim();
+function normalizeScalar(value: string): string {
+  const v = value.trim();
+  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) {
+    return v.slice(1, -1);
+  }
+  return v.replace(/\s+#.*$/, "").trim();
 }
 
 /** Parse a spec markdown doc into frontmatter, requirements (with delta), and anatomy sections. */

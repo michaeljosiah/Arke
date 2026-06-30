@@ -92,15 +92,27 @@ function LiveCockpit() {
   // own attribution even if the composer's role selector changes later (PR #18 review round 2).
   const roleByMsgId = React.useRef<Map<string, string>>(new Map());
   const [approving, setApproving] = React.useState(false);
+  const [sending, setSending] = React.useState(false);
   const scroller = React.useRef<any>(null);
 
-  // Prefer the actual authoring session card (once we've created one) over the spec card, so the
-  // in-flight indicator and model reflect the running authoring session, not a sibling spec card
-  // (PR #18 review).
-  const specCard = cards.find((c: any) => c.id === specId || (c.kind === 'spec' && c.specId === specId));
+  // Reset all per-spec state when the active spec changes, so a prompt is never routed to the prior
+  // spec's session and the preview/conversation don't bleed across specs (PR #18 review round 4).
+  React.useEffect(() => {
+    setSessionId(null);
+    setConvo([]);
+    setFile(null);
+    roleByMsgId.current = new Map();
+  }, [specId]);
+
+  // Resolve the live authoring session for this spec. Prefer the session we created; otherwise any
+  // card for this spec that is currently running (e.g. a session already in flight after a reload).
+  // `inFlight` is true if ANY session for the spec is running, so Approve is disabled mid-write even
+  // before this client created a session (PR #18 review round 4).
+  const specCards = cards.filter((c: any) => c.id === specId || c.specId === specId);
   const authoringCard = sessionId ? cards.find((c: any) => c.id === sessionId) : null;
-  const liveCard = authoringCard ?? specCard;
-  const inFlight = liveCard?.status === 'running';
+  const runningCard = specCards.find((c: any) => c.status === 'running');
+  const liveCard = authoringCard ?? runningCard ?? specCards.find((c: any) => c.id === specId) ?? specCards[0];
+  const inFlight = specCards.some((c: any) => c.status === 'running');
   const transcript = liveCard?.transcript ?? [];
   // A signature that also changes when a streamed turn is finalised via message.updated (same entry,
   // so transcript.length is unchanged) — this is what makes the preview re-poll after the final
@@ -151,29 +163,40 @@ function LiveCockpit() {
   }, [transcriptSig, liveCard?.model]);
 
   const send = async () => {
-    if (!draft.trim() || !specId) return;
+    if (!draft.trim() || !specId || sending) return; // guard double-submit (PR #18 review round 4)
     const text = draft.trim();
     const sentAs = role;
-    let sid = sessionId;
-    if (!sid) {
-      // Don't attempt session.create while offline — it would time out and the message would be
-      // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).
-      if (!isCoordinatorConnected()) {
-        store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'offline — reconnect to begin a session for this spec' } }));
+    setSending(true);
+    try {
+      let sid = sessionId;
+      if (!sid) {
+        // Don't attempt session.create while offline — it would time out and the message would be
+        // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).
+        if (!isCoordinatorConnected()) {
+          store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'offline — reconnect to begin a session for this spec' } }));
+          return;
+        }
+        const created = await liveRequest('session.create', { specId });
+        sid = created?.ok ? created.result?.sessionId : null;
+        if (sid) setSessionId(sid);
+      }
+      if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
+      // Optimistically show the human turn + clear the composer for immediate feedback (prompt.send
+      // resolves only when the whole turn completes). Roll back on a rejection/queue-full so the
+      // message stays editable (PR #18 review rounds 1–4).
+      const key = 'h:' + Date.now();
+      setConvo((c) => [...c, { key, kind: 'human', text }]);
+      setDraft('');
+      const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text });
+      if (outcome.status === 'rejected' || outcome.status === 'full') {
+        setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
+        setDraft((d) => d || text); // restore the text if the composer is still empty
         return;
       }
-      const created = await liveRequest('session.create', { specId });
-      sid = created?.ok ? created.result?.sessionId : null;
-      if (sid) setSessionId(sid);
+      if (outcome.correlationId) roleByMsgId.current.set(outcome.correlationId, sentAs); // attribute the reply
+    } finally {
+      setSending(false);
     }
-    if (!sid) { store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: 'could not create a session for this spec' } })); return; }
-    // Dispatch/queue FIRST; only clear the composer + record the turn once it was actually accepted,
-    // so a rejected/queue-full prompt stays editable (PR #18 review rounds 1–2).
-    const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text });
-    if (outcome.status === 'rejected' || outcome.status === 'full') return; // notice already set; keep draft
-    if (outcome.correlationId) roleByMsgId.current.set(outcome.correlationId, sentAs); // attribute the reply
-    setConvo((c) => [...c, { key: 'h:' + Date.now(), kind: 'human', text }]);
-    setDraft('');
   };
 
   const approve = async () => {
@@ -186,6 +209,13 @@ function LiveCockpit() {
     // server-side failures also arrive via the spec.approval-failed event handler in live.ts
   };
 
+  const convene = async () => {
+    if (!specId) return;
+    const res = await convenePanelLive(specId, file?.branch);
+    if (res?.ok) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `review requested for ${specId}` } }));
+    else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `convene failed — ${res.error}` } }));
+  };
+
   React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length]);
 
   const turns = convo;
@@ -196,7 +226,7 @@ function LiveCockpit() {
         e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Authoring'),
         inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'agent writing')) : null,
         e('div', { style: { flex: 1 } }),
-        e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId, onClick: () => { if (specId) void convenePanelLive(specId, file?.branch); } }, 'Convene review')),
+        e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId, onClick: () => void convene() }, 'Convene review')),
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
         turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
@@ -209,7 +239,7 @@ function LiveCockpit() {
         e('div', { style: { display: 'flex', alignItems: 'center', marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
           e('div', { style: { flex: 1 } }),
-          e(Button, { size: 'sm', disabled: !specId, onClick: () => void send() }, 'Send'))),
+          e(Button, { size: 'sm', disabled: !specId || sending, onClick: () => void send() }, sending ? 'Sending…' : 'Send'))),
     ),
     e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve }),
   );

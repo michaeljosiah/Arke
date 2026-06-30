@@ -439,8 +439,14 @@ export async function sendCockpitPrompt(args: { sessionId: string; agent: string
   return { status: accepted ? 'queued' : 'full' };
 }
 
-/** Read the working specification file for the preview (SPEC-006). */
+/**
+ * Read the working specification file for the preview (SPEC-006). Fails fast while offline rather
+ * than queuing in the transport — a queued read would replay against the coordinator's default
+ * project on a fresh socket and could replace the preview with another project's spec (PR #18
+ * review round 4). The 30s poll simply retries once reconnected.
+ */
 export function fetchSpecFile(specId: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: 'offline' });
   return liveRequest('spec.file', { specId });
 }
 
@@ -456,8 +462,15 @@ export function approveDraftLive(specId: string, branch?: string): Promise<any> 
   return liveRequest('approveDraft', { specId, branch }, 30000);
 }
 
-/** Convene the review panel on the current draft — passes a reference, never file content (SPEC-006). */
+/**
+ * Convene the review panel on the current draft — passes a reference, never file content (SPEC-006).
+ * Like approval, a governed action: refuse while offline rather than letting the transport queue and
+ * replay it later with no visible response (PR #18 review round 4).
+ */
 export function convenePanelLive(specId: string, branch?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to convene a review' });
+  }
   return liveRequest('convenePanel', { specId, branch });
 }
 

@@ -381,7 +381,14 @@ export class ProjectContext {
     // Serialise approvals: a concurrent second approval could otherwise capture the same draft text
     // and, on a git no-op/failure, roll its stale copy back over the just-committed file (PR #18
     // review round 3). One at a time per project.
-    if (this.approvalInFlight) throw new Error(`an approval is already in progress for '${specId}'`);
+    if (this.approvalInFlight) {
+      // Route the concurrency rejection through the same governed-failure path (event + trace) as any
+      // other approval failure, so the cockpit and audit log stay complete (PR #18 review round 4).
+      const reason = `an approval is already in progress for '${specId}'`;
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.approval-failed", specId, reason } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: false, reason });
+      throw new Error(reason);
+    }
     this.approvalInFlight = true;
     try {
       return await this.approveDraftLocked(specId, clientBranch);
@@ -436,8 +443,15 @@ export class ProjectContext {
       return fail(`git commit failed: ${committed.error}`);
     }
 
-    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
-    await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
+    // The commit is permanent — the approval succeeded. Publishing the status event and writing the
+    // audit record are best-effort after that point: a trace/emit failure (e.g. unwritable .arke)
+    // must NOT turn a committed approval into a reported failure (PR #18 review round 4).
+    try {
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status: "in-review" } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId, ok: true, branch: fmBranch, commit: committed.sha });
+    } catch {
+      /* committed already — audit/notify is best-effort */
+    }
     return { ok: true, specId, status: "in-review", branch: fmBranch };
   }
 

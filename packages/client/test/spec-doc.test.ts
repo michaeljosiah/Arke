@@ -51,12 +51,12 @@ test("parseFrontmatter reads flat key/values and splits the body", () => {
   assert.ok(body.trimStart().startsWith("# Authoring cockpit"));
 });
 
-test("parseFrontmatter strips an inline YAML comment from a scalar", () => {
-  const md = "---\nstatus: draft # set by tooling\nbranch: feat/x\ntitle: 'Quoted # kept'\n---\n\nbody\n";
+test("parseFrontmatter strips inline comments and unquotes scalars", () => {
+  const md = "---\nstatus: draft # set by tooling\nbranch: \"feat/x\"\nowner: 'dana.k'\n---\n\nbody\n";
   const { data } = parseFrontmatter(md);
-  assert.equal(data.status, "draft"); // comment removed
-  assert.equal(data.branch, "feat/x");
-  assert.equal(data.title, "'Quoted # kept'"); // quoted value untouched
+  assert.equal(data.status, "draft"); // inline comment removed
+  assert.equal(data.branch, "feat/x"); // double-quotes stripped
+  assert.equal(data.owner, "dana.k"); // single-quotes stripped
 });
 
 test("parseSpecDoc extracts requirements with delta kinds", () => {
