@@ -53,3 +53,18 @@ test("resolveApproval: an invalid artefact in the approved set is refused", () =
   assert.ok(r.error, "refused");
   assert.equal(r.artifacts.length, 0);
 });
+
+test("resolveApproval: a human edit can ADD a sorTarget to clear an invalid ticket (SPEC-013)", () => {
+  const inv = { ...proposal[2]!, invalid: "Invalid — no integration target specified" };
+  const r = resolveApproval([inv], ["art-2"], [{ id: "art-2", sorTarget: "github" }]);
+  assert.equal(r.error, undefined, "edit added the integration target → approvable");
+  assert.equal(r.artifacts[0]!.sorTarget, "github");
+  assert.equal(r.artifacts[0]!.invalid, undefined);
+});
+
+test("parseArtifacts handles stray brackets in surrounding prose (balanced scan)", () => {
+  const text = "```json\nNote: pick items [optional] below\n" + JSON.stringify([{ target: "docs", title: "D", content: "c" }]) + "\n```";
+  const arts = parseArtifacts(text);
+  assert.equal(arts.length, 1, "the real array is found despite the stray [optional]");
+  assert.equal(arts[0]!.title, "D");
+});

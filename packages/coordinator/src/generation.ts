@@ -38,19 +38,47 @@ export function buildGenerationPrompt(specMarkdown: string): string {
 const VALID_TARGETS: ReadonlySet<string> = new Set(["docs", "tests", "ticket", "tracking"]);
 const VALID_SOR: ReadonlySet<string> = new Set(["jira", "azure-devops", "github"]);
 
-/** Extract the first JSON array from agent text (raw or ```json-fenced); [] on failure. */
+/** The balanced `[…]` span starting at `start` (honouring JSON strings), or null if unbalanced. */
+function balancedFrom(s: string, start: number): string | null {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i]!;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]" && --depth === 0) return s.slice(start, i + 1);
+  }
+  return null;
+}
+
+/** Extract the first JSON ARRAY from agent text (raw or ```json-fenced); [] on failure. Tries each
+ *  `[` so a stray bracket in surrounding prose (e.g. `[optional]`) doesn't shadow the real array. */
 function extractJsonArray(text: string): unknown[] {
   const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
   const candidates = [fence?.[1], text].filter(Boolean) as string[];
   for (const c of candidates) {
-    const start = c.indexOf("[");
-    const end = c.lastIndexOf("]");
-    if (start === -1 || end <= start) continue;
     try {
-      const parsed = JSON.parse(c.slice(start, end + 1));
-      if (Array.isArray(parsed)) return parsed;
+      const direct = JSON.parse(c.trim());
+      if (Array.isArray(direct)) return direct;
     } catch {
-      /* try next candidate */
+      /* not a clean array — scan */
+    }
+    for (let i = c.indexOf("["); i !== -1; i = c.indexOf("[", i + 1)) {
+      const span = balancedFrom(c, i);
+      if (!span) continue;
+      try {
+        const parsed = JSON.parse(span);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        /* try the next '[' */
+      }
     }
   }
   return [];
@@ -92,22 +120,33 @@ export function specContentHash(md: string): string {
  * (absent ⇒ all), apply `edits` (human-reviewed content overrides the buffered proposal), and refuse
  * any still-`invalid` artefact. Returns `{ artifacts, error? }`.
  */
+export interface ArtifactEdit {
+  id: string;
+  content?: string;
+  /** A human edit may ADD the integration target a ticket/tracking artefact was missing (SPEC-013). */
+  sorTarget?: SorTarget;
+}
+
 export function resolveApproval(
   proposal: ArtifactProposal[],
   approvedArtifactIds: string[] | undefined,
-  edits: Array<{ id: string; content: string }> | undefined,
+  edits: ArtifactEdit[] | undefined,
 ): { artifacts: ArtifactProposal[]; error?: string } {
-  const editMap = new Map((edits ?? []).map((e) => [e.id, e.content]));
+  const editMap = new Map((edits ?? []).map((e) => [e.id, e]));
   const selected = approvedArtifactIds ? proposal.filter((a) => approvedArtifactIds.includes(a.id)) : proposal.slice();
-  const resolved = selected.map((a) => (editMap.has(a.id) ? { ...a, content: editMap.get(a.id)!, invalid: revalidate(a, editMap.get(a.id)!) } : a));
+  const resolved = selected.map((a) => {
+    const edit = editMap.get(a.id);
+    if (!edit) return a;
+    const next: ArtifactProposal = {
+      ...a,
+      ...(edit.content !== undefined ? { content: edit.content } : {}),
+      ...(edit.sorTarget ? { sorTarget: edit.sorTarget } : {}),
+    };
+    // Re-validate against the EDITED artefact — an added sorTarget clears the ticket/tracking gap.
+    next.invalid = (next.target === "ticket" || next.target === "tracking") && !next.sorTarget ? "Invalid — no integration target specified" : undefined;
+    return next;
+  });
   const stillInvalid = resolved.find((a) => a.invalid);
   if (stillInvalid) return { artifacts: [], error: `artefact '${stillInvalid.id}' is invalid: ${stillInvalid.invalid}` };
   return { artifacts: resolved };
-}
-
-/** An edit can fix an invalid artefact (e.g. add a sorTarget in content) only if it had no hard gap;
- *  for ticket/tracking the sorTarget is structural, so an edited-but-still-no-sorTarget stays invalid. */
-function revalidate(a: ArtifactProposal, _newContent: string): string | undefined {
-  if ((a.target === "ticket" || a.target === "tracking") && !a.sorTarget) return a.invalid;
-  return undefined;
 }

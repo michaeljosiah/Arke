@@ -58,6 +58,7 @@ import {
   parseArtifacts,
   resolveApproval,
   specContentHash,
+  type ArtifactEdit,
   type ArtifactProposal,
 } from "./generation.js";
 import { loadAgentImage } from "@arke/agent-image";
@@ -753,6 +754,11 @@ export class ProjectContext {
     const cid = found.canonicalId;
     const existing = this.generationProposals.get(cid);
     if (existing?.status === "generating") return { ok: true, sessionId: existing.sessionId }; // duplicate → no-op
+    // Claim the slot SYNCHRONOUSLY (before the createSession await) so a concurrent generate() for the
+    // same spec sees `generating` and no-ops — closing the TOCTOU race (single live session invariant).
+    this.generationProposals.set(cid, { sessionId: "", artifacts: [], specContentHash: specContentHash(found.text), status: "generating" });
+    // Superseding a prior pending-review proposal: release its leaked session→spec mapping.
+    if (existing) for (const [sid, owner] of this.generationSessions) if (owner === cid) this.generationSessions.delete(sid);
     const ref = await this.adapter.createSession({ specId: cid });
     this.generationSessions.set(ref.sessionId, cid);
     this.generationProposals.set(cid, { sessionId: ref.sessionId, artifacts: [], specContentHash: specContentHash(found.text), status: "generating" });
@@ -802,10 +808,13 @@ export class ProjectContext {
     proposalId: string,
     decision: "approved" | "rejected",
     approvedArtifactIds?: string[],
-    edits?: Array<{ id: string; content: string }>,
+    edits?: ArtifactEdit[],
   ): Promise<{ ok: boolean; written?: number; error?: string }> {
+    // Resolve the proposal by the specId the client sent (the canonical id carried on generation.proposed)
+    // first, so a decision still lands even if the spec file was moved/deleted mid-flight; fall back to
+    // the file's canonical id only if the direct key misses.
     const found = this.findSpecFile(specId);
-    const cid = found?.canonicalId ?? specId;
+    const cid = this.generationProposals.has(specId) ? specId : found?.canonicalId ?? specId;
     const proposal = this.generationProposals.get(cid);
     if (!proposal || proposal.status !== "pending-review") return { ok: false, error: "no pending proposal" };
     if (proposal.sessionId !== proposalId) return { ok: false, error: "stale proposalId — proposal was superseded" };
@@ -1484,7 +1493,7 @@ export class ProjectContext {
       case "spec.generate": // SPEC-013: trigger/regenerate downstream artefacts
         return this.generate(String(a.specId ?? ""));
       case "generation.approve":
-        return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "approved", Array.isArray(a.approvedArtifactIds) ? (a.approvedArtifactIds as string[]) : undefined, Array.isArray(a.edits) ? (a.edits as Array<{ id: string; content: string }>) : undefined);
+        return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "approved", Array.isArray(a.approvedArtifactIds) ? (a.approvedArtifactIds as string[]) : undefined, Array.isArray(a.edits) ? (a.edits as ArtifactEdit[]) : undefined);
       case "generation.reject":
         return this.decideGeneration(String(a.specId ?? ""), String(a.proposalId ?? ""), "rejected");
       case "spec.webhook":

@@ -682,7 +682,7 @@ export const elicitationRejectLive = (sessionId: string, questionId: string) => 
 /** Trigger/regenerate the downstream-artefact proposal for a spec (SPEC-013). */
 export const triggerGenerationLive = (specId: string) => governed("spec.generate", { specId });
 /** Approve a generation proposal (optionally a subset + edits) — governed (SPEC-013). */
-export const approveGenerationLive = (specId: string, proposalId: string, approvedArtifactIds?: string[], edits?: Array<{ id: string; content: string }>) =>
+export const approveGenerationLive = (specId: string, proposalId: string, approvedArtifactIds?: string[], edits?: Array<{ id: string; content?: string; sorTarget?: string }>) =>
   governed("generation.approve", { specId, proposalId, approvedArtifactIds, edits });
 /** Reject a generation proposal (SPEC-013). */
 export const rejectGenerationLive = (specId: string, proposalId: string) => governed("generation.reject", { specId, proposalId });
