@@ -325,6 +325,15 @@ public sealed class SpecFileCommand : AsyncCommand<SpecFileCommand.Settings>
         Ops.RunAsync(s, "spec.file", new { specId = s.SpecId });
 }
 
+/// <summary>`arke spec list` — the spec library for the active project: every spec with its status (SPEC-008).</summary>
+public sealed class SpecListCommand : AsyncCommand<SpecListCommand.Settings>
+{
+    public sealed class Settings : GlobalSettings { }
+
+    protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
+        Ops.RunAsync(s, "spec.library", new { });
+}
+
 /// <summary>`arke spec approve` — branch-guarded commit + status advance to in-review (SPEC-006).</summary>
 public sealed class SpecApproveCommand : AsyncCommand<SpecApproveCommand.Settings>
 {

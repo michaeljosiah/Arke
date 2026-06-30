@@ -1,7 +1,9 @@
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
+import { verifyGithubSignature } from "./spec-lifecycle.js";
 import type { DomainEvent, HarnessAdapter, ModelTier } from "@arke/contracts";
 import {
   OpenCodeAdapter,
@@ -65,6 +67,7 @@ export type ContextFactory = (root: string) => Promise<ContextDeps>;
 export class Coordinator {
   private clientIdSeq = 0;
   private wss?: WebSocketServer;
+  private httpServer?: HttpServer;
   private readonly abort = new AbortController();
 
   private readonly contexts = new Map<string, ProjectContext>();
@@ -124,13 +127,17 @@ export class Coordinator {
 
   /** Start the WS server + the default project context; resolves with the actual bound port. */
   async start(): Promise<number> {
-    const wss = new WebSocketServer({ port: this.port });
+    // One HTTP server carries both the WS upgrade (client transport, ADR-0003) and the SPEC-008
+    // GitHub webhook endpoint (POST /webhooks/github) on the same port.
+    const server = createServer((req, res) => void this.handleHttp(req, res));
+    this.httpServer = server;
+    const wss = new WebSocketServer({ server });
     this.wss = wss;
     wss.on("connection", (ws) => void this.onConnection(ws));
-    await new Promise<void>((res) => wss.once("listening", () => res()));
-    const addr = wss.address();
+    await new Promise<void>((res) => server.listen(this.port, () => res()));
+    const addr = server.address();
     const actual = typeof addr === "object" && addr ? addr.port : this.port;
-    console.log(`[coordinator] WebSocket listening on ws://127.0.0.1:${actual}`);
+    console.log(`[coordinator] listening on ws://127.0.0.1:${actual} (webhooks: POST /webhooks/github)`);
 
     const ctx = this.addContext(this.defaultRoot, this.defaultDeps);
     this.defaultProjectId = ctx.projectId;
@@ -162,8 +169,71 @@ export class Coordinator {
       if (!this.wss) return res();
       this.wss.close(() => res());
     });
+    await new Promise<void>((res) => {
+      if (!this.httpServer) return res();
+      this.httpServer.close(() => res());
+    });
     for (const ctx of this.contexts.values()) await ctx.stop();
     this.contexts.clear();
+  }
+
+  // ---- HTTP (SPEC-008 webhooks) --------------------------------------------
+
+  /**
+   * Handle plain-HTTP requests on the shared port: the GitHub webhook endpoint and a health probe.
+   * The webhook is validated (HMAC) when `ARKE_WEBHOOK_SECRET` is set, then fanned to every open
+   * project context — the one with a spec on the event's branch applies it; the rest are a no-op.
+   */
+  private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method === "GET" && req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, projects: this.contexts.size }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/webhooks/github") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const secret = process.env.ARKE_WEBHOOK_SECRET;
+      const allowUnsigned = process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "1" || process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "true";
+      const sig = req.headers["x-hub-signature-256"];
+      if (secret) {
+        if (!verifyGithubSignature(secret, body, Array.isArray(sig) ? sig[0] : sig)) {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "invalid signature" }));
+          return;
+        }
+      } else if (!allowUnsigned) {
+        // Fail CLOSED: an unconfigured webhook secret must not let unauthenticated POSTs drive lifecycle
+        // mutations (status transitions, merge-time file writes). Set ARKE_WEBHOOK_SECRET in production,
+        // or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 to explicitly opt in for local/dev.
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "webhook secret not configured (set ARKE_WEBHOOK_SECRET, or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 for local/dev)" }));
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "invalid json" }));
+        return;
+      }
+      const eventName = (req.headers["x-github-event"] as string) ?? "";
+      const results: Array<{ projectId: string; applied: string; specId?: string }> = [];
+      for (const [projectId, ctx] of this.contexts) {
+        try {
+          const r = await ctx.handleWebhook(eventName, payload);
+          if (!r.applied.startsWith("no spec") && !r.applied.startsWith("ignored")) results.push({ projectId, ...r });
+        } catch {
+          /* one context's failure must not fail the whole delivery */
+        }
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, routed: results }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "not found" }));
   }
 
   // ---- context lifecycle ---------------------------------------------------

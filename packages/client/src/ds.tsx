@@ -221,7 +221,7 @@ export function KanbanCard({ taskId, title, status, harness, model, needsHuman }
 }
 
 // ---------- SpecCard ----------
-export function SpecCard({ specId, title, status, meta, onClick }: any) {
+export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
   const [hover, setHover] = React.useState(false);
   const TONE = { draft: 'var(--foreground)', 'in-review': 'var(--warning)', approved: 'var(--success)', merged: 'var(--neutral-400)' };
   const STATUS_LABEL = { draft: 'Draft', 'in-review': 'In review', approved: 'Approved', merged: 'Merged' };
@@ -240,6 +240,8 @@ export function SpecCard({ specId, title, status, meta, onClick }: any) {
         e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600, color: 'var(--foreground)', marginBottom: 3, lineHeight: 1.35 } }, title),
         e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)' } }, specId),
       ),
+      // SPEC-008: divergence warning — read-model status differs from the file's frontmatter status.
+      warn ? e('span', { title: 'Status diverges from the file frontmatter', style: { flex: 'none', color: 'var(--warning)', display: 'flex' } }, e(Icon, { name: 'alert', size: 15 })) : null,
     ),
     e('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
       e('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-sans)', fontSize: 11.5, color: TONE[status] || 'var(--foreground)', fontWeight: 500 } }, STATUS_LABEL[status] || status),

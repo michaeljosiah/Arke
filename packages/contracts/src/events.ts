@@ -45,6 +45,32 @@ export const SpecStatusEvent = base.extend({
   type: z.literal("spec.status"),
   specId: z.string(),
   status: SpecStatus,
+  // SPEC-008: why the status changed (pr-closed | pr-reopened | material-change | approved | merged …).
+  reason: z.string().optional(),
+});
+
+/** SPEC-008: a system-of-record projection derived from a spec went stale (spec regressed). */
+export const ProjectionStaleEvent = base.extend({
+  type: z.literal("projection.stale"),
+  specId: z.string(),
+  target: z.string(),
+  recordRef: z.string(),
+});
+
+/** SPEC-008: after a force-push the frontmatter `branch` no longer matches the pushed branch. */
+export const SpecBranchMismatchEvent = base.extend({
+  type: z.literal("spec.branch-mismatch"),
+  specId: z.string(),
+  frontmatterBranch: z.string(),
+  pushedBranch: z.string(),
+});
+
+/** SPEC-008: the read-model status diverged from the file's frontmatter status (reconciliation). */
+export const SpecDivergenceWarningEvent = base.extend({
+  type: z.literal("spec.divergence-warning"),
+  specId: z.string(),
+  readModelStatus: SpecStatus,
+  frontmatterStatus: SpecStatus,
 });
 
 export const SessionStatusEvent = base.extend({
@@ -311,6 +337,9 @@ export const ReviewGateFailedEvent = base.extend({
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
+  ProjectionStaleEvent,
+  SpecBranchMismatchEvent,
+  SpecDivergenceWarningEvent,
   SessionStatusEvent,
   TodoUpdatedEvent,
   DiffFinalizedEvent,

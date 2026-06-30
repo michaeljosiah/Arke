@@ -273,7 +273,14 @@ export function Library() {
     { id: 'approved', label: 'Approved', count: counts.approved || 0 },
     { id: 'merged', label: 'Merged', count: counts.merged || 0 },
   ];
-  const filtered = specs.filter((s) => (filter === 'all' || s.status === filter) && (s.title.toLowerCase().includes(q.toLowerCase()) || s.specId.toLowerCase().includes(q.toLowerCase())));
+  const ql = q.toLowerCase();
+  // Search by title, specId, capability, or status (SPEC-008).
+  const filtered = specs.filter((s) => (filter === 'all' || s.status === filter) && (
+    s.title.toLowerCase().includes(ql) ||
+    s.specId.toLowerCase().includes(ql) ||
+    (s.status || '').toLowerCase().includes(ql) ||
+    (s.capabilities || []).some((c: string) => c.toLowerCase().includes(ql))
+  ));
   const open = (s) => store.set({ activeSpec: s.specId, view: s.status === 'draft' || s.status === 'in-review' ? 'cockpit' : 'board' });
 
   if (specs.length === 0) {
@@ -303,6 +310,6 @@ export function Library() {
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 500, color: 'var(--foreground)' } }, 'No specifications match'),
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 4 } }, q ? 'Try a different search.' : 'No specifications in this state.'))
       : e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))', gap: 14 } },
-          filtered.map((s) => e(SpecCard, { key: s.specId, specId: s.specId, title: s.title, status: s.status, meta: 'docs/specifications/' + s.slug + '.' + (s.fmt || 'md') + ' · ' + (s.tasks ? s.tasks + ' tasks' : s.updated), onClick: () => open(s) }))),
+          filtered.map((s) => e(SpecCard, { key: s.specId, specId: s.specId, title: s.title, status: s.status, warn: s.hasDivergence, meta: ((s.capabilities && s.capabilities.length ? s.capabilities.join(', ') + ' · ' : '') + (s.updatedAt || s.updated || '')) || s.branch, onClick: () => open(s) }))),
   );
 }
