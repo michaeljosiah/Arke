@@ -29,11 +29,13 @@ import {
   globalConfigPath,
   loadGlobalConfig,
   restoreGlobalConfigRaw,
+  setGlobalManageHarness,
   snapshotGlobalConfigRaw,
   upsertGlobalInstance,
 } from "./global-config.js";
 import { assertSubstrateExclusivity, resolveEffectiveConfig, resolveProcessSettings } from "./config-resolve.js";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
+import { browseDirectory, cloneIntoWorkspace, createProject, resolveWorkspaceRoot } from "./workspace.js";
 import type { InstanceConfig, RegistryConfig } from "./registry.js";
 
 /**
@@ -345,44 +347,58 @@ export class Coordinator {
   }
 
   /**
-   * SPEC-019 quick-setup connect. Only a driver Arke can actually **activate** is persisted: OpenCode
-   * is validated, written to the GLOBAL config, and the contexts reloaded; if the harness does not
-   * come live (a server that answers `/global/health` but lacks the full capability surface, say), the
-   * write is **rolled back** so the launch screen never shows a configured-but-dead state. Other
-   * drivers (Claude Code / Codex / an Omnigent substrate) have no runnable adapter in this build, so
-   * their endpoint is validated (to give feedback) but nothing is persisted — a fake success that
-   * hides quick setup is worse than an honest "not yet". Userinfo is stripped before any write (NFR-1).
+   * SPEC-019 quick-setup connect. Two OpenCode modes:
+   *  - **managed** ("Start OpenCode"): Arke owns the process — write a managed instance and let the
+   *    coordinator spawn `opencode serve` on reload (SPEC-016). No pre-probe (nothing is listening
+   *    yet); the post-reload readiness check IS the validation. If the spawn fails (e.g. OpenCode not
+   *    installed), the write is rolled back and the failure reason surfaced.
+   *  - **attach** ("point at an existing host"): the server must already answer `/global/health`;
+   *    validate first, then write and reload without managing.
+   * Either way the write is **rolled back** if the harness does not come live, so the launch screen
+   * never shows a configured-but-dead state. Userinfo is stripped before any write (NFR-1).
+   *
+   * Non-OpenCode drivers (an Omnigent substrate) have no runnable adapter in this build, so the
+   * endpoint is validated for feedback but nothing is persisted — a fake success that hides quick
+   * setup is worse than an honest "not yet".
    */
-  private async connectHarness(rawDriver: unknown, rawEndpoint: unknown): Promise<{ ok: boolean; reason?: string; driver?: string }> {
+  private async connectHarness(
+    rawDriver: unknown,
+    rawEndpoint: unknown,
+    rawMode?: unknown,
+  ): Promise<{ ok: boolean; reason?: string; driver?: string }> {
     const endpoint = String(rawEndpoint ?? "").trim();
-    if (!endpoint) return { ok: false, reason: "no endpoint provided" };
     const driver = resolveDriver(rawDriver, endpoint);
-    const base = httpBaseFromEndpoint(endpoint);
+    const managed = String(rawMode ?? "").toLowerCase() === "managed";
 
     if (driver !== "opencode") {
-      // Validate for feedback, but do not persist a driver we cannot bring live.
-      const v = await this.validateEndpoint(base);
       const label = driver === "omnigent" ? "Omnigent substrate" : driver;
+      const v = endpoint ? await this.validateEndpoint(httpBaseFromEndpoint(endpoint)) : { ok: false, reason: "no endpoint" };
       const state = v.ok ? "reachable, but" : `unreachable (${v.reason}); and`;
-      return { ok: false, driver, reason: `${label} is ${state} not runnable in this build yet — only OpenCode can be connected. The install/start commands above are for reference.` };
+      return { ok: false, driver, reason: `${label} is ${state} not runnable in this build yet — only OpenCode can be connected.` };
     }
 
-    // OpenCode: /global/health must answer with a parseable capability surface (SPEC-002 probe target).
-    const health = await this.probe.anyReachable([base]);
-    if (!health.reachable) return { ok: false, driver, reason: health.results[0]?.reason ?? "unreachable" };
+    // Managed start defaults to the documented local endpoint when the client sends none.
+    const target = managed ? endpoint || "opencode://127.0.0.1:4096" : endpoint;
+    if (!target) return { ok: false, driver, reason: "no endpoint provided" };
 
-    // Persist, reload, and VERIFY the harness came live — rolling the write back if it did not, so a
-    // health-only or capability-incomplete server never leaves a dead instance in the global config.
+    if (!managed) {
+      // Attach: the server must already answer with a parseable capability surface (SPEC-002 probe).
+      const health = await this.probe.anyReachable([httpBaseFromEndpoint(target)]);
+      if (!health.reachable) return { ok: false, driver, reason: health.results[0]?.reason ?? "unreachable" };
+    }
+
     const rollback = snapshotGlobalConfigRaw();
-    upsertGlobalInstance(descriptorFor(driver, endpoint));
-    await this.supervisorTrace.write({ kind: "harness.connect", driver, endpoint: redactUrlCreds(endpoint) });
-    await this.reloadAllContexts();
+    upsertGlobalInstance(descriptorFor(driver, target));
+    setGlobalManageHarness(managed); // persist the ownership intent so it survives a plain restart
+    await this.supervisorTrace.write({ kind: "harness.connect", driver, mode: managed ? "managed" : "attach", endpoint: redactUrlCreds(target) });
+    await this.reloadAllContexts(); // in managed mode, the reloaded adapter spawns `opencode serve`
     const readiness = this.contexts.get(this.defaultProjectId)?.adapter.readiness?.() ?? { ready: true };
     if (!readiness.ready) {
       restoreGlobalConfigRaw(rollback);
       await this.reloadAllContexts();
-      await this.supervisorTrace.write({ kind: "harness.connect", driver, endpoint: redactUrlCreds(endpoint), rolledBack: true });
-      return { ok: false, driver, reason: readiness.reason ?? "the harness did not become ready after connecting" };
+      await this.supervisorTrace.write({ kind: "harness.connect", driver, mode: managed ? "managed" : "attach", endpoint: redactUrlCreds(target), rolledBack: true });
+      const fallback = managed ? "OpenCode did not start — is it installed and on PATH?" : "the harness did not become ready after connecting";
+      return { ok: false, driver, reason: readiness.reason ?? fallback };
     }
     return { ok: true, driver };
   }
@@ -506,7 +522,7 @@ export class Coordinator {
       // config, then reload every open context so the newly-configured harness goes live.
       let result: { ok: boolean; reason?: string; driver?: string };
       try {
-        result = await this.connectHarness(msg.driver, msg.endpoint);
+        result = await this.connectHarness(msg.driver, msg.endpoint, msg.mode);
       } catch (err) {
         result = { ok: false, reason: err instanceof Error ? err.message : String(err) };
       }
@@ -567,7 +583,9 @@ export class Coordinator {
     try {
       const result = op.startsWith("project.")
         ? await this.handleProjectOp(conn, ws, op, msg.args)
-        : await this.activeCtx(conn).dispatch(op, msg.args);
+        : op.startsWith("workspace.")
+          ? await this.handleWorkspaceOp(op, msg.args)
+          : await this.activeCtx(conn).dispatch(op, msg.args);
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "response", id, ok: true, result }));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -603,6 +621,34 @@ export class Coordinator {
         const forgotten = this.registry.forget(pid);
         await this.supervisorTrace.write({ kind: "supervisor.project", action: "forget", projectId: pid, forgotten });
         return { forgotten: forgotten ? pid : null };
+      }
+      default:
+        throw new Error(`unknown op: ${op}`);
+    }
+  }
+
+  /**
+   * The SPEC-018 workspace surface: browse, clone, and create folders **bounded to the workspace
+   * root** so the browser can pick/produce a host path without any filesystem access of its own. The
+   * client follows a clone/create with `project.open` on the returned path.
+   */
+  private async handleWorkspaceOp(op: string, rawArgs: unknown): Promise<unknown> {
+    const a = (rawArgs ?? {}) as Record<string, unknown>;
+    const workspaceRoot = resolveWorkspaceRoot(process.env, this.defaultRoot);
+    switch (op) {
+      case "workspace.root":
+        return { root: workspaceRoot };
+      case "workspace.browse":
+        return browseDirectory(workspaceRoot, a.path);
+      case "workspace.clone": {
+        const r = await cloneIntoWorkspace(workspaceRoot, a.url, a.dest, a.name);
+        await this.supervisorTrace.write({ kind: "workspace.clone", url: redactUrlCreds(String(a.url ?? "")), path: r.path });
+        return r;
+      }
+      case "workspace.create": {
+        const r = createProject(workspaceRoot, a.dest, a.name);
+        await this.supervisorTrace.write({ kind: "workspace.create", path: r.path });
+        return r;
       }
       default:
         throw new Error(`unknown op: ${op}`);

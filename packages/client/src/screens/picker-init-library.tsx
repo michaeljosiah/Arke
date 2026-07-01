@@ -4,20 +4,18 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs, Badge } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend, openProjectLive } from '../live';
+import { liveSend, liveRequest, openProjectLive } from '../live';
 
 const e = React.createElement;
 
 /**
- * The supported coding agents for first-run quick setup (SPEC-019), matching the canonical
- * `arke-design` `SO_HarnessSetup` panel. Omnigent is a substrate choice: instead of install/start
- * commands it prompts for an Omnigent URL the coordinator validates before connecting (no
- * auto-detection). `driver` is sent verbatim to `harness.connect`.
+ * The supported coding agents for first-run quick setup (SPEC-019). Only OpenCode and Omnigent are
+ * supported in this build. OpenCode can be **started** for you (Arke spawns `opencode serve` —
+ * managed, SPEC-016) or attached to an existing host. Omnigent is a substrate choice: it prompts for
+ * an Omnigent URL the coordinator validates. `driver` is sent verbatim to `harness.connect`.
  */
 const HARNESS_SETUP = [
   { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', recommended: true, note: 'open source · self-hostable · the reference harness', install: 'curl -fsSL https://opencode.ai/install | sh', start: 'opencode serve --port 4096' },
-  { id: 'claude-code', name: 'Claude Code', driver: 'claude-code', scheme: 'acp://', host: 'localhost:7223', note: 'speaks ACP · normalised by the local coordinator', install: 'npm i -g @anthropic-ai/claude-code', start: 'claude-code acp --port 7223' },
-  { id: 'codex', name: 'Codex', driver: 'codex', scheme: 'codex://', host: 'localhost:8088', note: 'experimental adapter · capability-flagged', install: 'npm i -g @openai/codex', start: 'codex serve --port 8088' },
   { id: 'omnigent', name: 'Omnigent', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
 ] as const;
 
@@ -34,17 +32,26 @@ function HarnessSetup() {
   const h = HARNESS_SETUP.find((x) => x.id === sel) ?? HARNESS_SETUP[0];
   const [host, setHost] = React.useState<string>(h.host);
   React.useEffect(() => { setHost(h.host); }, [sel]);
-  const connect = () => {
-    const value = host.trim();
-    if (!value) return;
+  const send = (driver: string, endpoint: string, mode?: 'managed' | 'attach') => {
     store.set({ harnessConnecting: true, harnessConnectError: null });
-    liveSend({ type: 'harness.connect', driver: h.driver, endpoint: (h.scheme || '') + value });
+    liveSend({ type: 'harness.connect', driver, endpoint, ...(mode ? { mode } : {}) });
   };
+  // "Start OpenCode": Arke spawns `opencode serve` itself (managed, SPEC-016) at the documented port.
+  const startManaged = () => send('opencode', 'opencode://127.0.0.1:4096', 'managed');
+  // Secondary: attach to a running host, or (Omnigent) validate a substrate URL.
+  const connectHost = (mode?: 'managed' | 'attach') => { const v = host.trim(); if (!v) return; send(h.driver, (h.scheme || '') + v, mode); };
   const Cmd = ({ label, cmd }: any) => e('div', { style: { marginBottom: 10 } },
     e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 4 } }, label),
     e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, background: 'var(--neutral-950)', borderRadius: 'var(--radius-md)', padding: '8px 11px' } },
       e('span', { style: { flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#86EFAC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, '$ ' + cmd),
       e('span', { style: { display: 'flex', color: '#737373', cursor: 'pointer' }, onClick: () => { try { void navigator.clipboard?.writeText(cmd); } catch { /* ignore */ } } }, e(Icon, { name: 'copy', size: 13 }))));
+  const divider = (label: string) => e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 8px' } },
+    e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
+    e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, label),
+    e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }));
+  const hostRow = (mode: 'managed' | 'attach' | undefined, cta: string) => e('div', { style: { display: 'flex', gap: 8 } },
+    e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
+    e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
   return e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
     e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 8 } }, 'Choose your coding agent'),
     e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 } },
@@ -54,17 +61,62 @@ function HarnessSetup() {
         x.name,
         (x as any).recommended ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 5px' } }, 'recommended') : null))),
     e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note),
-    (h as any).substrate ? null : e(Cmd, { label: 'Install', cmd: (h as any).install }),
-    (h as any).substrate ? null : e(Cmd, { label: 'Start', cmd: (h as any).start }),
-    e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' } },
-      e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
-      e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, (h as any).substrate ? 'Omnigent URL' : 'or point at an existing host'),
-      e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } })),
-    e('div', { style: { display: 'flex', gap: 8 } },
-      e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
-      e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: connect }, connecting ? 'Connecting…' : 'Connect')),
+    // OpenCode: install/start reference + a primary "Start OpenCode" (managed) + a secondary attach row.
+    (h as any).substrate
+      ? e(React.Fragment, null, divider('Omnigent URL'), hostRow(undefined, 'Connect'))
+      : e(React.Fragment, null,
+          e(Cmd, { label: 'Install', cmd: (h as any).install }),
+          e(Cmd, { label: 'Start', cmd: (h as any).start }),
+          e(Button, { style: { width: '100%', marginTop: 4 }, disabled: connecting, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
+          divider('or point at an existing host'),
+          hostRow('attach', 'Connect')),
     error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
     e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
+}
+
+/**
+ * Coordinator-driven folder browser (SPEC-018). A browser can't browse the host filesystem, so the
+ * coordinator lists directories (bounded to the workspace root) via `workspace.browse` and this modal
+ * renders them; clicking a row navigates in, the footer selects the current folder. A paste-a-path
+ * escape hatch opens any absolute path directly (project.open resolves it host-side).
+ */
+function FolderPicker({ title, cta, onSelect, onClose }: any) {
+  const [data, setData] = React.useState<any>(null);
+  const [typed, setTyped] = React.useState('');
+  const [err, setErr] = React.useState<string | null>(null);
+  const browse = (path?: string) => {
+    liveRequest('workspace.browse', path ? { path } : {}).then((res: any) => {
+      if (res?.ok) { setData(res.result); setErr(null); } else setErr(res?.error || 'could not read folder');
+    });
+  };
+  React.useEffect(() => { browse(); }, []);
+  const rowStyle = { appearance: 'none', textAlign: 'left', width: '100%', cursor: 'pointer', background: 'var(--background)', border: 'none', borderBottom: '1px solid var(--border)', padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 10, fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)' } as const;
+  const here = data ? (data.path === data.root ? 'workspace root' : data.path) : 'loading…';
+  return e('div', { onClick: onClose, style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 } },
+    e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 480, maxHeight: '78vh', display: 'flex', flexDirection: 'column', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden', boxShadow: '0 12px 40px rgba(0,0,0,0.25)' } },
+      e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '13px 16px', borderBottom: '1px solid var(--border)' } },
+        e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'folder', size: 16 })),
+        e('div', { style: { flex: 1, fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, title),
+        e('button', { onClick: onClose, style: { background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex' } }, e(Icon, { name: 'x', size: 16 }))),
+      e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, here),
+      e('div', { style: { flex: 1, overflowY: 'auto', minHeight: 120 } },
+        err ? e('div', { style: { padding: 16, fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--warning, #B45309)' } }, err) : null,
+        data && data.parent ? e('button', { onClick: () => browse(data.parent), style: rowStyle },
+          e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'arrowRight', size: 14 })),
+          e('span', { style: { color: 'var(--muted-foreground)' } }, '..  (up)')) : null,
+        data ? data.entries.map((en: any) => e('button', { key: en.path, onClick: () => browse(en.path), style: rowStyle,
+          onMouseEnter: (ev: any) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev: any) => ev.currentTarget.style.background = 'var(--background)' },
+          e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'folder', size: 15 })),
+          e('span', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, en.name),
+          en.isProject ? e(Badge, { variant: 'secondary' }, 'project') : null)) : null,
+        data && data.entries.length === 0 && !err ? e('div', { style: { padding: 16, fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'no sub-folders here') : null),
+      e('div', { style: { padding: '10px 16px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 } },
+        e('div', { style: { display: 'flex', gap: 8 } },
+          e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, placeholder: 'or paste an absolute path…', value: typed, onChange: (ev: any) => setTyped(ev.target.value) })),
+          e(Button, { variant: 'outline', style: { flex: 'none' }, disabled: !typed.trim(), onClick: () => onSelect(typed.trim()) }, 'Open path')),
+        e('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          e(Button, { variant: 'outline', onClick: onClose }, 'Cancel'),
+          e(Button, { disabled: !data, onClick: () => onSelect(data.path) }, cta)))));
 }
 
 /**
@@ -86,11 +138,24 @@ export function Picker() {
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
   const [reprobing, setReprobing] = React.useState(false);
+  const [newOpen, setNewOpen] = React.useState(false);
+  const [newName, setNewName] = React.useState('new-service');
+  const [dest, setDest] = React.useState<string | null>(null); // clone/new destination; null = workspace root
+  const [picker, setPicker] = React.useState<any>(null); // folder-browser modal state, or null
+  const [busy, setBusy] = React.useState(false);
+  const [entryError, setEntryError] = React.useState<string | null>(null);
 
+  // The COORDINATOR itself is unreachable when reconnection keeps failing — a crashed / not-started
+  // coordinator. This is independent of the last `live` snapshot, which freezes stale the moment the
+  // socket drops. Surface it distinctly instead of an endless "probing for a coding agent" (we can't
+  // probe a harness until the coordinator answers). A brief initial connect still shows "checking"; a
+  // sustained failure (a few attempts) flips to this.
+  const connectionAttempts = useStore((s) => s.connectionAttempts);
+  const coordinatorDown = connectionAttempts >= 3 && (connection === 'reconnecting' || connection === 'connecting' || connection === 'offline');
   // probe state mirrors the template: checking (connecting) → reachable / unreachable.
   const connecting = !live && (connection === 'connecting' || connection === 'reconnecting' || connection === 'offline');
   const probe = live ? (harnessReachable ? 'reachable' : 'unreachable') : (connecting ? 'checking' : 'unreachable');
-  const ready = probe === 'reachable';
+  const ready = !coordinatorDown && probe === 'reachable';
   // First-run quick setup (SPEC-019): when live and NO harness is configured anywhere (global or
   // project), guide setup (choose an agent / point at a host) instead of the configured-but-down
   // re-probe card. A configured-but-unreachable harness keeps the re-probe path.
@@ -105,27 +170,42 @@ export function Picker() {
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
   const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
-  // entryPath is the coordinator-relative path the init screen scaffolds. Open/New target the
-  // project root ('.'); Clone targets the freshly cloned subdirectory so scaffolding writes there.
-  const toInit = (name: string, path: string) => store.set({ project: { name, specs: 0 }, entryPath: path, view: 'init' });
+  // Route into a just-opened project by its real folder state: method-ready → library, else scaffold.
   const enter = (name: string, state: string | null) => store.set({ project: { name, specs: 0 }, entryPath: '.', view: state === 'method-ready' ? 'library' : 'init' });
-  const openProject = () => { if (cp) enter(cp.name, projectState); };
+  const routeOpen = (res: any) => { setBusy(false); if (res?.ok) enter(res.result.name, res.result.state); else setEntryError(res?.error || 'could not open the project'); };
+  // Open ANY host path (workspace.browse selection or a pasted path); the coordinator resolves it.
+  const doOpen = (path: string) => { setPicker(null); setBusy(true); setEntryError(null); void openProjectLive({ path }).then(routeOpen); };
+  const openFolder = () => setPicker({ title: 'Open a project folder', cta: 'Open this folder', onSelect: (p: string) => doOpen(p) });
+  const pickDest = () => setPicker({ title: 'Choose a destination', cta: 'Use this folder', onSelect: (p: string) => { setDest(p); setPicker(null); } });
   // Switch the coordinator's active project to a recent, then route into it by its real state.
   const openRecent = (entry: any) => {
     if (cp && entry.projectId === cp.projectId) return enter(cp.name, projectState);
-    void openProjectLive({ projectId: entry.projectId }).then((res) => {
-      if (res?.ok) enter(res.result.name, res.result.state);
+    setBusy(true); void openProjectLive({ projectId: entry.projectId }).then(routeOpen);
+  };
+  // Clone a repo into <dest ?? workspace root>/<name>, then open the result (SPEC-018 workspace op).
+  const doClone = () => {
+    const raw = cloneUrl.trim(); if (!raw) return;
+    const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : 'https://' + raw;
+    setBusy(true); setEntryError(null);
+    void liveRequest('workspace.clone', { url, ...(dest ? { dest } : {}) }).then((res: any) => {
+      if (res?.ok) doOpen(res.result.path); else { setBusy(false); setEntryError(res?.error || 'clone failed'); }
     });
   };
-  const clone = () => {
-    const url = cloneUrl.trim();
-    if (!url) return;
-    const name = (url.split('/').pop() || 'repo').replace(/\.git$/, '');
-    liveSend({ type: 'repo.clone', url, targetPath: name });
-    toInit(name, name); // scaffold the cloned dir, not the coordinator root
+  // Create <dest ?? workspace root>/<name> and open it (greenfield → the scaffold screen).
+  const doCreate = () => {
+    const name = newName.trim(); if (!name) return;
+    setBusy(true); setEntryError(null);
+    void liveRequest('workspace.create', { name, ...(dest ? { dest } : {}) }).then((res: any) => {
+      if (res?.ok) doOpen(res.result.path); else { setBusy(false); setEntryError(res?.error || 'could not create the project'); }
+    });
   };
 
   const linkBtn = { background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } as const;
+  // The clone/new destination line, with a "change" affordance that opens the folder browser.
+  const destRow = () => e('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } },
+    e('span', null, 'into'),
+    e('span', { style: { color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 300 } }, dest || 'workspace root'),
+    e('button', { onClick: pickDest, style: { ...linkBtn, fontSize: 10.5, marginLeft: 2 } }, 'change'));
   const stepNum = (n: string, label: string, extra?: any) => e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 } },
     e('span', { style: { width: 18, height: 18, borderRadius: 999, background: 'var(--secondary)', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 600 } }, n),
     e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, label),
@@ -151,10 +231,17 @@ export function Picker() {
       e(Card, { padding: 22 },
         // 1 · harness readiness
         stepNum('1', 'Harness', ready ? e('button', { onClick: () => setSetup((o) => !o), style: linkBtn }, setup ? 'Hide' : 'Change host') : null),
-        probe === 'checking'
+        coordinatorDown
+          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
+              e('span', { style: { color: 'var(--destructive, #DC2626)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
+              e('div', { style: { flex: 1, minWidth: 0 } },
+                e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, "Can't reach the coordinator"),
+                e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, 'The local coordinator isn’t responding — it may have stopped. Restart it (e.g. arke up); this reconnects automatically.')),
+              e(Button, { variant: 'secondary', onClick: () => window.location.reload() }, 'Retry'))
+          : probe === 'checking'
           ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
               e(StatusDot, { status: 'running', pulse: true }),
-              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'probing for a coding agent on the host…'))
+              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'connecting to the coordinator…'))
           : ready
             ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
                 e(StatusDot, { status: 'agree' }),
@@ -178,13 +265,21 @@ export function Picker() {
 
         // 2 · entry
         stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, canScaffold ? 'scaffold to configure a harness' : 'connect a harness first')),
-        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9, marginBottom: cloneOpen ? 10 : 18 } },
-          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Open the connected project — Arke detects and adapts', primary: true, enabled: canScaffold, onClick: openProject }),
-          e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a new working folder', enabled: canScaffold, onClick: () => setCloneOpen((o) => !o) }),
-          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', enabled: canScaffold, onClick: () => toInit((cp && cp.name) || 'new-service', '.') })),
-        cloneOpen ? e('div', { style: { display: 'flex', gap: 8, marginBottom: 18 } },
-          e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
-          e(Button, { style: { flex: 'none' }, disabled: !canScaffold || !cloneUrl.trim(), onClick: clone }, 'Clone')) : null,
+        e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9, marginBottom: (cloneOpen || newOpen) ? 10 : 18 } },
+          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Browse to a project folder — Arke detects and adapts', primary: true, enabled: canScaffold, onClick: openFolder }),
+          e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a folder in your workspace', enabled: canScaffold, onClick: () => { setNewOpen(false); setEntryError(null); setCloneOpen((o) => !o); } }),
+          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', enabled: canScaffold, onClick: () => { setCloneOpen(false); setEntryError(null); setNewOpen((o) => !o); } })),
+        cloneOpen ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 } },
+          e('div', { style: { display: 'flex', gap: 8 } },
+            e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
+            e(Button, { style: { flex: 'none' }, disabled: busy || !canScaffold || !cloneUrl.trim(), onClick: doClone }, busy ? 'Cloning…' : 'Clone')),
+          destRow()) : null,
+        newOpen ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 } },
+          e('div', { style: { display: 'flex', gap: 8 } },
+            e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, placeholder: 'project name', value: newName, onChange: (ev: any) => setNewName(ev.target.value) })),
+            e(Button, { style: { flex: 'none' }, disabled: busy || !canScaffold || !newName.trim(), onClick: doCreate }, busy ? 'Creating…' : 'Create')),
+          destRow()) : null,
+        entryError ? e('div', { style: { marginBottom: 16, fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--warning, #B45309)' } }, entryError) : null,
 
         recentList.length
           ? e('div', null,
@@ -202,6 +297,7 @@ export function Picker() {
       ),
       e('p', { style: { textAlign: 'center', margin: '16px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
     ),
+    picker ? e(FolderPicker, { title: picker.title, cta: picker.cta, onSelect: picker.onSelect, onClose: () => setPicker(null) }) : null,
   );
 }
 

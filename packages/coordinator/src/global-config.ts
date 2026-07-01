@@ -25,6 +25,18 @@ export interface ProcessSettings {
   projectionQueryLimit?: number;
   auditQueryLimit?: number;
   otlpEndpoint?: string | null;
+  /**
+   * Whether Arke owns (spawns) the OpenCode harness process rather than attaching to a running one
+   * (SPEC-016). Set true by a SPEC-019 managed "Start OpenCode" connect so the coordinator brings the
+   * harness up on reload. `ARKE_MANAGE_HARNESS` env still overrides at load time.
+   */
+  manageHarness?: boolean;
+  /**
+   * The directory that bounds all folder browsing / cloning / project creation from the client
+   * (SPEC-018). Defaults to the user's home; `ARKE_WORKSPACE_ROOT` overrides. The browser can only
+   * navigate within this root — it never enumerates the whole disk.
+   */
+  workspaceRoot?: string;
 }
 
 /** The machine-level global config: instances (+ optional process-wide settings). No roster. */
@@ -136,7 +148,19 @@ function parseSettings(raw: Record<string, unknown> | undefined): ProcessSetting
   num(raw.auditQueryLimit, (v) => (s.auditQueryLimit = v));
   if (typeof raw.otlpEndpoint === "string") s.otlpEndpoint = raw.otlpEndpoint;
   else if (raw.otlpEndpoint === null) s.otlpEndpoint = null;
+  if (typeof raw.manageHarness === "boolean") s.manageHarness = raw.manageHarness;
+  if (typeof raw.workspaceRoot === "string" && raw.workspaceRoot.trim()) s.workspaceRoot = raw.workspaceRoot;
   return Object.keys(s).length > 0 ? s : undefined;
+}
+
+/**
+ * Set (or clear) the `settings.manageHarness` flag in the global config, preserving instances and
+ * every other setting (SPEC-019 managed connect). Creates the file if absent; writes atomically.
+ */
+export function setGlobalManageHarness(value: boolean, path: string = globalConfigPath()): void {
+  const existing = loadGlobalConfig(path) ?? { instances: [] };
+  const settings: ProcessSettings = { ...(existing.settings ?? {}), manageHarness: value };
+  writeGlobalConfig({ instances: existing.instances, settings }, path);
 }
 
 function num(v: unknown, set: (n: number) => void): void {

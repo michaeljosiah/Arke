@@ -23,6 +23,8 @@ export class StubOpenCodeServer {
 
   /** Per-path request counts, e.g. counts.get("GET /session"). */
   readonly counts = new Map<string, number>();
+  /** Last request body seen per route key, e.g. lastBodies.get("POST /session/:id/message"). */
+  readonly lastBodies = new Map<string, unknown>();
   /** OpenAPI paths advertised at GET /doc (override to simulate older/forked servers). */
   docPaths: Record<string, unknown> = {
     "/global/health": {},
@@ -172,7 +174,7 @@ export class StubOpenCodeServer {
       }
       if (method === "POST" && sub === "message") {
         this.bump("POST", "/session/:id/message");
-        await this.body(req);
+        this.lastBodies.set("POST /session/:id/message", await this.body(req));
         return this.json(res, 200, { id: `msg_${++this.seq}`, role: "assistant" });
       }
       if (method === "POST" && sub === "prompt_async") {

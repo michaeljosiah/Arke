@@ -234,7 +234,9 @@ function LiveCockpit() {
       // turn completes, by which time the transcript (and its agent turn) may already be merged — so
       // set roleByMsgId/tierByMsgId by a client-generated correlationId now, with lastSent* fallbacks
       // for turns whose messageId differs from the correlationId (PR #18 review rounds 5–6).
-      const correlationId = (globalThis.crypto?.randomUUID?.() ?? `cock-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      // Prefix with `msg` so it is a valid OpenCode messageID (the harness rejects ids that don't) and
+      // stays identical on the wire — keeping the correlationId the transcript is attributed by intact.
+      const correlationId = `msg_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}${Math.random().toString(36).slice(2)}`).replace(/-/g, '')}`;
       roleByMsgId.current.set(correlationId, sentAs);
       tierByMsgId.current.set(correlationId, tier);
       lastSentRole.current = sentAs;

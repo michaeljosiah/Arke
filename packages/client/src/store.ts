@@ -147,6 +147,9 @@ export const store = createStore({
   // Live coordinator link (SPEC-003). `connection` mirrors the transport state machine;
   // `live` flips true once a snapshot arrives, at which point the mock engine stands down.
   connection: 'offline',
+  // Consecutive failed (re)connect attempts to the coordinator; a sustained count means the
+  // coordinator itself is unreachable (crashed / not started), distinct from the harness being down.
+  connectionAttempts: 0,
   live: false,
   // The single project the connected coordinator serves (SPEC-004). Null until a snapshot arrives.
   // The coordinator is single-project; there is no multi-project list.

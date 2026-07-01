@@ -76,9 +76,13 @@ const CONN_UI: Record<string, { status: string; pulse: boolean; label: string }>
 };
 
 function Sidebar() {
-  const { view, project, notifs, harnesses, connection, live } = useStore();
+  const { view, project, notifs, harnesses, connection, connectionAttempts, live } = useStore();
   const unread = notifs.filter((n) => !n.read).length;
-  const conn = CONN_UI[connection] || CONN_UI.offline;
+  // Escalate a SUSTAINED reconnect failure to a distinct "coordinator unreachable" (the coordinator
+  // crashed / stopped) rather than an indefinite "reconnecting…" — the client can't reach the control
+  // plane at all, not merely a transient blip.
+  const unreachable = !live && connectionAttempts >= 3 && (connection === 'reconnecting' || connection === 'connecting');
+  const conn = unreachable ? { status: 'diverge', pulse: false, label: 'coordinator unreachable' } : (CONN_UI[connection] || CONN_UI.offline);
   const go = (id) => store.set({ view: id });
   return e('div', { style: { width: 230, flex: 'none', background: 'var(--background)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('button', { onClick: () => store.set({ project: null, view: 'picker' }), style: { display: 'flex', alignItems: 'center', gap: 10, margin: '12px 12px 6px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', background: 'var(--card)', cursor: 'pointer', textAlign: 'left' } },

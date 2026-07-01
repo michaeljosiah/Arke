@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { globalConfigPath, loadGlobalConfig, upsertGlobalInstance } from "../src/global-config.js";
+import { globalConfigPath, loadGlobalConfig, setGlobalManageHarness, upsertGlobalInstance } from "../src/global-config.js";
 import type { InstanceConfig } from "../src/registry.js";
 
 function tmpPath(): string {
@@ -64,6 +64,19 @@ test("upsertGlobalInstance writes only a credentialsRef pointer — never a secr
   assert.match(raw, /opencode\/gateway/); // the pointer is present
   // The descriptor type carries only a ref; assert no obvious secret-shaped keys leaked into the file.
   assert.doesNotMatch(raw, /"(apiKey|token|secret|password)"/i);
+});
+
+test("setGlobalManageHarness toggles settings.manageHarness, preserving instances (SPEC-019 managed connect)", () => {
+  const path = tmpPath();
+  upsertGlobalInstance(inst("opencode-local"), path);
+  setGlobalManageHarness(true, path);
+  let cfg = loadGlobalConfig(path);
+  assert.equal(cfg!.settings?.manageHarness, true);
+  assert.equal(cfg!.instances.length, 1); // instance preserved across the settings write
+  setGlobalManageHarness(false, path);
+  cfg = loadGlobalConfig(path);
+  assert.equal(cfg!.settings?.manageHarness, false);
+  assert.equal(cfg!.instances.length, 1);
 });
 
 test("globalConfigPath honours ARKE_GLOBAL_CONFIG_PATH", () => {
