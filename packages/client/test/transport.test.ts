@@ -99,3 +99,25 @@ test("state changes are observable", () => {
   assert.ok(states.includes("open"));
   assert.ok(states.includes("reconnecting"));
 });
+
+test("attempt count is emitted so a sustained failure can be surfaced (coordinator unreachable)", async () => {
+  const attempts: number[] = [];
+  const { t, sock } = makeTransport();
+  t.subscribe((_s, a) => attempts.push(a));
+  // Fail three consecutive (re)connects: each schedules a reconnect and re-emits with a higher count,
+  // even though the state stays "reconnecting".
+  for (let i = 0; i < 3; i++) {
+    sock().close();
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(t.attempts >= 3, `expected >=3 attempts, got ${t.attempts}`);
+  assert.ok(Math.max(...attempts) >= 3, "listener should observe the rising attempt count");
+});
+
+test("a successful open resets the attempt count to zero", () => {
+  const { t, sock } = makeTransport();
+  sock().close(); // attempt 1
+  assert.ok(t.attempts >= 1);
+  sock().open(); // recovered
+  assert.equal(t.attempts, 0);
+});

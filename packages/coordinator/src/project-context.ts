@@ -1998,9 +1998,9 @@ export function gitCommit(cwd: string, relPath: string, message: string): { ok: 
   }
 }
 
-const CLONE_TIMEOUT_MS = Number(process.env.ARKE_CLONE_TIMEOUT_MS ?? 120_000);
+export const CLONE_TIMEOUT_MS = Number(process.env.ARKE_CLONE_TIMEOUT_MS ?? 120_000);
 
-function gitCloneAsync(url: string, target: string, timeoutMs: number): Promise<void> {
+export function gitCloneAsync(url: string, target: string, timeoutMs: number): Promise<void> {
   return new Promise<void>((resolvePromise, reject) => {
     const child = spawn("git", ["clone", url, target], {
       stdio: "ignore",

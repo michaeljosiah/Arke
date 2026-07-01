@@ -518,9 +518,9 @@ export function startLive(): ArkeTransport {
     baseDelayMs: 600,
     maxDelayMs: 8000,
   });
-  store.set({ connection: transport.state });
-  transport.subscribe((state: TransportState) => {
-    store.set({ connection: state });
+  store.set({ connection: transport.state, connectionAttempts: transport.attempts });
+  transport.subscribe((state: TransportState, attempts: number) => {
+    store.set({ connection: state, connectionAttempts: attempts });
     // On reconnect, defer the cockpit-queue drain until AFTER the first snapshot is processed: the
     // transport fires 'open' before the snapshot, and a drain that re-binds the project here can race
     // ahead of the coordinator's default-project snapshot (which would then overwrite connectedProject

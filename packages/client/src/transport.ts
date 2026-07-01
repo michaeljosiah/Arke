@@ -48,7 +48,7 @@ export class ArkeTransport {
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private awaitingFirstFrame = false;
-  private readonly listeners = new Set<(s: TransportState) => void>();
+  private readonly listeners = new Set<(s: TransportState, attempts: number) => void>();
 
   constructor(opts: ArkeTransportOptions) {
     this.url = opts.url;
@@ -63,7 +63,12 @@ export class ArkeTransport {
     return this._state;
   }
 
-  subscribe(listener: (s: TransportState) => void): () => void {
+  /** Consecutive failed (re)connect attempts since the last successful open — 0 while healthy. */
+  get attempts(): number {
+    return this.attempt;
+  }
+
+  subscribe(listener: (s: TransportState, attempts: number) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -133,6 +138,10 @@ export class ArkeTransport {
   private scheduleReconnect(): void {
     this.clearTimer();
     this.attempt += 1;
+    // Re-emit even though the state stays "reconnecting", so a listener can escalate a *sustained*
+    // failure (many attempts) to a distinct "coordinator unreachable" surface instead of an endless
+    // "connecting…" — the state alone doesn't change between attempts.
+    this.emit();
     const delay = Math.min(this.attempt * this.baseDelayMs, this.maxDelayMs);
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
     if (this.reconnectTimer && typeof this.reconnectTimer === "object" && "unref" in this.reconnectTimer) {
@@ -150,7 +159,11 @@ export class ArkeTransport {
   private setState(s: TransportState): void {
     if (this._state === s) return;
     this._state = s;
-    for (const l of this.listeners) l(s);
+    this.emit();
+  }
+
+  private emit(): void {
+    for (const l of this.listeners) l(this._state, this.attempt);
   }
 
   private clearTimer(): void {
