@@ -48,6 +48,11 @@ const NAV = [
   ] },
 ];
 
+// Temporarily hidden from the nav to focus the MVP on the author -> review -> deliver spine:
+// the downstream artifact-generation + system-of-record projection surfaces (Generation, Record
+// sync, Integrations). The screens/routes still exist — remove an id here to restore the item.
+const HIDDEN_FOR_MVP = new Set(['generation', 'projections', 'integrations']);
+
 function NavItem({ it, active, onClick, badge }: any) {
   const [hover, setHover] = React.useState(false);
   return e('button', {
@@ -93,11 +98,15 @@ function Sidebar() {
       e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevronDown', size: 14 })),
     ),
     e('div', { style: { flex: 1, overflowY: 'auto', padding: '8px 12px' } },
-      NAV.map((grp) => e('div', { key: grp.group, style: { marginBottom: 14 } },
-        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--neutral-400)', padding: '0 8px', marginBottom: 4 } }, grp.group),
-        grp.items.map((it) => e(NavItem, { key: it.id, it, active: view === it.id || (view === 'session' && it.id === 'board') || (view === 'diff' && it.id === 'board'),
-          onClick: () => go(it.id), badge: it.id === 'notifications' && unread ? unread : null })),
-      )),
+      NAV.map((grp) => {
+        const items = grp.items.filter((it) => !HIDDEN_FOR_MVP.has(it.id));
+        if (items.length === 0) return null; // a group emptied by the MVP filter is dropped entirely
+        return e('div', { key: grp.group, style: { marginBottom: 14 } },
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--neutral-400)', padding: '0 8px', marginBottom: 4 } }, grp.group),
+          items.map((it) => e(NavItem, { key: it.id, it, active: view === it.id || (view === 'session' && it.id === 'board') || (view === 'diff' && it.id === 'board'),
+            onClick: () => go(it.id), badge: it.id === 'notifications' && unread ? unread : null })),
+        );
+      }),
     ),
     e('div', { style: { borderTop: '1px solid var(--border)', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8 } },
       e(StatusDot, { status: conn.status, pulse: conn.pulse }),
