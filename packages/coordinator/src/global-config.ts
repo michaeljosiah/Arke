@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { arkeHome } from "./project-registry.js";
 import { parseInstances } from "./registry-config.js";
@@ -79,6 +79,35 @@ export function upsertGlobalInstance(
   const next: GlobalConfig = { instances, ...(existing.settings ? { settings: existing.settings } : {}) };
   writeGlobalConfig(next, path);
   return next;
+}
+
+/**
+ * Capture the raw global-config file bytes (or `null` when absent) so a caller can roll back an
+ * upsert that turns out not to bring a harness live (SPEC-019 connect verification).
+ */
+export function snapshotGlobalConfigRaw(path: string = globalConfigPath()): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Restore a {@link snapshotGlobalConfigRaw} capture: rewrite the prior bytes, or delete if it was absent. */
+export function restoreGlobalConfigRaw(snapshot: string | null, path: string = globalConfigPath()): void {
+  if (snapshot === null) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      /* already gone */
+    }
+    return;
+  }
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, snapshot, "utf8");
+  renameSync(tmp, path);
 }
 
 /** Serialise the global config to disk atomically (temp + rename), creating parent dirs as needed. */

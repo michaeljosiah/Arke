@@ -25,7 +25,13 @@ import type { ScaffoldTiers } from "./scaffold.js";
 import { ProjectRegistry, projectIdForRoot } from "./project-registry.js";
 import { ProjectContext, buildDecision, type ProjectContextInit } from "./project-context.js";
 import { loadRegistryConfig } from "./registry-config.js";
-import { globalConfigPath, loadGlobalConfig, upsertGlobalInstance } from "./global-config.js";
+import {
+  globalConfigPath,
+  loadGlobalConfig,
+  restoreGlobalConfigRaw,
+  snapshotGlobalConfigRaw,
+  upsertGlobalInstance,
+} from "./global-config.js";
 import { assertSubstrateExclusivity, resolveEffectiveConfig, resolveProcessSettings } from "./config-resolve.js";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
 import type { InstanceConfig, RegistryConfig } from "./registry.js";
@@ -339,29 +345,50 @@ export class Coordinator {
   }
 
   /**
-   * SPEC-019 quick-setup connect: validate `endpoint`, persist the harness to the GLOBAL config, and
-   * reload every open context so it goes live. Nothing is persisted when validation fails. The
-   * credential secret is never written — only a `credentialsRef` pointer (auth happens in the harness).
+   * SPEC-019 quick-setup connect. Only a driver Arke can actually **activate** is persisted: OpenCode
+   * is validated, written to the GLOBAL config, and the contexts reloaded; if the harness does not
+   * come live (a server that answers `/global/health` but lacks the full capability surface, say), the
+   * write is **rolled back** so the launch screen never shows a configured-but-dead state. Other
+   * drivers (Claude Code / Codex / an Omnigent substrate) have no runnable adapter in this build, so
+   * their endpoint is validated (to give feedback) but nothing is persisted — a fake success that
+   * hides quick setup is worse than an honest "not yet". Userinfo is stripped before any write (NFR-1).
    */
   private async connectHarness(rawDriver: unknown, rawEndpoint: unknown): Promise<{ ok: boolean; reason?: string; driver?: string }> {
     const endpoint = String(rawEndpoint ?? "").trim();
     if (!endpoint) return { ok: false, reason: "no endpoint provided" };
     const driver = resolveDriver(rawDriver, endpoint);
-    const validation = await this.validateEndpoint(driver, httpBaseFromEndpoint(endpoint));
-    if (!validation.ok) return { ok: false, reason: validation.reason, driver };
+    const base = httpBaseFromEndpoint(endpoint);
+
+    if (driver !== "opencode") {
+      // Validate for feedback, but do not persist a driver we cannot bring live.
+      const v = await this.validateEndpoint(base);
+      const label = driver === "omnigent" ? "Omnigent substrate" : driver;
+      const state = v.ok ? "reachable, but" : `unreachable (${v.reason}); and`;
+      return { ok: false, driver, reason: `${label} is ${state} not runnable in this build yet — only OpenCode can be connected. The install/start commands above are for reference.` };
+    }
+
+    // OpenCode: /global/health must answer with a parseable capability surface (SPEC-002 probe target).
+    const health = await this.probe.anyReachable([base]);
+    if (!health.reachable) return { ok: false, driver, reason: health.results[0]?.reason ?? "unreachable" };
+
+    // Persist, reload, and VERIFY the harness came live — rolling the write back if it did not, so a
+    // health-only or capability-incomplete server never leaves a dead instance in the global config.
+    const rollback = snapshotGlobalConfigRaw();
     upsertGlobalInstance(descriptorFor(driver, endpoint));
     await this.supervisorTrace.write({ kind: "harness.connect", driver, endpoint: redactUrlCreds(endpoint) });
     await this.reloadAllContexts();
+    const readiness = this.contexts.get(this.defaultProjectId)?.adapter.readiness?.() ?? { ready: true };
+    if (!readiness.ready) {
+      restoreGlobalConfigRaw(rollback);
+      await this.reloadAllContexts();
+      await this.supervisorTrace.write({ kind: "harness.connect", driver, endpoint: redactUrlCreds(endpoint), rolledBack: true });
+      return { ok: false, driver, reason: readiness.reason ?? "the harness did not become ready after connecting" };
+    }
     return { ok: true, driver };
   }
 
-  /** Probe an endpoint before persisting. OpenCode exposes `/global/health` (the reachability probe's
-   *  target); other drivers are checked permissively — any HTTP response means a server is listening. */
-  private async validateEndpoint(driver: string, base: string): Promise<{ ok: boolean; reason?: string }> {
-    if (driver === "opencode") {
-      const { reachable, results } = await this.probe.anyReachable([base]);
-      return reachable ? { ok: true } : { ok: false, reason: results[0]?.reason ?? "unreachable" };
-    }
+  /** Permissive reachability check (any HTTP response means a server is listening) for feedback only. */
+  private async validateEndpoint(base: string): Promise<{ ok: boolean; reason?: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
     try {
@@ -614,18 +641,34 @@ const SCHEME_DRIVER: Record<string, string> = {
   omnigent: "omnigent",
 };
 
-/** Split `scheme://authority[/path]` into its parts; a bare `host:port` has no scheme. */
-function parseEndpoint(endpoint: string): { scheme?: string; authority: string } {
-  const m = /^([a-z][a-z0-9+.-]*):\/\/(.+)$/i.exec(endpoint.trim());
-  if (m) return { scheme: m[1]!.toLowerCase(), authority: m[2]!.replace(/\/+$/, "") };
-  return { authority: endpoint.replace(/\/+$/, "") };
+/**
+ * Split `scheme://[userinfo@]host[/path]` into its parts; a bare `host:port` has no scheme. The
+ * `userinfo` (a `user:pass@` prefix) is separated out so a caller never persists it — the harness,
+ * not Arke, owns credentials (SPEC-019 / NFR-1).
+ */
+export function parseEndpoint(endpoint: string): { scheme?: string; host: string; userinfo?: string } {
+  const trimmed = endpoint.trim();
+  const m = /^([a-z][a-z0-9+.-]*):\/\/(.+)$/i.exec(trimmed);
+  let scheme: string | undefined;
+  let rest: string;
+  if (m) {
+    scheme = m[1]!.toLowerCase();
+    rest = m[2]!;
+  } else {
+    rest = trimmed;
+  }
+  rest = rest.replace(/\/+$/, "");
+  const at = rest.lastIndexOf("@");
+  const userinfo = at >= 0 ? rest.slice(0, at) : undefined;
+  const host = at >= 0 ? rest.slice(at + 1) : rest;
+  return { ...(scheme ? { scheme } : {}), host, ...(userinfo ? { userinfo } : {}) };
 }
 
-/** The HTTP(S) base URL to probe for reachability (harness schemes normalise to http). */
+/** The HTTP(S) base URL to probe for reachability (harness schemes normalise to http; userinfo dropped). */
 function httpBaseFromEndpoint(endpoint: string): string {
-  const { scheme, authority } = parseEndpoint(endpoint);
-  if (scheme === "http" || scheme === "https") return `${scheme}://${authority}`;
-  return `http://${authority}`;
+  const { scheme, host } = parseEndpoint(endpoint);
+  const proto = scheme === "http" || scheme === "https" ? scheme : "http";
+  return `${proto}://${host}`;
 }
 
 /** Resolve the driver: an explicit client value wins, else the endpoint scheme, else opencode. */
@@ -637,14 +680,23 @@ function resolveDriver(rawDriver: unknown, endpoint: string): string {
 }
 
 /**
- * Build the instance descriptor persisted to the global config on connect (SPEC-019). `host` carries
- * the full authority (e.g. `localhost:4096`) so the adapter derives the right base URL. `serves` is
- * left empty for the engineer to fill (open question: seed from the live catalog). The `credentialsRef`
- * is a pointer only — never a secret.
+ * Build the instance descriptor persisted to the global config on connect (SPEC-019). Any `user:pass@`
+ * userinfo is STRIPPED — it is never written to disk (NFR-1). A `baseUrl` is stored so the endpoint's
+ * scheme (notably `https`) survives the round-trip rather than defaulting back to `http`. `serves` is
+ * left empty for the engineer to fill; the `credentialsRef` is a pointer only, never a secret.
  */
-function descriptorFor(driver: string, endpoint: string): InstanceConfig {
-  const { authority } = parseEndpoint(endpoint);
-  return { id: `${driver}-local`, driver, host: authority, cwd: ".", credentialsRef: `${driver}/gateway`, serves: [] };
+export function descriptorFor(driver: string, endpoint: string): InstanceConfig {
+  const { scheme, host } = parseEndpoint(endpoint);
+  const proto = scheme === "https" ? "https" : "http";
+  return {
+    id: `${driver}-local`,
+    driver,
+    host,
+    cwd: ".",
+    credentialsRef: `${driver}/gateway`,
+    serves: [],
+    baseUrl: `${proto}://${host}`,
+  };
 }
 
 /** Deep-copy a client request, redacting URL credentials from every string value. */
@@ -820,6 +872,12 @@ async function bootstrap(): Promise<void> {
   // winning. A project `.arke/config.json` can never set these — they are not threaded here. No-op
   // (keeps the env-derived defaults) when no global config is present.
   const settings = resolveProcessSettings(loadGlobalConfig()?.settings, process.env);
+  // The query limits and OTLP endpoint are read from `process.env` deep inside each ProjectContext;
+  // publish the resolved global values there (env still wins — only fill an UNSET var) so a global
+  // `settings` block is honored without also exporting the matching env var by hand.
+  if (settings?.projectionQueryLimit !== undefined) process.env.ARKE_PROJECTION_QUERY_LIMIT ??= String(settings.projectionQueryLimit);
+  if (settings?.auditQueryLimit !== undefined) process.env.ARKE_AUDIT_QUERY_LIMIT ??= String(settings.auditQueryLimit);
+  if (settings?.otlpEndpoint) process.env.ARKE_OTLP_ENDPOINT ??= settings.otlpEndpoint;
   await new Coordinator(deps.adapter, deps.trace, deps.grants, settings?.coordinatorPort ?? PORT, {
     endpoints: deps.endpoints,
     tierDefaults: deps.tierDefaults,
