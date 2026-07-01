@@ -328,9 +328,13 @@ export class Coordinator {
     const ctx = this.contexts.get(projectId);
     if (!ctx) return;
     const root = ctx.root;
-    const deps = await this.contextFactory(root);
+    // Stop the old context — and the harness it manages — BEFORE building the replacement deps. If we
+    // built first, the new adapter's pre-spawn health probe would ADOPT the old managed OpenCode, which
+    // this stop() then kills, leaving the fresh adapter with a dead "adopted" server it can't supervise
+    // or restart (PR #31 review). Stopping first frees the port so the replacement spawns cleanly.
     await ctx.stop();
     this.contexts.delete(projectId);
+    const deps = await this.contextFactory(root);
     const fresh = this.addContext(root, deps);
     await this.supervisorTrace.write({ kind: "supervisor.project", action: "reload", projectId, root });
     await fresh.start();

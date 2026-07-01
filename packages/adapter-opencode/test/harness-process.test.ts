@@ -81,6 +81,33 @@ test("adopts an already-running healthy server instead of double-spawning (crash
   }
 });
 
+test("an adopted server that later dies flips to not-running and fires onExit (respawnable)", async () => {
+  const port = 5394;
+  const orphan = createServer((_req, res) => { res.writeHead(200); res.end("ok"); });
+  orphan.listen(port, "127.0.0.1");
+  await once(orphan, "listening");
+  let exitFired = false;
+  const proc = new HarnessProcess({
+    command: ["node", "-e", "process.exit(1)"], // would fail if actually spawned
+    cwd: process.cwd(),
+    healthCheck: freePortHealth(port),
+    adoptMonitorMs: 40, // fast poll so the test isn't slow (2 fails ≈ 80ms)
+    onExit: () => { exitFired = true; },
+  });
+  await proc.start();
+  assert.equal(proc.wasAdopted, true);
+  assert.ok(proc.running);
+
+  // The adopted server dies — the liveness monitor must notice and flip it to not-running + onExit,
+  // so managed mode can spawn a replacement instead of trusting a dead adopted server forever.
+  await new Promise<void>((r) => orphan.close(() => r()));
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && proc.running) await new Promise((r) => setTimeout(r, 30));
+  assert.equal(proc.running, false, "adopted server death should flip running to false");
+  assert.equal(exitFired, true, "onExit should fire when the adopted server vanishes");
+  await proc.stop();
+});
+
 test("stop is a no-op when nothing was started (attach mode)", async () => {
   const proc = new HarnessProcess({
     command: ["node", "-e", ""],
