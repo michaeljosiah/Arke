@@ -281,6 +281,9 @@ export class ProjectContext {
       missingSentinels: this.missingSentinels,
       tierDefaults: this.tierDefaults,
       ...(this.registrySnapshot ? { registry: this.registrySnapshot } : {}),
+      // SPEC-019: whether ANY harness is configured (globally or per-project). When false, the launch
+      // screen shows first-run quick setup instead of the configured-but-down re-probe state.
+      harnessSetup: { configured: this.registryResolver !== undefined },
       specs: this.specLibrary(), // SPEC-008: the spec library for this project
     };
   }

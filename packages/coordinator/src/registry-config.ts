@@ -44,20 +44,7 @@ export function loadRegistryConfig(configPath: string): LoadedRegistry | null {
   const rawInstances = parsed.registry?.instances;
   if (!Array.isArray(rawInstances)) return null;
 
-  const instances: InstanceConfig[] = [];
-  for (const raw of rawInstances as RawInstance[]) {
-    const id = str(raw?.id);
-    const driver = str(raw?.driver);
-    if (!id || !driver) continue; // an instance with no identity/driver can't be projected or routed
-    instances.push({
-      id,
-      driver,
-      host: str(raw?.host) ?? "localhost",
-      cwd: str(raw?.cwd) ?? ".",
-      credentialsRef: str(raw?.credentialsRef) ?? "",
-      serves: parseServes(raw?.serves),
-    });
-  }
+  const instances = parseInstances(rawInstances);
   if (instances.length === 0) return null;
 
   const roster = parseRoster(parsed.registry?.roster);
@@ -66,6 +53,30 @@ export function loadRegistryConfig(configPath: string): LoadedRegistry | null {
     config: { instances, roster },
     ...(connectedInstanceId ? { connectedInstanceId } : {}),
   };
+}
+
+/**
+ * Lenient instance parser shared by the project loader and the global-config loader (SPEC-019). An
+ * entry with no id/driver is dropped (it can't be projected or routed); malformed `serves` rows are
+ * dropped individually. Vendor model strings and the `credentialsRef` pointer stay host-side.
+ */
+export function parseInstances(raw: unknown): InstanceConfig[] {
+  if (!Array.isArray(raw)) return [];
+  const instances: InstanceConfig[] = [];
+  for (const r of raw as RawInstance[]) {
+    const id = str(r?.id);
+    const driver = str(r?.driver);
+    if (!id || !driver) continue;
+    instances.push({
+      id,
+      driver,
+      host: str(r?.host) ?? "localhost",
+      cwd: str(r?.cwd) ?? ".",
+      credentialsRef: str(r?.credentialsRef) ?? "",
+      serves: parseServes(r?.serves),
+    });
+  }
+  return instances;
 }
 
 function parseServes(raw: unknown): ServesEntry[] {

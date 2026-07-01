@@ -25,7 +25,10 @@ import type { ScaffoldTiers } from "./scaffold.js";
 import { ProjectRegistry, projectIdForRoot } from "./project-registry.js";
 import { ProjectContext, buildDecision, type ProjectContextInit } from "./project-context.js";
 import { loadRegistryConfig } from "./registry-config.js";
-import type { RegistryConfig } from "./registry.js";
+import { globalConfigPath, loadGlobalConfig, upsertGlobalInstance } from "./global-config.js";
+import { assertSubstrateExclusivity, resolveEffectiveConfig, resolveProcessSettings } from "./config-resolve.js";
+import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
+import type { InstanceConfig, RegistryConfig } from "./registry.js";
 
 /**
  * Coordinator = the single control plane (PRD §8.5; SPEC-003/018). It owns ONE WebSocket server
@@ -304,17 +307,71 @@ export class Coordinator {
     if (target !== ctx.root) return;
     if (ctx.adapter.readiness?.().ready !== false) return; // harness already live → nothing to do
     if (!existsSync(resolve(ctx.root, ".arke", "config.json"))) return; // no config was produced
-    const projectId = ctx.projectId;
-    const deps = await this.contextFactory(ctx.root);
+    await this.reloadContext(ctx.projectId);
+  }
+
+  /**
+   * Rebuild an open context from freshly-loaded deps and re-snapshot its connections (SPEC-018/019).
+   * Used when the config underneath a context changes — a scaffold that wrote `.arke/config.json`, or
+   * a SPEC-019 quick-setup connect that wrote a harness to the global config. `projectId` is derived
+   * from the (unchanged) root, so it is stable across the rebuild.
+   */
+  private async reloadContext(projectId: string): Promise<void> {
+    const ctx = this.contexts.get(projectId);
+    if (!ctx) return;
+    const root = ctx.root;
+    const deps = await this.contextFactory(root);
     await ctx.stop();
     this.contexts.delete(projectId);
-    const fresh = this.addContext(ctx.root, deps);
-    await this.supervisorTrace.write({ kind: "supervisor.project", action: "reload", projectId, root: ctx.root });
+    const fresh = this.addContext(root, deps);
+    await this.supervisorTrace.write({ kind: "supervisor.project", action: "reload", projectId, root });
     await fresh.start();
-    // Push the fresh snapshot to every connection whose active project is this one (the harness gate
-    // now reflects the newly-loaded config instead of the greenfield NullAdapter).
+    // Push the fresh snapshot to every connection whose active project is this one, so the harness
+    // gate reflects the newly-loaded config instead of the prior NullAdapter.
     for (const [c, pid] of this.activeByConn) {
       if (pid === projectId) c.sendSnapshot(JSON.stringify(fresh.snapshotPayload()));
+    }
+  }
+
+  /** Reload every open context (SPEC-019): a global-config change affects all of them equally. */
+  private async reloadAllContexts(): Promise<void> {
+    for (const projectId of [...this.contexts.keys()]) await this.reloadContext(projectId);
+  }
+
+  /**
+   * SPEC-019 quick-setup connect: validate `endpoint`, persist the harness to the GLOBAL config, and
+   * reload every open context so it goes live. Nothing is persisted when validation fails. The
+   * credential secret is never written — only a `credentialsRef` pointer (auth happens in the harness).
+   */
+  private async connectHarness(rawDriver: unknown, rawEndpoint: unknown): Promise<{ ok: boolean; reason?: string; driver?: string }> {
+    const endpoint = String(rawEndpoint ?? "").trim();
+    if (!endpoint) return { ok: false, reason: "no endpoint provided" };
+    const driver = resolveDriver(rawDriver, endpoint);
+    const validation = await this.validateEndpoint(driver, httpBaseFromEndpoint(endpoint));
+    if (!validation.ok) return { ok: false, reason: validation.reason, driver };
+    upsertGlobalInstance(descriptorFor(driver, endpoint));
+    await this.supervisorTrace.write({ kind: "harness.connect", driver, endpoint: redactUrlCreds(endpoint) });
+    await this.reloadAllContexts();
+    return { ok: true, driver };
+  }
+
+  /** Probe an endpoint before persisting. OpenCode exposes `/global/health` (the reachability probe's
+   *  target); other drivers are checked permissively — any HTTP response means a server is listening. */
+  private async validateEndpoint(driver: string, base: string): Promise<{ ok: boolean; reason?: string }> {
+    if (driver === "opencode") {
+      const { reachable, results } = await this.probe.anyReachable([base]);
+      return reachable ? { ok: true } : { ok: false, reason: results[0]?.reason ?? "unreachable" };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
+    try {
+      await fetch(base, { signal: controller.signal });
+      return { ok: true };
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === "AbortError";
+      return { ok: false, reason: aborted ? "timeout" : err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -415,6 +472,18 @@ export class Coordinator {
       } catch {
         /* no active project — ignore */
       }
+      return;
+    }
+    if (msg.type === "harness.connect") {
+      // SPEC-019 first-run quick setup: validate the endpoint, persist the harness to the GLOBAL
+      // config, then reload every open context so the newly-configured harness goes live.
+      let result: { ok: boolean; reason?: string; driver?: string };
+      try {
+        result = await this.connectHarness(msg.driver, msg.endpoint);
+      } catch (err) {
+        result = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "harness.connected", ...result }));
       return;
     }
     if (msg.type === "folder.inspect") {
@@ -535,6 +604,49 @@ function redactUrlCreds(s: string): string {
   return s.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1");
 }
 
+// ---- SPEC-019 quick-setup endpoint parsing ---------------------------------
+
+/** Map a harness scheme to its driver name (the client may also send `driver` explicitly). */
+const SCHEME_DRIVER: Record<string, string> = {
+  opencode: "opencode",
+  acp: "claude-code",
+  codex: "codex",
+  omnigent: "omnigent",
+};
+
+/** Split `scheme://authority[/path]` into its parts; a bare `host:port` has no scheme. */
+function parseEndpoint(endpoint: string): { scheme?: string; authority: string } {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/(.+)$/i.exec(endpoint.trim());
+  if (m) return { scheme: m[1]!.toLowerCase(), authority: m[2]!.replace(/\/+$/, "") };
+  return { authority: endpoint.replace(/\/+$/, "") };
+}
+
+/** The HTTP(S) base URL to probe for reachability (harness schemes normalise to http). */
+function httpBaseFromEndpoint(endpoint: string): string {
+  const { scheme, authority } = parseEndpoint(endpoint);
+  if (scheme === "http" || scheme === "https") return `${scheme}://${authority}`;
+  return `http://${authority}`;
+}
+
+/** Resolve the driver: an explicit client value wins, else the endpoint scheme, else opencode. */
+function resolveDriver(rawDriver: unknown, endpoint: string): string {
+  const d = String(rawDriver ?? "").trim().toLowerCase();
+  if (d) return d;
+  const { scheme } = parseEndpoint(endpoint);
+  return (scheme && SCHEME_DRIVER[scheme]) || "opencode";
+}
+
+/**
+ * Build the instance descriptor persisted to the global config on connect (SPEC-019). `host` carries
+ * the full authority (e.g. `localhost:4096`) so the adapter derives the right base URL. `serves` is
+ * left empty for the engineer to fill (open question: seed from the live catalog). The `credentialsRef`
+ * is a pointer only — never a secret.
+ */
+function descriptorFor(driver: string, endpoint: string): InstanceConfig {
+  const { authority } = parseEndpoint(endpoint);
+  return { id: `${driver}-local`, driver, host: authority, cwd: ".", credentialsRef: `${driver}/gateway`, serves: [] };
+}
+
 /** Deep-copy a client request, redacting URL credentials from every string value. */
 function redactRequest(msg: unknown): unknown {
   try {
@@ -575,6 +687,33 @@ function tierDefaultsFrom(config: { resolveModel?: (t: ModelTier) => ResolvedMod
   };
 }
 
+/**
+ * Resolve the EFFECTIVE harness/model registry for a project (SPEC-019): the global (machine-level)
+ * config deep-merged under this project's `.arke/config.json` (project wins on conflicting ids). A
+ * globally-configured harness is thereby inherited by a project with no local registry. Returns the
+ * merged `registryConfig` + the connected instance (first `opencode` driver in merged order), or an
+ * empty object when nothing is configured anywhere (launch then shows quick setup). A merged config
+ * that mixes a substrate with leaf instances is rejected (served as unconfigured) — ADR-0004.
+ */
+function resolveRegistryDeps(configPath: string): { registryConfig?: RegistryConfig; connectedInstanceId?: string } {
+  const global = loadGlobalConfig();
+  const project = loadRegistryConfig(configPath);
+  if (!global && !project) return {};
+  const effective = resolveEffectiveConfig(global, project?.config ?? null);
+  if (effective.instances.length === 0) return {};
+  try {
+    assertSubstrateExclusivity(effective);
+  } catch (err) {
+    console.error(`[coordinator] ${err instanceof Error ? err.message : String(err)}`);
+    return {};
+  }
+  const connectedInstanceId = effective.instances.find((i) => i.driver === "opencode")?.id;
+  return {
+    registryConfig: { instances: effective.instances, roster: effective.roster },
+    ...(connectedInstanceId ? { connectedInstanceId } : {}),
+  };
+}
+
 /** Build context dependencies for an arbitrary project root (used to open projects at runtime). */
 async function buildContextDeps(root: string): Promise<ContextDeps> {
   const arke = resolve(root, ".arke");
@@ -582,14 +721,11 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   const grants = new GrantStore(resolve(arke, "grants.ndjson"));
   grants.load();
   const configPath = resolve(arke, "config.json");
-  const loadedRegistry = loadRegistryConfig(configPath);
-  const registryDeps = loadedRegistry
-    ? { registryConfig: loadedRegistry.config, ...(loadedRegistry.connectedInstanceId ? { connectedInstanceId: loadedRegistry.connectedInstanceId } : {}) }
-    : {};
+  const registryDeps = resolveRegistryDeps(configPath);
   if (mockEnabled()) {
     return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
-  const config = loadOpenCodeConfig({ configPath, baseDir: root });
+  const config = loadOpenCodeConfig({ configPath, baseDir: root, globalConfigPath: globalConfigPath() });
   if (!config) {
     // Absent config → genuine greenfield (the scaffold `config` step writes the real one). A config
     // that EXISTS but is unparseable / has no OpenCode instance is a different situation: the config
@@ -618,15 +754,12 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
 
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
-  const loadedRegistry = loadRegistryConfig(CONFIG_PATH);
-  const registryDeps = loadedRegistry
-    ? { registryConfig: loadedRegistry.config, ...(loadedRegistry.connectedInstanceId ? { connectedInstanceId: loadedRegistry.connectedInstanceId } : {}) }
-    : {};
+  const registryDeps = resolveRegistryDeps(CONFIG_PATH);
   if (mockEnabled()) {
     console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
     return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
-  const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT });
+  const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT, globalConfigPath: globalConfigPath() });
   if (!config) {
     const present = existsSync(CONFIG_PATH);
     console.log(
@@ -683,11 +816,17 @@ async function bootstrap(): Promise<void> {
     console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
     deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS };
   }
-  await new Coordinator(deps.adapter, deps.trace, deps.grants, PORT, {
+  // Process-wide settings (SPEC-019 R3): the global config `settings` block, with `ARKE_*` env
+  // winning. A project `.arke/config.json` can never set these — they are not threaded here. No-op
+  // (keeps the env-derived defaults) when no global config is present.
+  const settings = resolveProcessSettings(loadGlobalConfig()?.settings, process.env);
+  await new Coordinator(deps.adapter, deps.trace, deps.grants, settings?.coordinatorPort ?? PORT, {
     endpoints: deps.endpoints,
     tierDefaults: deps.tierDefaults,
     ...(deps.registryConfig ? { registryConfig: deps.registryConfig } : {}),
     ...(deps.connectedInstanceId ? { connectedInstanceId: deps.connectedInstanceId } : {}),
+    ...(settings?.maxProjects !== undefined ? { maxProjects: settings.maxProjects } : {}),
+    ...(settings?.idleTtlMs !== undefined ? { idleTtlMs: settings.idleTtlMs } : {}),
     registry: new ProjectRegistry(), // the real global recents (SPEC-018)
   }).start();
 }

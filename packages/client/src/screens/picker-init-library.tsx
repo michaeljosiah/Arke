@@ -9,6 +9,65 @@ import { liveSend, openProjectLive } from '../live';
 const e = React.createElement;
 
 /**
+ * The supported coding agents for first-run quick setup (SPEC-019), matching the canonical
+ * `arke-design` `SO_HarnessSetup` panel. Omnigent is a substrate choice: instead of install/start
+ * commands it prompts for an Omnigent URL the coordinator validates before connecting (no
+ * auto-detection). `driver` is sent verbatim to `harness.connect`.
+ */
+const HARNESS_SETUP = [
+  { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', recommended: true, note: 'open source · self-hostable · the reference harness', install: 'curl -fsSL https://opencode.ai/install | sh', start: 'opencode serve --port 4096' },
+  { id: 'claude-code', name: 'Claude Code', driver: 'claude-code', scheme: 'acp://', host: 'localhost:7223', note: 'speaks ACP · normalised by the local coordinator', install: 'npm i -g @anthropic-ai/claude-code', start: 'claude-code acp --port 7223' },
+  { id: 'codex', name: 'Codex', driver: 'codex', scheme: 'codex://', host: 'localhost:8088', note: 'experimental adapter · capability-flagged', install: 'npm i -g @openai/codex', start: 'codex serve --port 8088' },
+  { id: 'omnigent', name: 'Omnigent', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
+] as const;
+
+/**
+ * First-run quick setup (SPEC-019): choose a coding agent (or the Omnigent substrate), see its
+ * install/start commands, or point at an existing host and Connect. The coordinator validates the
+ * endpoint, persists the harness to the GLOBAL config, and reloads the context — the fresh snapshot
+ * then flips the harness gate. Authentication happens in the harness; Arke never collects credentials.
+ */
+function HarnessSetup() {
+  const connecting = useStore((s) => s.harnessConnecting);
+  const error = useStore((s) => s.harnessConnectError);
+  const [sel, setSel] = React.useState<string>('opencode');
+  const h = HARNESS_SETUP.find((x) => x.id === sel) ?? HARNESS_SETUP[0];
+  const [host, setHost] = React.useState<string>(h.host);
+  React.useEffect(() => { setHost(h.host); }, [sel]);
+  const connect = () => {
+    const value = host.trim();
+    if (!value) return;
+    store.set({ harnessConnecting: true, harnessConnectError: null });
+    liveSend({ type: 'harness.connect', driver: h.driver, endpoint: (h.scheme || '') + value });
+  };
+  const Cmd = ({ label, cmd }: any) => e('div', { style: { marginBottom: 10 } },
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 4 } }, label),
+    e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, background: 'var(--neutral-950)', borderRadius: 'var(--radius-md)', padding: '8px 11px' } },
+      e('span', { style: { flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#86EFAC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, '$ ' + cmd),
+      e('span', { style: { display: 'flex', color: '#737373', cursor: 'pointer' }, onClick: () => { try { void navigator.clipboard?.writeText(cmd); } catch { /* ignore */ } } }, e(Icon, { name: 'copy', size: 13 }))));
+  return e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 8 } }, 'Choose your coding agent'),
+    e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 } },
+      HARNESS_SETUP.map((x) => e('button', { key: x.id, onClick: () => setSel(x.id),
+        style: { display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px', borderRadius: 'var(--radius-md)', cursor: 'pointer', border: '1px solid ' + (sel === x.id ? 'var(--foreground)' : 'var(--border)'), background: sel === x.id ? 'var(--accent)' : 'var(--card)', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--foreground)' } },
+        e('span', { style: { display: 'flex', color: sel === x.id ? 'var(--foreground)' : 'var(--muted-foreground)' } }, e(Icon, { name: 'server', size: 14 })),
+        x.name,
+        (x as any).recommended ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 5px' } }, 'recommended') : null))),
+    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note),
+    (h as any).substrate ? null : e(Cmd, { label: 'Install', cmd: (h as any).install }),
+    (h as any).substrate ? null : e(Cmd, { label: 'Start', cmd: (h as any).start }),
+    e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' } },
+      e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
+      e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, (h as any).substrate ? 'Omnigent URL' : 'or point at an existing host'),
+      e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } })),
+    e('div', { style: { display: 'flex', gap: 8 } },
+      e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
+      e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: connect }, connecting ? 'Connecting…' : 'Connect')),
+    error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
+    e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
+}
+
+/**
  * First-run picker — follows the canonical `arke-design` launch screen (numbered steps:
  * 1 Harness, 2 Open a project, then Recent projects), wired to REAL coordinator state. The
  * coordinator is single-project, so "Recent projects" reflects the one connected project; the
@@ -22,6 +81,7 @@ export function Picker() {
   const recents = useStore((s) => s.recents);
   const harnessReachable = useStore((s) => s.harnessReachable);
   const reason = useStore((s) => s.harnessReachabilityReason);
+  const harnessSetup = useStore((s) => s.harnessSetup);
   const [setup, setSetup] = React.useState(false);
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
@@ -31,6 +91,11 @@ export function Picker() {
   const connecting = !live && (connection === 'connecting' || connection === 'reconnecting' || connection === 'offline');
   const probe = live ? (harnessReachable ? 'reachable' : 'unreachable') : (connecting ? 'checking' : 'unreachable');
   const ready = probe === 'reachable';
+  // First-run quick setup (SPEC-019): when live and NO harness is configured anywhere (global or
+  // project), guide setup (choose an agent / point at a host) instead of the configured-but-down
+  // re-probe card. A configured-but-unreachable harness keeps the re-probe path.
+  const configured = harnessSetup?.configured !== false;
+  const showQuickSetup = live && !configured && !ready;
   // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
   // project must be able to reach Initialisation even when the harness is unreachable, because the
   // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
@@ -101,8 +166,10 @@ export function Picker() {
                 e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
                 e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'No coding agent is running'),
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
-        (probe === 'unreachable') || setup
+                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Arke runs on a coding agent on the host. Install it, start it, or point at an existing host.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
+        showQuickSetup
+          ? e(HarnessSetup)
+          : (probe === 'unreachable') || setup
           ? e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
               e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.6, marginBottom: 10 } },
                 'The harness is configured in ', e('span', { style: { color: 'var(--foreground)' } }, '.arke/config.json'), ' on the host — the client never holds the endpoint or credentials. Start the harness, then re-probe.'),
