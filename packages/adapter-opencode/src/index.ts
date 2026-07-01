@@ -266,12 +266,33 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   private messageBody(input: SendMessageInput, correlationId: string) {
-    return {
-      messageID: correlationId,
-      agent: input.agent,
-      model: this.resolveModel(input.tier),
+    const m = this.resolveModel(input.tier);
+    const body: {
+      messageID: string;
+      agent?: string;
+      model?: { providerID: string; modelID: string };
+      parts: { type: "text"; text: string }[];
+    } = {
+      // OpenCode's message API validates that `messageID` starts with "msg" (a caller-supplied
+      // correlationId — e.g. the cockpit's UUID — otherwise 400s). Coerce any non-conforming id to
+      // the same `msg_` shape the adapter uses by default, so no caller can produce a bad request.
+      messageID: this.toOpenCodeMessageId(correlationId),
+      ...(input.agent ? { agent: input.agent } : {}),
       parts: input.parts.map((p) => ({ type: "text", text: p.text })),
     };
+    // OpenCode's message API requires `model: { providerID, modelID }` (not { provider, name }). Only
+    // send a model when Arke has a REAL one configured: the "gateway" value is Arke's not-configured
+    // sentinel (an unmapped tier / empty `serves`), and OpenCode has no `gateway` provider — so omit
+    // it and let OpenCode use the agent's / its own default model rather than 400 on a fake provider.
+    if (m.provider !== "gateway") {
+      body.model = { providerID: m.provider, modelID: m.name };
+    }
+    return body;
+  }
+
+  /** Coerce a correlation id into an OpenCode-valid `messageID` (must start with `msg`). */
+  private toOpenCodeMessageId(id: string): string {
+    return /^msg/.test(id) ? id : `msg_${id.replace(/[^A-Za-z0-9_]/g, "")}`;
   }
 
   // ---- todos / diff / permissions / commands ------------------------------
