@@ -19,6 +19,8 @@ export interface HarnessProcessOptions {
   healthCheck: () => Promise<boolean>;
   /** How long to wait for health before failing the start. */
   healthTimeoutMs?: number;
+  /** Poll cadence for an adopted server's liveness monitor (defaults to a few seconds). */
+  adoptMonitorMs?: number;
   /** Resolve the command through a shell (needed on Windows for `.cmd` shims). */
   shell?: boolean;
   /** Called when the child exits (expected or not). */
@@ -27,11 +29,18 @@ export interface HarnessProcessOptions {
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 3_000;
+const ADOPT_MONITOR_MS = 4_000; // health-poll cadence for an adopted server we don't own
+const ADOPT_FAILS_TO_EXIT = 2; // consecutive failed polls before treating an adopted server as gone
 
 export class HarnessProcess {
   private readonly opts: HarnessProcessOptions;
   private child?: ChildProcess;
   private exited = false;
+  /** True when we attached to a pre-existing healthy server instead of spawning our own. */
+  private adopted = false;
+  /** Liveness poll for an adopted server (no child-exit event to rely on). */
+  private healthMonitor?: ReturnType<typeof setInterval>;
+  private monitorFails = 0;
 
   constructor(opts: HarnessProcessOptions) {
     this.opts = opts;
@@ -42,7 +51,12 @@ export class HarnessProcess {
   }
 
   get running(): boolean {
-    return this.child !== undefined && !this.exited;
+    return this.adopted || (this.child !== undefined && !this.exited);
+  }
+
+  /** True when {@link start} adopted an already-running server rather than spawning one. */
+  get wasAdopted(): boolean {
+    return this.adopted;
   }
 
   /** Spawn the process and resolve once it is healthy; reject if it dies or never gets healthy. */
@@ -50,6 +64,17 @@ export class HarnessProcess {
     const [cmd, ...args] = this.opts.command;
     if (!cmd) throw new Error("harness command is empty");
     this.exited = false;
+    this.adopted = false;
+    // Self-healing (SPEC-016): if a healthy server is ALREADY listening on the target endpoint —
+    // e.g. a managed harness orphaned by a coordinator that crashed or was killed without a clean
+    // stop (on Windows a child does not die with its parent) — ADOPT it rather than spawning a second
+    // server on the same port, which would fail to bind, exit, and wedge readiness. Adopting behaves
+    // like attach mode for this lifecycle: `stop` leaves the adopted server running.
+    if (await this.opts.healthCheck().catch(() => false)) {
+      this.adopted = true;
+      this.beginAdoptMonitor();
+      return;
+    }
     this.child = spawn(cmd, args, {
       cwd: this.opts.cwd,
       env: { ...process.env, ...this.opts.env },
@@ -71,8 +96,51 @@ export class HarnessProcess {
     throw new Error("harness did not become healthy within the timeout");
   }
 
+  /**
+   * Watch an ADOPTED server we don't own. With no child-exit event to rely on, poll its health and,
+   * after a couple of consecutive failures, treat it as gone: mark not-running and fire `onExit` so
+   * readiness flips and a later {@link start}/`startServer` can spawn a replacement (PR #31 review).
+   */
+  private beginAdoptMonitor(): void {
+    this.monitorFails = 0;
+    this.healthMonitor = setInterval(() => {
+      void this.opts
+        .healthCheck()
+        .then((ok) => {
+          if (!this.adopted || this.exited) return;
+          if (ok) {
+            this.monitorFails = 0;
+            return;
+          }
+          if (++this.monitorFails < ADOPT_FAILS_TO_EXIT) return;
+          this.adopted = false;
+          this.exited = true;
+          this.clearMonitor();
+          this.opts.onExit?.(null, null); // adopted server vanished — surface it like an exit
+        })
+        .catch(() => {
+          /* a thrown health check is a non-fatal blip; the next tick re-checks */
+        });
+    }, this.opts.adoptMonitorMs ?? ADOPT_MONITOR_MS);
+    (this.healthMonitor as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  private clearMonitor(): void {
+    if (this.healthMonitor) {
+      clearInterval(this.healthMonitor);
+      this.healthMonitor = undefined;
+    }
+  }
+
   /** Terminate the child we started (SIGTERM, then SIGKILL after a grace period). */
   async stop(): Promise<void> {
+    this.clearMonitor();
+    if (this.adopted) {
+      // We attached to a server we did not spawn — leave it running (like attach mode).
+      this.adopted = false;
+      this.exited = true;
+      return;
+    }
     const child = this.child;
     if (!child || this.exited) {
       this.exited = true;

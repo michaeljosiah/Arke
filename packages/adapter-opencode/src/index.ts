@@ -176,7 +176,12 @@ export class OpenCodeAdapter implements HarnessAdapter {
       },
     });
     await this.harness.start();
-    this.onLifecycleEvent?.({ kind: "harness.started", harness: this.id, pid: this.harness.pid, at: Date.now() });
+    this.onLifecycleEvent?.({
+      kind: this.harness.wasAdopted ? "harness.adopted" : "harness.started",
+      harness: this.id,
+      ...(this.harness.pid !== undefined ? { pid: this.harness.pid } : {}),
+      at: Date.now(),
+    });
   }
 
   /** Stop a harness process this adapter started; never stops a server it did not start. */
