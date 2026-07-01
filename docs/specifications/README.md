@@ -50,6 +50,7 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 016 | [Managed harness lifecycle, richer approvals & portable agent images](016.harness-lifecycle-approvals-and-agent-images.md) | FR-4, FR-10; §12, §15; [ADR-0002](../decisions/0002-omnigent-as-candidate-harness-substrate.md) | 2 | 8 |
 | 017 | [Arke CLI — spin up, open & drive the system headlessly](017.arke-cli.md) | FR-8/9/10 (operator surface); NFR-1/7 | 2 | 8 |
 | 018 | [Multi-project workspaces — one coordinator, per-project runners](018.multi-project-workspaces.md) | FR-3/20 (multi-project); NFR-1/4/7 | 2 | 8 |
+| 019 | [Global + project configuration merge and first-run harness setup](019.global-and-project-config-merge.md) | FR-3/4/19; NFR-1; [ADR-0004](../decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md) | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
@@ -68,6 +69,7 @@ central runners, managed roster sync — out of scope until Phase 3.
                     016 harness lifecycle + approvals + agent images builds on 002/005/012 (Phase 2)
                     017 arke CLI builds on 002/003/016 (Phase 2) — spin up + drive headlessly
                     018 multi-project builds on 003/004/016 (Phase 2) — one coordinator, per-project runners
+                    019 global+project config merge builds on 004/005/018 (Phase 2) — configure the harness once, inherit per project
 ```
 
 Author each in the cockpit, run the review panel, and approve before implementation — Arke,

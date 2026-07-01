@@ -39,6 +39,27 @@ test("returns null for an unreadable / missing file", () => {
   assert.equal(loadRegistryConfig(join(tmpdir(), "arke-nope-zzz.json")), null);
 });
 
+test("a roster-only project file survives the load (instances moved to global) — SPEC-019", () => {
+  const path = writeConfig({
+    registry: { roster: { "reviewer-a": { tier: "capable", instance: "claude-local" }, implementer: { tier: "mid" } } },
+  });
+  const loaded = loadRegistryConfig(path);
+  assert.ok(loaded);
+  assert.equal(loaded!.config.instances.length, 0);
+  assert.equal(loaded!.config.roster["reviewer-a"]!.instance, "claude-local");
+  assert.equal(loaded!.connectedInstanceId, undefined);
+});
+
+test("preserves explicit port and baseUrl fields verbatim across a load", () => {
+  const path = writeConfig({
+    registry: { instances: [{ id: "opencode-local", driver: "opencode", host: "localhost", port: 5000, baseUrl: "https://gw.example.com", serves: [] }] },
+  });
+  const loaded = loadRegistryConfig(path);
+  assert.ok(loaded);
+  assert.equal(loaded!.config.instances[0]!.port, 5000);
+  assert.equal(loaded!.config.instances[0]!.baseUrl, "https://gw.example.com");
+});
+
 test("drops malformed entries leniently (no id/driver, bad tiers)", () => {
   const path = writeConfig({
     registry: {

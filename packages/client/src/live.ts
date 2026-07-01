@@ -444,6 +444,7 @@ function applySnapshot(snap: any) {
     harnessReachable: snap?.harnessReachable ?? true,
     harnessReachabilityReason: snap?.harnessReachabilityReason ?? null,
     harnessReachabilityPartial: snap?.harnessReachabilityPartial ?? false,
+    harnessSetup: snap?.harnessSetup ?? { configured: true }, // SPEC-019 first-run quick-setup gate
     projectState: snap?.projectState ?? null,
     missingSentinels: snap?.missingSentinels ?? [],
     tierDefaults: snap?.tierDefaults ?? null,
@@ -500,6 +501,11 @@ function onFrame(frame: any) {
     // Result of folder.inspect / repo.clone (SPEC-004): refresh the onboarding classification so
     // the initialisation screen can explain exactly what is present and what will be added.
     store.set({ projectState: frame.state ?? null, missingSentinels: frame.missingSentinels ?? [] });
+  } else if (frame.type === 'harness.connected') {
+    // Result of harness.connect (SPEC-019 quick setup). On success the coordinator reloads the
+    // active context and pushes a fresh snapshot (which flips the harness gate) — so here we only
+    // clear the connecting state and surface a failure reason.
+    store.set({ harnessConnecting: false, harnessConnectError: frame.ok ? null : (frame.reason ?? 'could not connect') });
   }
 }
 

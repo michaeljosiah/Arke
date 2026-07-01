@@ -21,6 +21,8 @@ interface RawInstance {
   cwd?: unknown;
   credentialsRef?: unknown;
   serves?: unknown;
+  port?: unknown;
+  baseUrl?: unknown;
 }
 
 interface RawConfig {
@@ -41,31 +43,52 @@ export function loadRegistryConfig(configPath: string): LoadedRegistry | null {
   } catch {
     return null;
   }
-  const rawInstances = parsed.registry?.instances;
-  if (!Array.isArray(rawInstances)) return null;
+  const registry = parsed.registry;
+  if (!registry || typeof registry !== "object") return null;
 
-  const instances: InstanceConfig[] = [];
-  for (const raw of rawInstances as RawInstance[]) {
-    const id = str(raw?.id);
-    const driver = str(raw?.driver);
-    if (!id || !driver) continue; // an instance with no identity/driver can't be projected or routed
-    instances.push({
-      id,
-      driver,
-      host: str(raw?.host) ?? "localhost",
-      cwd: str(raw?.cwd) ?? ".",
-      credentialsRef: str(raw?.credentialsRef) ?? "",
-      serves: parseServes(raw?.serves),
-    });
-  }
-  if (instances.length === 0) return null;
+  const instances = parseInstances(registry.instances);
+  const roster = parseRoster(registry.roster);
+  // A project may move its harness instances to the GLOBAL config and keep only a `roster` locally
+  // (SPEC-019). Such a roster-only project file must survive the load and carry its role bindings into
+  // the merge — otherwise role resolution falls back to an empty roster. Only a file with NEITHER
+  // instances nor a roster is treated as "no registry configured".
+  if (instances.length === 0 && Object.keys(roster).length === 0) return null;
 
-  const roster = parseRoster(parsed.registry?.roster);
   const connectedInstanceId = instances.find((i) => i.driver === "opencode")?.id;
   return {
     config: { instances, roster },
     ...(connectedInstanceId ? { connectedInstanceId } : {}),
   };
+}
+
+/**
+ * Lenient instance parser shared by the project loader and the global-config loader (SPEC-019). An
+ * entry with no id/driver is dropped (it can't be projected or routed); malformed `serves` rows are
+ * dropped individually. Vendor model strings and the `credentialsRef` pointer stay host-side.
+ */
+export function parseInstances(raw: unknown): InstanceConfig[] {
+  if (!Array.isArray(raw)) return [];
+  const instances: InstanceConfig[] = [];
+  for (const r of raw as RawInstance[]) {
+    const id = str(r?.id);
+    const driver = str(r?.driver);
+    if (!id || !driver) continue;
+    const port = typeof r?.port === "number" && Number.isFinite(r.port) ? r.port : undefined;
+    const baseUrl = str(r?.baseUrl);
+    instances.push({
+      id,
+      driver,
+      host: str(r?.host) ?? "localhost",
+      cwd: str(r?.cwd) ?? ".",
+      credentialsRef: str(r?.credentialsRef) ?? "",
+      serves: parseServes(r?.serves),
+      // Preserve explicit endpoint fields verbatim so a load→upsert round-trip can't silently revert
+      // a custom port / base URL to the default (SPEC-019 review).
+      ...(port !== undefined ? { port } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+    });
+  }
+  return instances;
 }
 
 function parseServes(raw: unknown): ServesEntry[] {

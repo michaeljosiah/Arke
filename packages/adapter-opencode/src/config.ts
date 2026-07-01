@@ -143,6 +143,9 @@ function buildResolver(instance: RegistryInstance): (tier: ModelTier) => Resolve
 function instanceBaseUrl(instance: RegistryInstance): string {
   if (instance.baseUrl) return instance.baseUrl;
   const host = instance.host && instance.host !== "localhost" ? instance.host : "127.0.0.1";
+  // A host that already carries a port (e.g. "localhost:4096" written by SPEC-019 quick setup) is a
+  // full authority — use it as-is rather than appending the default port a second time.
+  if (/:\d+$/.test(host)) return `http://${host}`;
   const port = instance.port ?? DEFAULT_OPENCODE_PORT;
   return `http://${host}:${port}`;
 }
@@ -154,25 +157,45 @@ export interface LoadConfigOptions {
   baseDir: string;
   /** Environment for credential + override resolution (defaults to process.env). */
   env?: NodeJS.ProcessEnv;
+  /**
+   * SPEC-019: path to the machine-level GLOBAL config. Its instances are merged UNDER the project's
+   * (project wins by id), so a globally-configured OpenCode harness is picked up by a project that
+   * has no local instance. When omitted, only the project file is read (back-compatible).
+   */
+  globalConfigPath?: string;
 }
 
-/**
- * Build an {@link OpenCodeConfig} from `.arke/config.json`, or return null when no OpenCode
- * instance is configured (the coordinator then falls back to the mock). Vendor model ids
- * come only from the file's registry; the password comes only from the host environment.
- * `ARKE_*` env vars override individual keys.
- */
-export function loadOpenCodeConfig(opts: LoadConfigOptions): OpenCodeConfig | null {
-  const env = opts.env ?? process.env;
-  let parsed: ArkeConfigFile;
+function tryParseConfig(path: string): ArkeConfigFile | null {
   try {
-    parsed = JSON.parse(readFileSync(opts.configPath, "utf8")) as ArkeConfigFile;
+    return JSON.parse(readFileSync(path, "utf8")) as ArkeConfigFile;
   } catch {
     return null;
   }
-  const instance = (parsed.registry?.instances ?? []).find((i) => i.driver === "opencode");
+}
+
+/**
+ * Build an {@link OpenCodeConfig} from `.arke/config.json` merged over the global config (SPEC-019),
+ * or return null when no OpenCode instance is configured in either (the coordinator then falls back
+ * to the mock / NullAdapter). Vendor model ids come only from the registry; the password comes only
+ * from the host environment. `ARKE_*` env vars override individual keys.
+ */
+export function loadOpenCodeConfig(opts: LoadConfigOptions): OpenCodeConfig | null {
+  const env = opts.env ?? process.env;
+  const project = tryParseConfig(opts.configPath);
+  const global = opts.globalConfigPath ? tryParseConfig(opts.globalConfigPath) : null;
+  if (!project && !global) return null;
+
+  // Merge instances by id, project winning; global entries first for a deterministic order. Id-less
+  // entries (older minimal configs) are preserved in file order after the keyed ones.
+  const byId = new Map<string, RegistryInstance>();
+  const idless: RegistryInstance[] = [];
+  for (const i of global?.registry?.instances ?? []) i.id ? byId.set(i.id, i) : idless.push(i);
+  for (const i of project?.registry?.instances ?? []) i.id ? byId.set(i.id, i) : idless.push(i);
+  const instances = [...byId.values(), ...idless];
+  const instance = instances.find((i) => i.driver === "opencode");
   if (!instance) return null;
 
+  const settings = project?.settings ?? global?.settings; // project advisory settings win
   const projectRoot = canonicalizeRoot(
     env.ARKE_OPENCODE_PROJECT_ROOT ?? resolve(opts.baseDir, instance.cwd ?? "."),
   );
@@ -185,9 +208,9 @@ export function loadOpenCodeConfig(opts: LoadConfigOptions): OpenCodeConfig | nu
     resolveModel: buildResolver(instance),
     permissionTimeoutMs: numberFrom(
       env.ARKE_PERMISSION_TIMEOUT_MS,
-      parsed.settings?.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
+      settings?.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
     ),
-    manageHarness: boolFrom(env.ARKE_MANAGE_HARNESS, parsed.settings?.manageHarness ?? false),
+    manageHarness: boolFrom(env.ARKE_MANAGE_HARNESS, settings?.manageHarness ?? false),
   };
 }
 

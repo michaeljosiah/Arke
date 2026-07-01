@@ -26,6 +26,10 @@ export interface InstanceConfig {
   cwd: string;
   credentialsRef: string; // resolved on host; the ref string itself never reaches the client
   serves: ServesEntry[];
+  /** Optional explicit port (adapter endpoint). Preserved verbatim across load/upsert (SPEC-019). */
+  port?: number;
+  /** Optional explicit base URL (adapter endpoint, scheme-preserving). Preserved verbatim (SPEC-019). */
+  baseUrl?: string;
 }
 
 /** A roster role binding: a logical tier, optionally pinned to a specific instance. */

@@ -162,6 +162,12 @@ export const store = createStore({
   harnessReachable: true,
   harnessReachabilityReason: null,
   harnessReachabilityPartial: false,
+  // SPEC-019: whether ANY harness is configured (globally or per-project). Defaults true so the
+  // mock-only prototype shows the picker directly; a live snapshot with `configured: false` flips
+  // the launch screen to first-run quick setup.
+  harnessSetup: { configured: true },
+  harnessConnecting: false,
+  harnessConnectError: null,
   projectState: null,
   missingSentinels: [],
   tierDefaults: null,
