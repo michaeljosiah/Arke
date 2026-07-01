@@ -39,7 +39,16 @@ export type IdentityLookup = (sessionId: string) => EventIdentity | undefined;
  */
 export interface NormalizeState {
   roleByMessage: Map<string, "user" | "assistant" | "tool">;
-  lastBySession: Map<string, { messageId: string; text: string; role: "user" | "assistant" | "tool" }>;
+  lastBySession: Map<
+    string,
+    {
+      messageId: string;
+      text: string;
+      role: "user" | "assistant" | "tool";
+      /** Tool invocations seen for this message, keyed by callID (dedupes running→completed updates). */
+      tools?: Map<string, string>;
+    }
+  >;
 }
 
 export function createNormalizeState(): NormalizeState {
@@ -171,7 +180,7 @@ export function normalize(
             messageId: last.messageId,
             role: last.role,
             text: last.text,
-            toolCalls: [],
+            toolCalls: last.tools ? [...last.tools].map(([id, name]) => ({ id, name })) : [],
             isStreaming: false,
           });
         }
@@ -295,15 +304,49 @@ export function normalize(
       // text for the message so those servers don't lose transcript content. A frame carrying
       // neither text nor delta is ignored, never coerced to "" (which would wipe the transcript).
       const sid = sessionIdOf(p);
-      const part = (p.part ?? {}) as { text?: string; delta?: string; type?: string; messageID?: string };
+      const part = (p.part ?? {}) as {
+        text?: string;
+        delta?: string;
+        type?: string;
+        messageID?: string;
+        tool?: string;
+        callID?: string;
+        id?: string;
+      };
       const messageId = (part.messageID ?? p.message_id ?? p.messageID ?? p.messageId) as
         | string
         | undefined;
       if (!sid || !messageId) {
         return { kind: "dead-letter", reason: "message.part.updated without session/message id" };
       }
-      if (part.type && part.type !== "text") return { kind: "ignore" }; // tool / reasoning parts
       const role = state.roleByMessage.get(messageId) ?? "assistant";
+      // Tool parts ({ type:"tool", tool:"glob", callID, state:{status} }) surface as toolCalls on the
+      // streaming message, so the cockpit can show live "working" activity instead of dead air while
+      // the agent reads/edits. Dedupe by callID (each call streams running → completed).
+      if (part.type === "tool") {
+        if (typeof part.tool !== "string" || part.tool.length === 0) return { kind: "ignore" };
+        const prior = state.lastBySession.get(sid);
+        const entry =
+          prior?.messageId === messageId ? prior : { messageId, text: "", role, tools: undefined };
+        const tools = entry.tools ?? new Map<string, string>();
+        tools.set(part.callID ?? part.id ?? `${tools.size}`, part.tool);
+        state.lastBySession.set(sid, { ...entry, tools });
+        return {
+          kind: "event",
+          event: {
+            ...env,
+            correlationId: messageId,
+            type: "message.updated",
+            sessionId: sid,
+            messageId,
+            role,
+            text: entry.text,
+            toolCalls: [...tools].map(([id, name]) => ({ id, name })),
+            isStreaming: role === "assistant",
+          },
+        };
+      }
+      if (part.type && part.type !== "text") return { kind: "ignore" }; // reasoning / step markers
       let text: string;
       if (typeof part.text === "string") {
         text = part.text; // 1.17.11 full snapshot (an empty string is a valid snapshot)
@@ -318,7 +361,9 @@ export function normalize(
         const prior = state.lastBySession.get(sid);
         text = (prior?.messageId === messageId ? prior.text : "") + delta; // older delta shape
       }
-      state.lastBySession.set(sid, { messageId, text, role });
+      const prior = state.lastBySession.get(sid);
+      const tools = prior?.messageId === messageId ? prior.tools : undefined;
+      state.lastBySession.set(sid, { messageId, text, role, ...(tools ? { tools } : {}) });
       return {
         kind: "event",
         event: {
@@ -329,7 +374,7 @@ export function normalize(
           messageId,
           role,
           text,
-          toolCalls: [],
+          toolCalls: tools ? [...tools].map(([id, name]) => ({ id, name })) : [],
           isStreaming: role === "assistant", // closed by session.idle's finalising frame
         },
       };

@@ -214,7 +214,7 @@ function LiveCockpit() {
         // Label with the resolved model if the session carries one, else the tier the turn ran at
         // (client-safe; SPEC-005 keeps vendor model ids off the client).
         const label = modelLabel ?? tierByMsgId.current.get(t.messageId) ?? lastSentTier.current;
-        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming };
+        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming, toolCalls: t.toolCalls || [] };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
         else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) {
@@ -294,9 +294,26 @@ function LiveCockpit() {
     else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `convene failed — ${res.error}` } }));
   };
 
-  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length]);
+  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length, sending, inFlight]);
 
   const turns = convo;
+  // Live activity (SPEC-020 UX): while a turn is in flight and the agent hasn't streamed visible text
+  // yet, show an animated thinking/working bubble instead of dead air — a long tool-using turn looks
+  // identical to a broken one otherwise. When the streaming entry carries toolCalls, name the latest.
+  const lastTurn: any = turns[turns.length - 1];
+  const streamingWithText = lastTurn && lastTurn.kind === 'agent' && lastTurn.streaming && (lastTurn.text || '').trim();
+  const liveTools: string[] = (lastTurn && lastTurn.kind === 'agent' && lastTurn.streaming && lastTurn.toolCalls) || [];
+  const showThinking = (sending || inFlight) && !streamingWithText;
+  const lastLiveTool: any = liveTools[liveTools.length - 1];
+  const thinkingLabel = liveTools.length ? `using ${lastLiveTool?.name ?? lastLiveTool}…` : 'thinking…';
+  const ThinkingDots = () => e('span', { style: { display: 'inline-flex', gap: 4, alignItems: 'center' } },
+    [0, 1, 2].map((i) => e('span', { key: i, style: { width: 5, height: 5, borderRadius: 999, background: 'var(--muted-foreground)', animation: 'soPulse 1.2s ease-in-out infinite', animationDelay: (i * 0.2) + 's' } })));
+  // Small mono chips naming the tools an agent turn used, indented to align under the bubble.
+  const ToolChips = ({ tools }: any) => (tools && tools.length)
+    ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, margin: '2px 0 0 31px' } },
+        tools.map((tc: any, i: number) => e('span', { key: i + String(tc?.name ?? tc), style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 7px' } },
+          e(Icon, { name: 'terminal', size: 10 }), (tc?.name ?? tc))))
+    : null;
 
   return e('div', { style: { display: 'flex', height: '100%' } },
     e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
@@ -307,8 +324,16 @@ function LiveCockpit() {
         e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId || !file?.exists || !(doc?.requirements?.length), onClick: () => void convene() }, 'Convene review')),
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
-        turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
-          : turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'))),
+        turns.length === 0 && !showThinking ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
+          : turns.map((m: any) => e('div', { key: m.key },
+              e(AgentMessage, { role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'),
+              m.kind === 'agent' ? e(ToolChips, { tools: m.toolCalls }) : null)),
+        showThinking ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, alignItems: 'flex-start' } },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
+            e('span', { style: { width: 24, height: 24, borderRadius: 'var(--radius-sm)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: 'bot', size: 13 })),
+            e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } }, lastSentRole.current ?? role),
+            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)' } }, thinkingLabel)),
+          e('div', { style: { padding: '12px 14px', borderRadius: '4px 12px 12px 12px', background: 'var(--secondary)' } }, e(ThinkingDots))) : null),
       e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
         grounding.length ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),

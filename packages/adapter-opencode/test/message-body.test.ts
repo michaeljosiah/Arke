@@ -41,29 +41,23 @@ function makeAdapter(extra?: Partial<OpenCodeConfig>) {
 
 const lastMessageBody = () => server.lastBodies.get("POST /session/:id/message") as Record<string, unknown>;
 
-test("a caller's plain-UUID correlationId is coerced to a valid msg-prefixed messageID", async () => {
+test("no client messageID is ever sent — the server assigns its own monotonic id", async () => {
+  // OpenCode orders a session's messages by id; a client-generated random id sorts BEFORE the last
+  // assistant reply, so the agent loop sees "no new user input" and exits at step 0 — silently
+  // killing every turn after the first. The receipt still carries the client correlationId.
   const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", correlationId: "2fccee91-0000-4000-8000-000000000000", parts: [{ type: "text", text: "hi" }] });
-  const body = lastMessageBody();
-  assert.match(String(body.messageID), /^msg/); // OpenCode rejects ids that don't start with "msg"
+  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", correlationId: "msg_client_corr_1", parts: [{ type: "text", text: "hi" }] });
+  assert.equal("messageID" in lastMessageBody(), false, "wire body must not carry a client messageID");
+  assert.equal(receipt.correlationId, "msg_client_corr_1"); // correlation stays client-side
 });
 
-test("an absent correlationId still yields a msg-prefixed messageID", async () => {
+test("an absent correlationId still yields a receipt correlationId (client-side only)", async () => {
   const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
-  assert.match(String(lastMessageBody().messageID), /^msg/);
-});
-
-test("a dashed messageID is sanitised even when already msg-prefixed (OpenCode 500s on dashes)", async () => {
-  const adapter = makeAdapter();
-  const s = await adapter.createSession({ specId: "SPEC-A" });
-  // The adapter's own default is msg_${randomUUID()} — dashes included; it must never reach the wire.
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", correlationId: "msg_1324d930-5acd-4e13-be9b-33f3f12da237", parts: [{ type: "text", text: "hi" }] });
-  const wireId = String(lastMessageBody().messageID);
-  assert.match(wireId, /^msg[A-Za-z0-9_]*$/, "strictly alphanumeric/underscore");
-  assert.equal(wireId.includes("-"), false);
+  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  assert.match(receipt.correlationId, /^msg_/);
+  assert.equal("messageID" in lastMessageBody(), false);
 });
 
 test("a real configured model is sent as { providerID, modelID }", async () => {

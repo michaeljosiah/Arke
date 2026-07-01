@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type EventIdentity, normalize } from "../src/index.js";
+import { type EventIdentity, createNormalizeState, normalize } from "../src/index.js";
 
 const HARNESS = "OpenCode";
 
@@ -227,4 +227,26 @@ test("heartbeat and sync mirror frames are ignored, not dead-lettered", () => {
 test("a frame with neither type nor payload.type still dead-letters", () => {
   const out = normalize({ payload: { properties: {} } }, lookup, HARNESS);
   assert.equal(out.kind, "dead-letter");
+});
+
+test("tool parts surface as toolCalls on the streaming message (deduped by callID)", () => {
+  const state = createNormalizeState();
+  const mk = (part: any) => normalize(
+    { payload: { type: "message.part.updated", properties: { sessionID: "ses_spec", part: { messageID: "msg_a", ...part } } } },
+    lookup, HARNESS, state,
+  );
+  const t1 = mk({ type: "tool", tool: "glob", callID: "c1", state: { status: "running" } });
+  assert.equal(t1.kind, "event");
+  if (t1.kind !== "event" || t1.event.type !== "message.updated") return assert.fail();
+  assert.deepEqual(t1.event.toolCalls, [{ id: "c1", name: "glob" }]);
+  // the same call completing does not duplicate; a second call appends
+  mk({ type: "tool", tool: "glob", callID: "c1", state: { status: "completed" } });
+  const t3 = mk({ type: "tool", tool: "edit", callID: "c2", state: { status: "running" } });
+  if (t3.kind !== "event" || t3.event.type !== "message.updated") return assert.fail();
+  assert.deepEqual(t3.event.toolCalls, [{ id: "c1", name: "glob" }, { id: "c2", name: "edit" }]);
+  // a later text snapshot keeps the accumulated toolCalls
+  const t4 = mk({ type: "text", text: "done." });
+  if (t4.kind !== "event" || t4.event.type !== "message.updated") return assert.fail();
+  assert.equal(t4.event.text, "done.");
+  assert.equal(t4.event.toolCalls.length, 2);
 });

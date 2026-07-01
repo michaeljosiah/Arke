@@ -312,18 +312,18 @@ export class OpenCodeAdapter implements HarnessAdapter {
     }
   }
 
-  private messageBody(input: SendMessageInput, correlationId: string) {
+  private messageBody(input: SendMessageInput, _correlationId: string) {
     const m = this.resolveModel(input.tier);
     const body: {
-      messageID: string;
       agent?: string;
       model?: { providerID: string; modelID: string };
       parts: { type: "text"; text: string }[];
     } = {
-      // OpenCode's message API validates that `messageID` starts with "msg" (a caller-supplied
-      // correlationId — e.g. the cockpit's UUID — otherwise 400s). Coerce any non-conforming id to
-      // the same `msg_` shape the adapter uses by default, so no caller can produce a bad request.
-      messageID: this.toOpenCodeMessageId(correlationId),
+      // NO client messageID: OpenCode orders a session's messages by id (its ids are monotonic,
+      // time-sortable), and a client-generated random id sorts BEFORE the last assistant reply — the
+      // agent loop then sees "no new user input" and exits at step 0, silently killing every turn
+      // after the first. Let the server assign the id; the correlationId stays client-side only
+      // (receipts + in-flight attribution never depended on the wire id).
       parts: input.parts.map((p) => ({ type: "text", text: p.text })),
     };
     // Only name an agent the connected server actually recognises for this directory: OpenCode 500s
@@ -352,16 +352,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
       body.model = { providerID: m.provider, modelID: m.name };
     }
     return body;
-  }
-
-  /**
-   * Coerce a correlation id into an OpenCode-valid `messageID`: must start with `msg` AND be strictly
-   * `[A-Za-z0-9_]` — a dashed UUID (including this adapter's own `msg_${randomUUID()}` default) draws
-   * a 500 UnknownError from the server, so sanitise ALWAYS, not just when the prefix is missing.
-   */
-  private toOpenCodeMessageId(id: string): string {
-    const cleaned = id.replace(/[^A-Za-z0-9_]/g, "");
-    return /^msg/.test(cleaned) ? cleaned : `msg_${cleaned}`;
   }
 
   // ---- todos / diff / permissions / commands ------------------------------
