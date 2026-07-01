@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { test } from "node:test";
 import { HarnessProcess } from "../src/index.js";
 
@@ -51,6 +53,32 @@ test("start fails (and cleans up) when the process never becomes healthy", async
   });
   await assert.rejects(() => proc.start(), /did not become healthy/);
   assert.equal(proc.running, false);
+});
+
+test("adopts an already-running healthy server instead of double-spawning (crash recovery)", async () => {
+  const port = 5393;
+  // A real pre-existing server stands in for a managed harness orphaned by a crashed coordinator.
+  const orphan = createServer((_req, res) => { res.writeHead(200); res.end("ok"); });
+  orphan.listen(port, "127.0.0.1");
+  await once(orphan, "listening");
+  try {
+    const proc = new HarnessProcess({
+      command: ["node", "-e", "process.exit(1)"], // would FAIL immediately if actually spawned
+      cwd: process.cwd(),
+      healthCheck: freePortHealth(port), // the pre-existing server already answers
+      healthTimeoutMs: 2000,
+    });
+    await proc.start(); // must ADOPT (health already passes) rather than spawn the failing command
+    assert.equal(proc.wasAdopted, true, "should adopt the pre-existing healthy server");
+    assert.ok(proc.running);
+    assert.equal(proc.pid, undefined, "no child was spawned");
+
+    await proc.stop(); // must NOT kill a server it did not spawn
+    assert.equal(await freePortHealth(port)(), true, "the adopted server is left running after stop");
+    assert.equal(proc.running, false);
+  } finally {
+    orphan.close();
+  }
 });
 
 test("stop is a no-op when nothing was started (attach mode)", async () => {
