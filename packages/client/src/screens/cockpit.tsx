@@ -117,6 +117,25 @@ function LiveCockpit() {
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
   const scroller = React.useRef<any>(null);
+  // Grounding files (SPEC-020): host-side context for the discussion, uploaded via the composer.
+  const [grounding, setGrounding] = React.useState<any[]>([]);
+  const [uploading, setUploading] = React.useState(false);
+  const fileInput = React.useRef<any>(null);
+  const refreshGrounding = React.useCallback(() => {
+    void liveRequest('grounding.list').then((res: any) => { if (res?.ok && Array.isArray(res.result)) setGrounding(res.result); });
+  }, []);
+  React.useEffect(() => { refreshGrounding(); }, [refreshGrounding]);
+  const onFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    for (const f of Array.from(files)) {
+      const content = await f.text().catch(() => '');
+      await liveRequest('grounding.upload', { name: f.name, content });
+    }
+    setUploading(false);
+    if (fileInput.current) fileInput.current.value = '';
+    refreshGrounding();
+  };
 
   // Reset all per-spec state when the active spec changes, so a prompt is never routed to the prior
   // spec's session and the preview/conversation don't bleed across specs (PR #18 review round 4).
@@ -291,12 +310,20 @@ function LiveCockpit() {
         turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
           : turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'))),
       e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
+        grounding.length ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
+          e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
+          grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
+            e(Icon, { name: 'file', size: 11 }), g.name))) : null,
         e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
           e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
           e(MiniSelect, { value: tier, icon: 'cpu', options: ['capable', 'mid', 'fast'], onChange: setTier })),
         e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
-        e('div', { style: { display: 'flex', alignItems: 'center', marginTop: 9 } },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
+          e('button', { onClick: () => fileInput.current?.click(), disabled: uploading, title: 'Upload files as grounding for the discussion',
+            style: { display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)' } },
+            e(Icon, { name: 'file', size: 13 }), uploading ? 'Uploading…' : 'Attach files'),
+          e('input', { ref: fileInput, type: 'file', multiple: true, style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) }),
           e('div', { style: { flex: 1 } }),
           e(Button, { size: 'sm', disabled: !specId || sending, onClick: () => void send() }, sending ? 'Sending…' : 'Send'))),
     ),

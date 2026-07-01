@@ -481,6 +481,24 @@ export async function refreshRecents(): Promise<void> {
   if (res?.ok && Array.isArray(res.result)) store.set({ recents: res.result });
 }
 
+/** Refresh the spec library for the active project (SPEC-008 / SPEC-020 after creating a new spec). */
+export async function refreshSpecs(): Promise<void> {
+  const res = await liveRequest('spec.library');
+  if (res?.ok && Array.isArray(res.result)) store.set({ specs: res.result });
+}
+
+/**
+ * Create a new blank-slate specification (SPEC-020) and open the cockpit on it. Returns the new
+ * specId, or null on failure (surfaced to the caller).
+ */
+export async function createSpecLive(title: string): Promise<{ specId: string } | null> {
+  const res = await liveRequest('spec.create', { title }, 30000);
+  if (!res?.ok) return null;
+  await refreshSpecs();
+  store.set({ activeSpec: res.result.specId, view: 'cockpit' });
+  return { specId: res.result.specId };
+}
+
 /** Open/switch the active project; the coordinator re-snapshots. Returns the open result. */
 export async function openProjectLive(target: { projectId?: string; path?: string }): Promise<any> {
   // A cold open may spawn + health-check a managed harness, which can take much longer than the

@@ -4,7 +4,7 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs, Badge } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend, liveRequest, openProjectLive } from '../live';
+import { liveSend, liveRequest, openProjectLive, createSpecLive } from '../live';
 
 const e = React.createElement;
 
@@ -424,10 +424,36 @@ export function Initialisation() {
   );
 }
 
+/**
+ * New-specification prompt (SPEC-020): a title starts a blank slate. The coordinator scaffolds the
+ * template on a fresh branch and the cockpit opens on it, growing as the conversation develops.
+ */
+function NewSpecModal({ onClose }: any) {
+  const [title, setTitle] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+  const create = async () => {
+    setBusy(true); setErr(null);
+    const res = await createSpecLive(title.trim() || 'Untitled specification');
+    setBusy(false);
+    if (res) onClose(); else setErr('could not create the specification');
+  };
+  return e('div', { onClick: onClose, style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 } },
+    e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 440, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 20, boxShadow: '0 12px 40px rgba(0,0,0,0.25)' } },
+      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, marginBottom: 6 } }, 'New specification'),
+      e('p', { style: { margin: '0 0 14px', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Name it, then author it with the agents from a blank slate — the document fills in as you talk.'),
+      e(Input, { placeholder: 'e.g. Extract fields from an RFP', value: title, onChange: (ev: any) => setTitle(ev.target.value) }),
+      err ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, err) : null,
+      e('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 } },
+        e(Button, { variant: 'outline', onClick: onClose }, 'Cancel'),
+        e(Button, { disabled: busy, iconLeft: e(Icon, { name: busy ? 'refresh' : 'plus', size: 15 }), onClick: create }, busy ? 'Creating…' : 'Create & author'))));
+}
+
 export function Library() {
   const specs = useStore((s) => s.specs);
   const [q, setQ] = React.useState('');
   const [filter, setFilter] = React.useState('all');
+  const [newSpec, setNewSpec] = React.useState(false);
   const counts = specs.reduce((a, s) => { a[s.status] = (a[s.status] || 0) + 1; return a; }, {} as any);
   const tabs = [
     { id: 'all', label: 'All', count: specs.length },
@@ -453,16 +479,18 @@ export function Library() {
         e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 18, fontWeight: 600, color: 'var(--foreground)', letterSpacing: '-0.01em' } }, 'No specifications yet'),
         e('p', { style: { margin: '8px 0 20px', fontFamily: 'var(--font-sans)', fontSize: 13.5, lineHeight: 1.6, color: 'var(--muted-foreground)' } }, 'The specification is the unit of work. Author the first one with the agents — it is co-authored, grounded in the codebase, and persisted to docs/specifications.'),
         e('div', { style: { display: 'flex', gap: 10, justifyContent: 'center' } },
-          e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => store.set({ view: 'cockpit', activeSpec: 'SPEC-016' }) }, 'Author a specification'),
+          e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => setNewSpec(true) }, 'Author a specification'),
           e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'folderPlus', size: 15 }), onClick: () => store.set({ view: 'init' }) }, 'Scaffold project')),
         e('div', { style: { marginTop: 22, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)' } }, 'docs/specifications/ · empty')),
+      newSpec ? e(NewSpecModal, { onClose: () => setNewSpec(false) }) : null,
     );
   }
 
   return e(Page, { max: 1100 },
+    newSpec ? e(NewSpecModal, { onClose: () => setNewSpec(false) }) : null,
     e(SectionHead, { eyebrow: 'Specification', title: 'Specifications',
       sub: 'Every specification in this project. The specification is the unit of work — versioned in docs/specifications and reviewed through pull request like any other code.',
-      action: e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => store.set({ view: 'cockpit', activeSpec: 'SPEC-016' }) }, 'New specification') }),
+      action: e(Button, { iconLeft: e(Icon, { name: 'plus', size: 15 }), onClick: () => setNewSpec(true) }, 'New specification') }),
     e('div', { style: { display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 } },
       e('div', { style: { width: 300 } }, e(Input, { placeholder: 'Search specifications…', value: q, onChange: (ev) => setQ(ev.target.value) })),
       e('div', { style: { flex: 1 } }),

@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, relative, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -1449,6 +1449,81 @@ export class ProjectContext {
     return { reachable: this.harnessReachable, ...(this.harnessReachabilityReason ? { reason: this.harnessReachabilityReason } : {}) };
   }
 
+  // ---- blank-slate authoring + grounding (SPEC-020) -----------------------
+
+  /**
+   * Create a new specification as a blank slate (SPEC-020): allocate the next number + a slug from the
+   * title, create/checkout a `spec/<slug>` feature branch when git allows (else stay on the current
+   * branch so approval's guard still holds), and write `docs/specifications/<nnn>.<slug>.md` from the
+   * template with seeded frontmatter and empty sections. The cockpit then opens on it and it grows in
+   * the live preview as the conversation develops. Nothing is authored here.
+   */
+  async createSpec(rawTitle: unknown): Promise<{ specId: string; branch: string; path: string; number: number }> {
+    const title = String(rawTitle ?? "").trim() || "Untitled specification";
+    const slug = slugify(title);
+    const specsDir = resolve(this.root, "docs", "specifications");
+    mkdirSync(specsDir, { recursive: true });
+    const number = nextSpecNumber(specsDir);
+    const nnn = String(number).padStart(3, "0");
+    const date = new Date().toISOString().slice(0, 10);
+    const specId = `SPEC-${date}-${slug}`;
+
+    // Author on a fresh feature branch (SPEC-020 R1). Fall back to the current HEAD if the branch can't
+    // be created (git absent, dirty tree, name taken) so approveDraft's HEAD==branch guard still holds.
+    let branch = `spec/${slug}`;
+    if (gitAvailable()) {
+      const co = spawnSync("git", ["checkout", "-b", branch], gitOpts(this.root));
+      if (co.status !== 0) branch = gitHeadBranch(this.root) ?? branch;
+    } else {
+      branch = gitHeadBranch(this.root) ?? branch;
+    }
+
+    const filename = `${nnn}.${slug}.md`;
+    const absPath = resolve(specsDir, filename);
+    if (existsSync(absPath)) throw new Error(`a specification file '${filename}' already exists`);
+    writeFileSync(absPath, renderBlankSpec({ specId, title, branch, date }), "utf8");
+    await this.trace.write({ kind: "spec.create", projectId: this.projectId, specId, branch, path: `docs/specifications/${filename}` });
+    return { specId, branch, path: `docs/specifications/${filename}`, number };
+  }
+
+  /**
+   * Store an uploaded grounding file on the host under this project's `.arke/grounding/` (SPEC-020).
+   * The name is confined to that root (traversal rejected) and the content is size-bounded. Grounding
+   * is context for the authoring discussion — read by the agent, never written into the spec.
+   */
+  async groundingUpload(rawName: unknown, rawContent: unknown): Promise<{ name: string; path: string; size: number }> {
+    const root = resolve(this.root, ".arke", "grounding");
+    const abs = InputValidator.canonicalisePath(String(rawName ?? ""), root);
+    const content = String(rawContent ?? "");
+    const size = Buffer.byteLength(content, "utf8");
+    const max = Number(process.env.ARKE_GROUNDING_MAX_BYTES) || 5 * 1024 * 1024;
+    if (size > max) throw new ValidationError("content", `grounding file exceeds the ${max}-byte limit`);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content, "utf8");
+    await this.trace.write({ kind: "grounding.upload", projectId: this.projectId, name: basename(abs), size });
+    return { name: basename(abs), path: relative(this.root, abs).replaceAll("\\", "/"), size };
+  }
+
+  /** List the grounding files under this project's `.arke/grounding/` (name + size). */
+  groundingList(): Array<{ name: string; size: number }> {
+    const root = resolve(this.root, ".arke", "grounding");
+    try {
+      return readdirSync(root)
+        .map((f) => {
+          try {
+            const st = statSync(resolve(root, f));
+            return st.isFile() ? { name: f, size: st.size } : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter((x): x is { name: string; size: number } => x !== null)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  }
+
   // ---- op surface (per project) -------------------------------------------
 
   /** Map a CLI/client op to this project's adapter/coordinator capability (SPEC-017). */
@@ -1552,6 +1627,12 @@ export class ProjectContext {
         return this.registrySnapshot;
       case "spec.file":
         return this.readSpecFile(String(a.specId ?? ""));
+      case "spec.create": // SPEC-020: new blank-slate specification from the template
+        return this.createSpec(a.title);
+      case "grounding.upload": // SPEC-020: store an uploaded grounding file on the host
+        return this.groundingUpload(a.name, a.content);
+      case "grounding.list":
+        return this.groundingList();
       case "spec.library":
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
       case "spec.fanout":
@@ -1949,6 +2030,88 @@ export function buildDecision(msg: { [k: string]: unknown }): PermissionDecision
 }
 
 export { ValidationError };
+
+// ---- SPEC-020 blank-slate helpers -------------------------------------------
+
+/** Kebab-case a title into a filesystem/branch-safe slug. */
+export function slugify(title: string): string {
+  return (
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "spec"
+  );
+}
+
+/** The next `NNN` spec number: one above the highest `NNN.` file already in the specifications dir. */
+export function nextSpecNumber(specsDir: string): number {
+  let max = 0;
+  try {
+    for (const f of readdirSync(specsDir)) {
+      const m = /^(\d{3})\./.exec(f);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+  } catch {
+    /* no dir yet → start at 1 */
+  }
+  return max + 1;
+}
+
+/**
+ * Render a blank specification: the real template's frontmatter (seeded) and section skeleton with
+ * empty bodies, so the SPEC-006 preview shows the headings as placeholders that fill in through the
+ * conversation (SPEC-020). Requirements / Design / Tasks match SPEC_ANATOMY so the preview renders them.
+ */
+export function renderBlankSpec(seed: { specId: string; title: string; branch: string; date: string }): string {
+  const { specId, title, branch, date } = seed;
+  return `---
+spec_id: ${specId}
+title: ${title}
+status: draft
+branch: ${branch}
+owner: core-maintainers
+capabilities: []
+created: ${date}
+updated: ${date}
+---
+
+# ${title}
+
+## Why
+
+## What changes
+
+## Requirements
+
+## Design
+
+### Architectural decision
+
+### Target architecture
+
+### Data model
+
+### Interfaces and contracts
+
+### Cross-cutting
+
+## Tasks
+
+### Testing
+
+### Definition of done
+
+## Decision log
+| # | Decision | Rationale |
+|---|----------|-----------|
+
+## Open questions
+
+## Change history
+- ${date} · ${branch} · draft — created (blank slate)
+`;
+}
 
 export function gitAvailable(): boolean {
   try {
