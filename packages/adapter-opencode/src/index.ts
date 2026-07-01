@@ -26,7 +26,7 @@ import {
   type OpenCodeConfig,
   type ResolvedModel,
 } from "./config.js";
-import { OpenCodeHttp } from "./http.js";
+import { OpenCodeError, OpenCodeHttp } from "./http.js";
 import { HarnessProcess } from "./harness-process.js";
 import { probeCapabilities } from "./capabilities.js";
 import {
@@ -87,6 +87,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
   private deadLetterCount = 0;
   /** sessionId → correlationId of the in-flight turn, so emitted events attribute to it. */
   private readonly activeTurn = new Map<string, string>();
+  /**
+   * The agent names the connected server actually recognises for THIS directory (from `GET /agent`),
+   * or null when the catalog could not be read. OpenCode 500s on an unknown `agent`, and its
+   * per-directory agent loading is unreliable for non-primary directories — so we only ever send an
+   * agent the live catalog confirms (keep adapters honest about the backend's real surface).
+   */
+  private knownAgents: Set<string> | null = null;
   // Correlation state for the split transcript model (role on message.updated, text on the parts).
   private readonly normState: NormalizeState = createNormalizeState();
 
@@ -152,7 +159,23 @@ export class OpenCodeAdapter implements HarnessAdapter {
     this.caps = probe.capabilities;
     this._readiness = probe.readiness;
     if (probe.readiness.ready) {
+      await this.refreshAgentCatalog();
       await this.rebuildSessionGraph();
+    }
+  }
+
+  /**
+   * Read the live agent catalog for this adapter's directory (`GET /agent`). Best-effort: a failed
+   * read leaves `knownAgents` null and the configured agent names are trusted verbatim.
+   */
+  private async refreshAgentCatalog(): Promise<void> {
+    try {
+      const list = await this.http.req<Array<{ name?: string }>>("GET", "/agent");
+      this.knownAgents = new Set(
+        (list ?? []).map((a) => a?.name).filter((n): n is string => typeof n === "string" && n.length > 0),
+      );
+    } catch {
+      this.knownAgents = null; // catalog unavailable — degrade to trusting the caller's agent
     }
   }
 
@@ -246,11 +269,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const correlationId = input.correlationId ?? `msg_${randomUUID()}`;
     this.activeTurn.set(input.sessionId, correlationId);
     try {
-      await this.http.req(
-        "POST",
-        `/session/${input.sessionId}/message`,
-        this.messageBody(input, correlationId),
-      );
+      await this.postMessage(`/session/${input.sessionId}/message`, input, correlationId);
       return { sessionId: input.sessionId, correlationId };
     } finally {
       // Sync turn is done when the POST returns; idle event also clears this defensively.
@@ -262,12 +281,35 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const correlationId = input.correlationId ?? `msg_${randomUUID()}`;
     // Stays set until session.idle: completion is signalled, never inferred by the caller.
     this.activeTurn.set(input.sessionId, correlationId);
-    await this.http.req(
-      "POST",
-      `/session/${input.sessionId}/prompt_async`,
-      this.messageBody(input, correlationId),
-    );
+    await this.postMessage(`/session/${input.sessionId}/prompt_async`, input, correlationId);
     return { sessionId: input.sessionId, correlationId };
+  }
+
+  /**
+   * POST a message body, self-healing around OpenCode's unreliable per-directory agent handling:
+   * a named agent can draw a 500 (UnknownError) even when the catalog listed it — the server's
+   * directory-scoped config loading is racy for non-primary directories. When a request that NAMED
+   * an agent fails with a 5xx, retry once WITHOUT the agent (OpenCode then uses its default), and
+   * record the degradation in the trace. A failure with no agent named is surfaced as-is — the
+   * error now carries the server's own detail (see {@link OpenCodeError}).
+   */
+  private async postMessage(path: string, input: SendMessageInput, correlationId: string): Promise<void> {
+    const body = this.messageBody(input, correlationId);
+    try {
+      await this.http.req("POST", path, body);
+    } catch (err) {
+      if (!(err instanceof OpenCodeError) || err.status < 500 || !body.agent) throw err;
+      const { agent: droppedAgent, ...withoutAgent } = body;
+      await this.http.req("POST", path, withoutAgent);
+      this.onLifecycleEvent?.({
+        kind: "agent.fallback",
+        harness: this.id,
+        agent: droppedAgent,
+        sessionId: input.sessionId,
+        reason: err.detail ?? `${err.status} ${err.statusText}`,
+        at: Date.now(),
+      });
+    }
   }
 
   private messageBody(input: SendMessageInput, correlationId: string) {
@@ -282,9 +324,26 @@ export class OpenCodeAdapter implements HarnessAdapter {
       // correlationId — e.g. the cockpit's UUID — otherwise 400s). Coerce any non-conforming id to
       // the same `msg_` shape the adapter uses by default, so no caller can produce a bad request.
       messageID: this.toOpenCodeMessageId(correlationId),
-      ...(input.agent ? { agent: input.agent } : {}),
       parts: input.parts.map((p) => ({ type: "text", text: p.text })),
     };
+    // Only name an agent the connected server actually recognises for this directory: OpenCode 500s
+    // (UnknownError) on an unknown `agent`, and its per-directory agent loading is unreliable for
+    // non-primary directories — a scaffolded roster on disk is no guarantee the catalog has it. When
+    // the agent is absent from a KNOWN catalog, omit the field (OpenCode uses its default agent) and
+    // record the degradation in the trace rather than hard-failing the whole turn.
+    if (input.agent) {
+      if (this.knownAgents === null || this.knownAgents.has(input.agent)) {
+        body.agent = input.agent;
+      } else {
+        this.onLifecycleEvent?.({
+          kind: "agent.unavailable",
+          harness: this.id,
+          agent: input.agent,
+          sessionId: input.sessionId,
+          at: Date.now(),
+        });
+      }
+    }
     // OpenCode's message API requires `model: { providerID, modelID }` (not { provider, name }). Only
     // send a model when Arke has a REAL one configured: the "gateway" value is Arke's not-configured
     // sentinel (an unmapped tier / empty `serves`), and OpenCode has no `gateway` provider — so omit
@@ -295,9 +354,14 @@ export class OpenCodeAdapter implements HarnessAdapter {
     return body;
   }
 
-  /** Coerce a correlation id into an OpenCode-valid `messageID` (must start with `msg`). */
+  /**
+   * Coerce a correlation id into an OpenCode-valid `messageID`: must start with `msg` AND be strictly
+   * `[A-Za-z0-9_]` — a dashed UUID (including this adapter's own `msg_${randomUUID()}` default) draws
+   * a 500 UnknownError from the server, so sanitise ALWAYS, not just when the prefix is missing.
+   */
   private toOpenCodeMessageId(id: string): string {
-    return /^msg/.test(id) ? id : `msg_${id.replace(/[^A-Za-z0-9_]/g, "")}`;
+    const cleaned = id.replace(/[^A-Za-z0-9_]/g, "");
+    return /^msg/.test(cleaned) ? cleaned : `msg_${cleaned}`;
   }
 
   // ---- todos / diff / permissions / commands ------------------------------
@@ -604,7 +668,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
 }
 
 // Public surface for the coordinator and tests.
-export { OpenCodeHttp, OpenCodeError } from "./http.js";
+export { OpenCodeHttp, OpenCodeError, errorDetailFrom } from "./http.js";
 export { HarnessProcess, type HarnessProcessOptions } from "./harness-process.js";
 export {
   type OpenCodeConfig,

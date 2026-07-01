@@ -49,11 +49,20 @@ export function createNormalizeState(): NormalizeState {
 /** Known event types the adapter recognises but deliberately does not map (yet). */
 const IGNORED_TYPES = new Set([
   "server.connected",
+  "server.heartbeat", // keep-alive noise; dead-lettering it floods the trace
+  "sync", // OpenCode ≥1.17 mirror frame (versioned `syncEvent` copy of the primary event)
   "session.deleted",
   "session.compacted",
   "session.diff", // carries no counts; coordinator pairs with GET /diff → diff.finalized
   "message.part.delta", // incremental text; the message.part.updated snapshot carries the full text
   "message.removed",
+  "session.next.agent.switched",
+  "session.next.model.switched",
+  "plugin.added",
+  "catalog.updated",
+  "integration.updated",
+  "reference.updated",
+  "project.updated",
   "file.edited",
   "file.watcher.updated",
   "lsp.client.diagnostics",
@@ -84,7 +93,16 @@ export function normalize(
   if (typeof raw !== "object" || raw === null) {
     return { kind: "dead-letter", reason: "frame is not an object" };
   }
-  const e = raw as RawEvent;
+  let e = raw as RawEvent;
+  // OpenCode ≥1.17 wraps every SSE frame in `{ directory, project, payload: { id, type, properties } }`.
+  // Unwrap the envelope so the event shapes below keep matching — without this, EVERY event (including
+  // message.part.updated / session.idle) dead-letters as "missing event type" and no transcript streams.
+  if (typeof e.type !== "string") {
+    const payload = (raw as { payload?: unknown }).payload;
+    if (payload && typeof payload === "object" && typeof (payload as RawEvent).type === "string") {
+      e = payload as RawEvent;
+    }
+  }
   if (typeof e.type !== "string") {
     return { kind: "dead-letter", reason: "missing event type" };
   }

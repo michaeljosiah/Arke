@@ -15,10 +15,31 @@ export class OpenCodeError extends Error {
     readonly path: string,
     readonly status: number,
     readonly statusText: string,
+    /** Bounded, human-readable detail extracted from the error response body (never credentials). */
+    readonly detail?: string,
   ) {
-    super(`OpenCode ${method} ${path} → ${status} ${statusText}`);
+    super(`OpenCode ${method} ${path} → ${status} ${statusText}${detail ? ` — ${detail}` : ""}`);
     this.name = "OpenCodeError";
   }
+}
+
+/**
+ * Extract a bounded, human-readable reason from an OpenCode error body. OpenCode returns
+ * `{ name, data: { message, ref? } }`; fall back to a raw-text excerpt for anything else. Without
+ * this the engineer sees a bare "500 Internal Server Error" with no way to diagnose it.
+ */
+export function errorDetailFrom(bodyText: string): string | undefined {
+  const text = bodyText.trim();
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { name?: string; data?: { message?: string; ref?: string } };
+    const parts = [parsed.name, parsed.data?.message, parsed.data?.ref ? `(ref ${parsed.data.ref})` : undefined]
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
+    if (parts.length > 0) return parts.join(": ").replace(/: \(ref/, " (ref").slice(0, 300);
+  } catch {
+    /* not JSON — use the raw excerpt */
+  }
+  return text.slice(0, 200);
 }
 
 export class OpenCodeHttp {
@@ -50,14 +71,19 @@ export class OpenCodeHttp {
     return h;
   }
 
-  /** JSON request; throws {@link OpenCodeError} on a non-2xx status. */
+  /** JSON request; throws {@link OpenCodeError} (with body detail) on a non-2xx status. */
   async req<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(this.url(path), {
       method,
       headers: this.headers(),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!res.ok) throw new OpenCodeError(method, path, res.status, res.statusText);
+    if (!res.ok) {
+      // Surface WHY: OpenCode's error body names the failure (e.g. UnknownError + a ref) — a bare
+      // status code left the engineer staring at "500 Internal Server Error" with nothing to act on.
+      const errText = await res.text().catch(() => "");
+      throw new OpenCodeError(method, path, res.status, res.statusText, errorDetailFrom(errText));
+    }
     const text = await res.text();
     return (text ? JSON.parse(text) : undefined) as T;
   }

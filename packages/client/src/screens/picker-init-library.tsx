@@ -306,7 +306,7 @@ const SCAFFOLD = [
   { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — six canonical roles: spec-author, architect, reviewer-a/b, implementer, researcher', lines: ['+ .opencode/agents/spec-author.md', '+ .opencode/agents/architect.md', '+ .opencode/agents/implementer.md', '+ .opencode/agents/researcher.md'] },
   { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
   { id: 'grounding', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md baseline stub, enriched in full by the researcher grounding session', lines: ['+ AGENTS.md', '+ .repos/ (read-only references)'] },
-  { id: 'plugins', icon: 'shield', title: 'Policy & projection plugins', detail: 'Permission policy hooks and deterministic spec → record projection', lines: ['+ .opencode/plugins/policy.ts', '+ .opencode/plugins/projection.ts'] },
+  { id: 'plugins', icon: 'shield', title: 'Policy & projection plugins', detail: 'Permission policy hooks and deterministic spec → record projection', lines: ['+ .arke/plugins/policy.ts', '+ .arke/plugins/projection.ts'] },
 ];
 
 export function Initialisation() {

@@ -190,3 +190,41 @@ test("question.replied / question.rejected map to elicitation.replied / .rejecte
   assert.equal(rejected.kind, "event");
   if (rejected.kind === "event") assert.equal(rejected.event.type, "elicitation.rejected");
 });
+
+// ---- OpenCode ≥1.17 envelope: { directory, project, payload: { id, type, properties } } ----
+
+test("a payload-wrapped frame (OpenCode ≥1.17) is unwrapped and normalised", () => {
+  const out = normalize(
+    {
+      directory: "C:\repo",
+      project: "abc123",
+      payload: {
+        id: "evt_1",
+        type: "message.part.updated",
+        properties: { sessionID: "ses_spec", part: { type: "text", text: "hello", messageID: "msg_1" } },
+      },
+    },
+    lookup,
+    HARNESS,
+  );
+  assert.equal(out.kind, "event");
+  if (out.kind !== "event" || out.event.type !== "message.updated") return assert.fail("expected message.updated");
+  assert.equal(out.event.text, "hello");
+  assert.equal(out.event.sessionId, "ses_spec");
+});
+
+test("heartbeat and sync mirror frames are ignored, not dead-lettered", () => {
+  const hb = normalize({ payload: { id: "evt_hb", type: "server.heartbeat", properties: {} } }, lookup, HARNESS);
+  assert.equal(hb.kind, "ignore");
+  const sync = normalize(
+    { payload: { type: "sync", syncEvent: { id: "evt_x", type: "message.updated.1" } } },
+    lookup,
+    HARNESS,
+  );
+  assert.equal(sync.kind, "ignore");
+});
+
+test("a frame with neither type nor payload.type still dead-letters", () => {
+  const out = normalize({ payload: { properties: {} } }, lookup, HARNESS);
+  assert.equal(out.kind, "dead-letter");
+});
