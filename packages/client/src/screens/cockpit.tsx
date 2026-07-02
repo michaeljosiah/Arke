@@ -150,6 +150,25 @@ function LiveCockpit() {
     lastSentTier.current = undefined;
   }, [specId]);
 
+  // Keep the store's activeSpec in step with the spec the cockpit actually resolved (fallback chain
+  // above), so the topbar breadcrumb never shows a stale/demo id while a different file is open.
+  React.useEffect(() => {
+    if (specId && activeSpec !== specId) store.set({ activeSpec: specId });
+  }, [specId, activeSpec]);
+
+  // One-shot opening nudge (SPEC-020): a freshly created blank spec arms cockpit.kickoffFor; the
+  // spec-author greets the engineer and asks what they want to achieve, so the slate never opens
+  // onto dead silence. Silent send — no human bubble; the flag clears first so it can't double-fire.
+  const kickoffFired = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const target = cockpit?.kickoffFor;
+    if (!target || target !== specId || kickoffFired.current === target) return;
+    if (!isCoordinatorConnected() || sending || convo.length > 0) return;
+    kickoffFired.current = target;
+    store.set((s: any) => ({ cockpit: { ...s.cockpit, kickoffFor: null } }));
+    void send('This is a brand-new blank specification the engineer just created. Greet them briefly and ask what they want to achieve with this change — one or two focused questions to draw out the goal and who it is for. Do not write to the specification file yet.');
+  }, [cockpit?.kickoffFor, specId, sending, convo.length]);
+
   // Resolve the live AUTHORING session for this spec. Authoring sessions are spec-kind sessions for
   // this spec (id !== specId) — NOT the spec status card and NOT implementation task sessions, which
   // must stay out of the authoring conversation/in-flight state (PR #18 review round 6). Prefer the
@@ -226,9 +245,10 @@ function LiveCockpit() {
     });
   }, [transcriptSig, liveCard?.model]);
 
-  const send = async () => {
-    if (!draft.trim() || !specId || sending) return; // guard double-submit (PR #18 review round 4)
-    const text = draft.trim();
+  const send = async (overrideText?: string) => {
+    if (!(overrideText ?? draft).trim() || !specId || sending) return; // guard double-submit (PR #18 review round 4)
+    const text = (overrideText ?? draft).trim();
+    const silent = overrideText !== undefined; // a kickoff nudge: no optimistic human bubble, no draft touch
     const sentAs = role;
     setSending(true);
     try {
@@ -261,14 +281,19 @@ function LiveCockpit() {
       lastSentRole.current = sentAs;
       lastSentTier.current = tier;
       // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
-      // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4).
+      // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4). A silent
+      // kickoff nudge shows no human bubble and never touches the composer.
       const key = 'h:' + Date.now();
-      setConvo((c) => [...c, { key, kind: 'human', text }]);
-      setDraft('');
-      const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text, correlationId });
+      if (!silent) {
+        setConvo((c) => [...c, { key, kind: 'human', text }]);
+        setDraft('');
+      }
+      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, tier, message: text, correlationId });
       if (outcome.status === 'rejected' || outcome.status === 'full') {
-        setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
-        setDraft((d) => d || text); // restore the text if the composer is still empty
+        if (!silent) {
+          setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
+          setDraft((d) => d || text); // restore the text if the composer is still empty
+        }
         return;
       }
       if (outcome.correlationId) roleByMsgId.current.set(outcome.correlationId, sentAs); // attribute the reply

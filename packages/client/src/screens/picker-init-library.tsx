@@ -434,15 +434,17 @@ function NewSpecModal({ onClose }: any) {
   const [err, setErr] = React.useState<string | null>(null);
   const create = async () => {
     setBusy(true); setErr(null);
-    const res = await createSpecLive(title.trim() || 'Untitled specification');
+    // An empty title is fine: the spec-author derives the real title from the conversation and
+    // rewrites the frontmatter/H1 once it understands the goal (SPEC-020).
+    const res = await createSpecLive(title.trim());
     setBusy(false);
     if (res) onClose(); else setErr('could not create the specification');
   };
   return e('div', { onClick: onClose, style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 } },
     e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 440, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 20, boxShadow: '0 12px 40px rgba(0,0,0,0.25)' } },
       e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, marginBottom: 6 } }, 'New specification'),
-      e('p', { style: { margin: '0 0 14px', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Name it, then author it with the agents from a blank slate — the document fills in as you talk.'),
-      e(Input, { placeholder: 'e.g. Extract fields from an RFP', value: title, onChange: (ev: any) => setTitle(ev.target.value) }),
+      e('p', { style: { margin: '0 0 14px', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Author it with the agents from a blank slate — the document fills in as you talk. Leave the name blank and the agents will title it once they understand the goal.'),
+      e(Input, { placeholder: 'optional — e.g. Extract fields from an RFP', value: title, onChange: (ev: any) => setTitle(ev.target.value) }),
       err ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, err) : null,
       e('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 } },
         e(Button, { variant: 'outline', onClick: onClose }, 'Cancel'),

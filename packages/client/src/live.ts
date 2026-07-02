@@ -495,7 +495,9 @@ export async function createSpecLive(title: string): Promise<{ specId: string } 
   const res = await liveRequest('spec.create', { title }, 30000);
   if (!res?.ok) return null;
   await refreshSpecs();
-  store.set({ activeSpec: res.result.specId, view: 'cockpit' });
+  // kickoffFor arms the cockpit's one-shot opening nudge: the spec-author greets the engineer and
+  // asks what they want to achieve, so a blank slate never opens onto dead silence (SPEC-020).
+  store.set((s: any) => ({ activeSpec: res.result.specId, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
   return { specId: res.result.specId };
 }
 
@@ -620,7 +622,7 @@ async function submitCockpitPrompt(args: any): Promise<any> {
  * coordinator's response so a stale-session rejection is visible); when offline it is queued,
  * bounded at 50 — a full queue is refused, never silently dropped.
  */
-export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
+export async function sendCockpitPrompt(args: { sessionId: string; specId?: string | null; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
   if (transport && transport.state === 'open') {
     const res = await submitCockpitPrompt(args);
     return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId ?? args.correlationId } : { status: 'rejected', error: res?.error };

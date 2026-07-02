@@ -1459,12 +1459,17 @@ export class ProjectContext {
    * the live preview as the conversation develops. Nothing is authored here.
    */
   async createSpec(rawTitle: unknown): Promise<{ specId: string; branch: string; path: string; number: number }> {
-    const title = String(rawTitle ?? "").trim() || "Untitled specification";
-    const slug = slugify(title);
     const specsDir = resolve(this.root, "docs", "specifications");
     mkdirSync(specsDir, { recursive: true });
     const number = nextSpecNumber(specsDir);
     const nnn = String(number).padStart(3, "0");
+    // The title is OPTIONAL (SPEC-020): the spec-author derives the real title from the conversation
+    // once it understands the goal (it rewrites the frontmatter `title:` + H1). An untitled slate gets
+    // a number-unique slug so filenames and branches never collide across untitled specs; the NNN
+    // prefix keeps the library in chronological order either way.
+    const given = String(rawTitle ?? "").trim();
+    const title = given || "Untitled specification";
+    const slug = given ? slugify(given) : `untitled-${nnn}`;
     const date = new Date().toISOString().slice(0, 10);
     const specId = `SPEC-${date}-${slug}`;
 
@@ -1573,11 +1578,32 @@ export class ProjectContext {
           // prompt (unknown AND not a replay) is allowed through (PR #18 final review).
           throw new Error(`session '${sessionId}' is not active — replayed message rejected`);
         }
+        // Anchor the turn to the session's working specification (SPEC-020): without an explicit
+        // file reference the agent globs `docs/specifications/` and can guess the WRONG spec when
+        // several exist. Resolve the session's spec (read model, else the durable session graph) and
+        // prepend the file path as context. Best-effort — a session with no spec file sends as-is.
+        let specContext = "";
+        try {
+          const sid = (a.specId ? String(a.specId) : undefined) ?? known?.specId;
+          const found = sid ? this.findSpecFile(sid) : null;
+          if (found) {
+            specContext = `Working specification: ${found.relPath} (spec_id: ${found.canonicalId}). Read and edit THIS file for this conversation; do not pick a different specification unless explicitly asked.\n`;
+          }
+          // Grounding is invisible to the agent's own search (`.arke/` is a dot-dir AND gitignored,
+          // which glob/grep skip) — name the exact paths so the agent reads them directly (SPEC-020).
+          const grounding = this.groundingList();
+          if (grounding.length > 0) {
+            specContext += `Grounding files uploaded by the engineer — source material for this discussion; read them at these exact paths (they will not appear in file searches):\n${grounding.map((g) => `- .arke/grounding/${g.name}`).join("\n")}\n`;
+          }
+          if (specContext) specContext += "\n";
+        } catch {
+          /* context is a nicety — never block the send on it */
+        }
         const input = {
           sessionId,
           agent: String(a.agent ?? ""),
           tier,
-          parts: [{ type: "text" as const, text: String(a.message ?? "") }],
+          parts: [{ type: "text" as const, text: specContext + String(a.message ?? "") }],
           ...(a.correlationId ? { correlationId: String(a.correlationId) } : {}),
         };
         return op === "prompt.send" ? this.adapter.sendMessage(input) : this.adapter.dispatchAsync(input);
