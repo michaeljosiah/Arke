@@ -11,16 +11,38 @@ import type { RegistryResolver } from "./registry.js";
  */
 
 /** The issue-extraction prompt is versioned alongside the source; bumped when its shape changes. */
-export const ISSUE_EXTRACTION_PROMPT_VERSION = "v1";
+export const ISSUE_EXTRACTION_PROMPT_VERSION = "v2";
 
-/** Build the reviewer prompt: critique the spec, output issues as a strict JSON array. */
+/**
+ * Build the reviewer prompt. Reviewers are agentic personas that naturally explore the repo and
+ * write prose analysis, so demanding "ONLY JSON, no prose" (v1) failed in practice — the critique
+ * arrived as prose and parsed to zero issues. v2 instead PERMITS the analysis and requires the reply
+ * to END WITH a single fenced ```json block, backed by a worked example and a "machine-parsed —
+ * missing block means your review is discarded" contract, which agentic models comply with reliably.
+ */
 export function buildReviewerPrompt(specText: string, grounding: string): string {
   return [
-    "You are an independent specification reviewer. Critique the specification below for correctness,",
-    "completeness, ambiguity, and testability. Ground your critique in the project context.",
+    "You are an independent specification reviewer (SPEC-007). Critique the specification below for",
+    "correctness, completeness, ambiguity, and testability. You MAY read project files first to ground",
+    "your critique in the actual repository.",
     "",
-    "Return ONLY a JSON array of issues, each: {\"section\": string, \"severity\": \"blocking\"|\"suggestion\"|\"question\", \"text\": string}.",
-    "`section` is the spec section the issue concerns (e.g. \"requirements > Requirement: <name>\"). No prose outside the JSON.",
+    "When your analysis is complete, your reply MUST END WITH a single fenced code block containing a",
+    "JSON array of the issues you found. A machine parses ONLY that block; any prose before it is",
+    "ignored, and if the block is missing your review is discarded and does not count.",
+    "",
+    'Each issue is an object: {"section": string, "severity": "blocking"|"suggestion"|"question", "text": string}',
+    '  • section  — the spec section the issue concerns, e.g. "Requirements > FR-08" or "Design > Data model".',
+    '  • severity — "blocking" (must fix before approval), "suggestion" (improvement), or "question" (needs clarification).',
+    "  • text     — one concrete, actionable issue. Be specific; quote the requirement id where you can.",
+    "If, after a genuine review, you find no issues, end with an empty array: []",
+    "",
+    "Your reply must end with exactly this shape (values illustrative):",
+    "```json",
+    "[",
+    '  {"section": "Requirements > FR-08", "severity": "blocking", "text": "Spread timing contradicts FR-10 because ..."},',
+    '  {"section": "Design > Data model", "severity": "suggestion", "text": "The cell-state enum omits the telegraphed pre-spread state used by FR-08."}',
+    "]",
+    "```",
     "",
     grounding ? `## Project grounding\n${grounding}\n` : "",
     "## Specification under review",
@@ -37,40 +59,90 @@ export interface ParsedIssue {
 const SEVERITIES = new Set(["blocking", "suggestion", "question"]);
 
 /**
- * Parse a reviewer's output into structured issues. Tolerant: extracts the first JSON array (raw or
- * inside a ```json fence) and keeps only well-formed entries; anything unparseable yields [].
+ * Parse a reviewer's output into structured issues. Reviewers write prose analysis and end with a
+ * fenced JSON array (see {@link buildReviewerPrompt}), so this must find the REAL issues array amid
+ * prose littered with stray brackets (`[STRETCH]`, `[FR-01]`, markdown links). The old approach —
+ * `text.indexOf("[")`…`lastIndexOf("]")` — swallowed the whole span between the first and last
+ * bracket and failed to parse, silently yielding zero issues on a rich review. Instead we enumerate
+ * every *balanced* array candidate (fenced blocks first) and keep the one that yields the most
+ * well-formed issues. Unparseable output still yields [].
  */
 export function parseReviewerIssues(text: string): ParsedIssue[] {
-  const json = extractJsonArray(text);
-  if (!json) return [];
-  let arr: unknown;
-  try {
-    arr = JSON.parse(json);
-  } catch {
-    return [];
+  let best: ParsedIssue[] = [];
+  for (const candidate of jsonArrayCandidates(text)) {
+    let arr: unknown;
+    try {
+      arr = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(arr)) continue;
+    const parsed = coerceIssues(arr);
+    // Prefer the candidate yielding the most well-formed issues; ties keep the earlier (fenced) one.
+    if (parsed.length > best.length) best = parsed;
   }
-  if (!Array.isArray(arr)) return [];
+  return best;
+}
+
+/** Keep only well-formed issue objects; default a missing section to "general" and normalise severity. */
+function coerceIssues(arr: unknown[]): ParsedIssue[] {
   const out: ParsedIssue[] = [];
   for (const raw of arr) {
     if (!raw || typeof raw !== "object") continue;
     const r = raw as Record<string, unknown>;
-    const section = typeof r.section === "string" ? r.section.trim() : "";
     const txt = typeof r.text === "string" ? r.text.trim() : "";
-    if (!section || !txt) continue;
+    if (!txt) continue; // an issue with no text is not actionable
+    // A missing/blank section is no longer a reason to DROP the issue — an unsectioned critique is
+    // still a real finding; anchor it to "general" so agreement/adjudication still work.
+    const section = typeof r.section === "string" && r.section.trim() ? r.section.trim() : "general";
     const severity = (typeof r.severity === "string" && SEVERITIES.has(r.severity) ? r.severity : "suggestion") as ReviewSeverity;
     out.push({ section, severity, text: txt });
   }
   return out;
 }
 
-/** Find the first top-level JSON array in a blob (handles ```json fences and surrounding prose). */
-function extractJsonArray(text: string): string | null {
-  const fence = /```(?:json)?\s*(\[[\s\S]*?\])\s*```/.exec(text);
-  if (fence) return fence[1]!;
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start >= 0 && end > start) return text.slice(start, end + 1);
-  return null;
+/**
+ * Yield plausible JSON-array candidates from reviewer output, best-first: arrays inside ```json
+ * fences (last fence first — the reviewer's final block), then any balanced top-level `[...]` span.
+ */
+function* jsonArrayCandidates(text: string): Generator<string> {
+  const fence = /```(?:json)?\s*([\s\S]*?)```/g;
+  const fenced: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(text))) {
+    for (const arr of balancedArrays(m[1]!)) fenced.push(arr);
+  }
+  for (let i = fenced.length - 1; i >= 0; i--) yield fenced[i]!; // last fence is the intended output
+  yield* balancedArrays(text); // fall back to bare arrays anywhere in the prose
+}
+
+/** Yield every balanced top-level `[...]` span, honouring quoted strings so brackets in text don't miscount. */
+function* balancedArrays(text: string): Generator<string> {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "[") continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j]!;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "[") depth++;
+      else if (c === "]") {
+        depth--;
+        if (depth === 0) {
+          yield text.slice(i, j + 1);
+          i = j; // resume past this array; nested arrays are captured when JSON.parse sees the parent
+          break;
+        }
+      }
+    }
+  }
 }
 
 /** A short, stable content hash for a section's text — for stale-file detection + agreement. */

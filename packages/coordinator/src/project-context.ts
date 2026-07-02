@@ -1980,7 +1980,13 @@ export class ProjectContext {
     if (!("sessionId" in event)) return;
     const sessionId = (event as { sessionId: string }).sessionId;
     if (!this.reviewerSessions.has(sessionId)) return;
-    if (event.type === "message.updated" && !event.isStreaming) {
+    // Ingest ONLY the reviewer's completed ASSISTANT turn. The `role` gate is load-bearing: the
+    // user prompt itself arrives as a `message.updated` with `isStreaming:false` (role "user"), and
+    // that prompt now embeds an example issues array (see buildReviewerPrompt) — without this gate the
+    // parser extracted the *example* from the prompt and marked the reviewer done before its real
+    // answer ever arrived. Intermediate assistant messages stream (`isStreaming:true`); only the final
+    // answer is finalised non-streaming by `session.idle`.
+    if (event.type === "message.updated" && !event.isStreaming && event.role === "assistant") {
       await this.ingestReviewerMessage(sessionId, event.text);
     } else if (event.type === "session.status" && event.status === "error") {
       await this.failReviewer(sessionId, "reviewer session reported error");
