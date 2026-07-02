@@ -60,6 +60,20 @@ test("an absent correlationId still yields a receipt correlationId (client-side 
   assert.equal("messageID" in lastMessageBody(), false);
 });
 
+test("createSession sends parentID only for a real ses_ ref; a canonical spec id is omitted", async () => {
+  // Task fan-out (SPEC-009) passes the canonical spec id as the LOGICAL parent. OpenCode 400s on an
+  // unknown parentID, so it must never reach the wire — the task becomes a root session instead.
+  const adapter = makeAdapter();
+  await adapter.createSession({ specId: "SPEC-A", parent: "SPEC-A" });
+  const badParent = server.lastBodies.get("POST /session") as Record<string, unknown>;
+  assert.equal("parentID" in badParent, false, "a canonical spec id must not be sent as parentID");
+  assert.equal(badParent.title, "SPEC-A"); // title still encodes the spec for ownership recovery
+
+  await adapter.createSession({ specId: "SPEC-A", parent: "ses_realparent123" });
+  const goodParent = server.lastBodies.get("POST /session") as Record<string, unknown>;
+  assert.equal(goodParent.parentID, "ses_realparent123", "a genuine session ref is forwarded");
+});
+
 test("a real configured model is sent as { providerID, modelID }", async () => {
   const adapter = makeAdapter({ resolveModel: () => ({ provider: "openai", name: "gpt-5.3-codex-spark" }) });
   const s = await adapter.createSession({ specId: "SPEC-A" });

@@ -58,6 +58,11 @@ interface OpenCodeProvidersDoc {
   }>;
 }
 
+/** True for a genuine OpenCode session ref (e.g. "ses_0de6…"); false for our logical spec ids. */
+function isOpenCodeSessionId(id: string): boolean {
+  return /^ses_/.test(id);
+}
+
 export interface OpenCodeAdapterDeps {
   /** Durable session ownership graph. Defaults to in-memory (durability needs a file store). */
   sessionStore?: SessionStore;
@@ -254,15 +259,20 @@ export class OpenCodeAdapter implements HarnessAdapter {
   // ---- sessions -----------------------------------------------------------
 
   async createSession(input: CreateSessionInput): Promise<SessionRef> {
+    // OpenCode rejects an unknown parentID with 400 BadRequest. Task fan-out (SPEC-009) uses the
+    // canonical spec id (e.g. "SPEC-2026-…") as its *logical* parent for grouping — that is NOT a real
+    // OpenCode session, so it must never be sent as parentID. Only forward a genuine "ses_…" ref; the
+    // task otherwise becomes a root session whose title still encodes the spec for ownership recovery.
+    const parentID = input.parent && isOpenCodeSessionId(input.parent) ? input.parent : undefined;
     const session = await this.http.req<{ id: string }>("POST", "/session", {
-      parentID: input.parent,
+      ...(parentID ? { parentID } : {}),
       title: input.specId, // title encodes the spec_id so REST resync can recover ownership
     });
     this.store.upsert({
       sessionId: session.id,
-      kind: input.parent ? "task" : "spec",
+      kind: input.parent ? "task" : "spec", // logical kind follows the caller's intent, not the wire parentID
       specId: input.specId,
-      parentSessionId: input.parent,
+      parentSessionId: input.parent, // keep the logical grouping (may be a canonical spec id)
     });
     return { sessionId: session.id };
   }

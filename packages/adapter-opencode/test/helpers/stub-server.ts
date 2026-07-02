@@ -153,6 +153,7 @@ export class StubOpenCodeServer {
     if (method === "POST" && path === "/session") {
       this.bump(method, "/session");
       const b = (await this.body(req)) as { parentID?: string; title?: string };
+      this.lastBodies.set("POST /session", b);
       const id = `ses_${++this.seq}`;
       const session: StubSession = { id, parentID: b?.parentID, title: b?.title };
       this.sessions.set(id, session);
