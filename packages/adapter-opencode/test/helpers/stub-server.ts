@@ -25,6 +25,10 @@ export class StubOpenCodeServer {
   readonly counts = new Map<string, number>();
   /** Last request body seen per route key, e.g. lastBodies.get("POST /session/:id/message"). */
   readonly lastBodies = new Map<string, unknown>();
+  /** Agent names served by GET /agent, or null to 404 (backend without an agent catalog). */
+  agentCatalog: string[] | null = null;
+  /** When true, a message/prompt body that NAMES an agent 500s (OpenCode's flaky per-dir agents). */
+  failMessagesNamingAgent = false;
   /** OpenAPI paths advertised at GET /doc (override to simulate older/forked servers). */
   docPaths: Record<string, unknown> = {
     "/global/health": {},
@@ -136,6 +140,11 @@ export class StubOpenCodeServer {
       return this.json(res, 200, { status: "ok" });
     }
 
+    if (method === "GET" && path === "/agent") {
+      this.bump("GET", "/agent");
+      if (this.agentCatalog === null) return this.json(res, 404, { error: "no agent catalog" });
+      return this.json(res, 200, this.agentCatalog.map((name) => ({ name })));
+    }
     if (method === "GET" && path === "/doc") {
       this.bump(method, path);
       return this.json(res, 200, { openapi: "3.1.0", paths: this.docPaths });
@@ -144,6 +153,7 @@ export class StubOpenCodeServer {
     if (method === "POST" && path === "/session") {
       this.bump(method, "/session");
       const b = (await this.body(req)) as { parentID?: string; title?: string };
+      this.lastBodies.set("POST /session", b);
       const id = `ses_${++this.seq}`;
       const session: StubSession = { id, parentID: b?.parentID, title: b?.title };
       this.sessions.set(id, session);
@@ -174,7 +184,11 @@ export class StubOpenCodeServer {
       }
       if (method === "POST" && sub === "message") {
         this.bump("POST", "/session/:id/message");
-        this.lastBodies.set("POST /session/:id/message", await this.body(req));
+        const msgBody = (await this.body(req)) as { agent?: string } | undefined;
+        this.lastBodies.set("POST /session/:id/message", msgBody);
+        if (this.failMessagesNamingAgent && msgBody?.agent) {
+          return this.json(res, 500, { name: "UnknownError", data: { message: "Unexpected server error.", ref: "err_stub" } });
+        }
         return this.json(res, 200, { id: `msg_${++this.seq}`, role: "assistant" });
       }
       if (method === "POST" && sub === "prompt_async") {

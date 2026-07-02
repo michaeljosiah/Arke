@@ -89,7 +89,10 @@ export class PermissionCoordinator {
         void this.client.pending().catch(() => null);
         resolve({ permissionId: id, status: "unconfirmed" });
       }, this.timeoutMs);
-      if (typeof timer.unref === "function") timer.unref();
+      // Deliberately NOT unref'd: this timer is the only wake-up for an in-flight human decision —
+      // an unref'd timer lets the event loop drain first, leaving the awaited ack forever pending
+      // (observed as "Promise resolution is still pending but the event loop has already resolved"
+      // on Linux CI). A bounded pending-operation timeout should keep the process alive.
       this.waiters.set(id, { resolve, timer });
     });
   }

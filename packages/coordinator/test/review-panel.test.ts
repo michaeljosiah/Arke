@@ -54,11 +54,12 @@ test("validateReviewers requires at least two reviewers", () => {
   assert.equal(validateReviewers(r, [{ role: "reviewer-a" }]).ok, false);
 });
 
-test("parseReviewerIssues reads a raw or fenced JSON array and drops malformed entries", () => {
+test("parseReviewerIssues reads a raw JSON array and defaults a missing section to 'general'", () => {
   const raw = '[{"section":"requirements > R1","severity":"blocking","text":"ambiguous"},{"section":"","text":"x"}]';
   const issues = parseReviewerIssues(raw);
-  assert.equal(issues.length, 1); // the empty-section entry is dropped
+  assert.equal(issues.length, 2); // a blank-section but non-empty-text entry is kept, not dropped
   assert.equal(issues[0]!.severity, "blocking");
+  assert.equal(issues[1]!.section, "general"); // blank section anchored to "general"
 
   const fenced = "Here are my findings:\n```json\n[{\"section\":\"design\",\"severity\":\"nonsense\",\"text\":\"t\"}]\n```\n";
   const f = parseReviewerIssues(fenced);
@@ -66,9 +67,45 @@ test("parseReviewerIssues reads a raw or fenced JSON array and drops malformed e
   assert.equal(f[0]!.severity, "suggestion"); // unknown severity normalised
 });
 
+test("parseReviewerIssues drops entries with no actionable text", () => {
+  const raw = '[{"section":"design","severity":"blocking","text":""},{"section":"design","text":"real issue"}]';
+  const issues = parseReviewerIssues(raw);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]!.text, "real issue");
+});
+
+test("parseReviewerIssues finds the real issues array inside a prose critique full of stray brackets", () => {
+  // The exact failure that yielded 0 issues on the Inner Siege review: a long prose analysis whose
+  // first '[' and last ']' bracket unrelated tokens, with the true array only at the very end.
+  const prose = [
+    "## Review",
+    "The spec marks organs 2–3 as `[STRETCH]` and references `[FR-01]`, `[FR-08]`, `[FR-10]`.",
+    "See the template at [specification.template.md](docs/specifications/specification.template.md).",
+    "My concrete findings follow.",
+    "```json",
+    "[",
+    '  {"section":"Requirements > FR-08","severity":"blocking","text":"Spread telegraph timing contradicts FR-10."},',
+    '  {"section":"Design > Data model","severity":"suggestion","text":"Cell-state enum omits the pre-spread state."}',
+    "]",
+    "```",
+  ].join("\n");
+  const issues = parseReviewerIssues(prose);
+  assert.equal(issues.length, 2, "must recover both issues, not choke on the stray brackets");
+  assert.equal(issues[0]!.severity, "blocking");
+  assert.match(issues[0]!.section, /FR-08/);
+});
+
+test("parseReviewerIssues picks the issue array even when a stray string array appears first", () => {
+  const text = 'Options I considered: ["wind","no-wind","gusts"].\n[{"section":"D","severity":"question","text":"why no wind?"}]';
+  const issues = parseReviewerIssues(text);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]!.text, "why no wind?");
+});
+
 test("parseReviewerIssues returns [] on unparseable output", () => {
   assert.deepEqual(parseReviewerIssues("no json here"), []);
   assert.deepEqual(parseReviewerIssues("[not valid json"), []);
+  assert.deepEqual(parseReviewerIssues("prose with [a] and [b] but no issue objects"), []);
 });
 
 test("sectionHashOf is stable and content-sensitive", () => {

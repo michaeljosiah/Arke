@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arke — Autonomous E2E Review · 2026-07-02</title>
+<style>
+  :root{
+    --bg:#0d1017; --panel:#151a23; --panel2:#1b2230; --ink:#e6edf3; --muted:#8b98a9;
+    --line:#242c3a; --accent:#4da3ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --mono:'SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+  .wrap{max-width:1000px;margin:0 auto;padding:48px 28px 96px}
+  header.masthead{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:34px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase}
+  h1{font-size:30px;margin:.35em 0 .1em;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:15px}
+  .meta{display:flex;gap:26px;flex-wrap:wrap;margin-top:18px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .meta b{color:var(--ink);font-weight:600}
+  h2{font-size:20px;margin:44px 0 6px;letter-spacing:-.01em}
+  h2 .n{font-family:var(--mono);color:var(--accent);font-size:14px;margin-right:10px}
+  h3{font-size:15.5px;margin:26px 0 6px}
+  p{margin:.5em 0}
+  .lead{font-size:16px;color:#cdd6e0}
+  section{border-top:1px solid var(--line);padding-top:8px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card .big{font-size:26px;font-weight:700;font-family:var(--mono);letter-spacing:-.02em}
+  .card .lbl{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+  .card.good .big{color:var(--good)} .card.warn .big{color:var(--warn)} .card.accent .big{color:var(--accent)}
+  ol.flow{list-style:none;counter-reset:step;padding:0;margin:18px 0}
+  ol.flow>li{position:relative;padding:14px 16px 14px 54px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:10px}
+  ol.flow>li::before{counter-increment:step;content:counter(step);position:absolute;left:14px;top:14px;width:26px;height:26px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--accent);font-family:var(--mono);font-size:13px;display:flex;align-items:center;justify-content:center;font-weight:600}
+  ol.flow>li b{display:block;margin-bottom:2px}
+  ol.flow>li .out{color:var(--muted);font-size:13.5px}
+  ol.flow>li .out .ok{color:var(--good)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  td code,p code,li code{font-family:var(--mono);font-size:12.5px;background:var(--panel2);padding:1px 5px;border-radius:4px;color:#b8c4d4}
+  .sev{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:20px;white-space:nowrap;font-weight:600}
+  .sev.crit{background:rgba(248,81,73,.13);color:var(--bad);border:1px solid rgba(248,81,73,.3)}
+  .sev.high{background:rgba(210,153,34,.13);color:var(--warn);border:1px solid rgba(210,153,34,.3)}
+  .sev.med{background:rgba(77,163,255,.12);color:var(--accent);border:1px solid rgba(77,163,255,.3)}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--good)}
+  .gap{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:14px 16px;margin:12px 0}
+  .gap.arch{border-left-color:var(--bad)}
+  .gap h4{margin:0 0 4px;font-size:14.5px}
+  .gap .why{color:var(--muted);font-size:13.5px}
+  .gap .fixidea{font-size:13px;margin-top:8px;color:#cdd6e0}
+  .gap .fixidea b{color:var(--accent);font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+  blockquote{margin:14px 0;padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:#cdd6e0;font-size:14px}
+  blockquote .q{color:var(--muted);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:5px}
+  .foot{margin-top:60px;border-top:1px solid var(--line);padding-top:20px;color:var(--muted);font-size:12.5px;font-family:var(--mono)}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);margin:0 4px 4px 0}
+  .pill.on{color:var(--good);border-color:rgba(63,185,80,.3)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="kicker">Arke · Specification Orchestrator · Autonomous QA run</div>
+    <h1>End-to-End Review: author → review → deliver → implement</h1>
+    <p class="sub">A single unattended pass drove the full product loop in a live browser against a live OpenCode harness, building a real game specification and starting its implementation — finding and fixing four substantive bugs along the way.</p>
+    <div class="meta">
+      <span>Date <b>2026-07-02</b></span>
+      <span>Branch <b>feat/spec-020-authoring</b></span>
+      <span>Harness <b>OpenCode 1.17.13</b></span>
+      <span>Subject spec <b>Inner Siege</b> (892 lines)</span>
+      <span>Verdict <b style="color:var(--good)">Loop complete</b></span>
+    </div>
+  </header>
+
+  <p class="lead">The brief was to create a project, author a "highly addictive" 2D browser game specification through genuine multi-turn discussion, run it through the cross-model review panel, act on the feedback, commit it, watch the delivery board move, and kick off implementation — fixing anything that blocked the path. Every stage completed. The path was <em>not</em> clear: the review panel was silently returning zero issues and the first implementer dispatch 400'd against live OpenCode. Both were real defects, now fixed with regression tests.</p>
+
+  <div class="cards">
+    <div class="card accent"><div class="big">5 / 5</div><div class="lbl">Loop stages passed</div></div>
+    <div class="card good"><div class="big">4</div><div class="lbl">Bugs fixed + tested</div></div>
+    <div class="card warn"><div class="big">8</div><div class="lbl">Gaps documented</div></div>
+    <div class="card good"><div class="big">396</div><div class="lbl">Unit tests green</div></div>
+    <div class="card accent"><div class="big">32</div><div class="lbl">Review issues surfaced</div></div>
+    <div class="card"><div class="big">29</div><div class="lbl">Impl tasks planned</div></div>
+  </div>
+
+  <!-- ================= JOURNEY ================= -->
+  <section>
+  <h2><span class="n">01</span>What was tested, and what happened</h2>
+  <p>Driven in Chrome (Claude preview) against the running coordinator + OpenCode server. Each step is a real user action; agent turns were polled to genuine completion, not simulated.</p>
+
+  <ol class="flow">
+    <li><b>Create a project</b>
+      <div class="out"><span class="ok">✓</span> <code>inner-siege</code> scaffolded on the workspace: <code>git init</code> + initial commit, full agent roster materialised (spec-author, reviewer-a/-b, implementer…), and a two-instance registry so the review panel has <em>distinct capable models</em>.</div></li>
+
+    <li><b>Author the spec — multi-turn, blank slate</b>
+      <div class="out"><span class="ok">✓</span> Three substantive rounds with <code>spec-author</code>. It opened by grounding itself in the (empty) repo, then ran two rounds of sharp product questions — pushing back that a 15s shot-clock <em>fights</em> precise aiming, and arguing the "3 linked cells" rule <em>is</em> a hex grid, not pixel terrain. It then wrote an <b>892-line</b> spec titled <em>"Inner Siege — vertical slice"</em>: 20 numbered EARS-style requirements (FR-01…FR-20), a hex-grid + flood-fill Design with data model, and a 29-item checkboxed task list with future work marked out of scope. The title was agent-derived; the <code>001</code> chronological number was preserved.</div></li>
+
+    <li><b>Convene the cross-model review panel</b>
+      <div class="out"><span class="ok">✓</span> Two reviewers on distinct models critiqued the same spec independently: <b>32 issues, 6 in agreement</b>. Real findings — the FR-10 "telegraph the prior round" paradox (a colony can't telegraph a spawn the round before it existed), FR-09 colony cardinality ambiguity, and an FR-11 (colony survives one hit) vs FR-12 (splash pops it) contradiction. <em>This stage was returning 0 issues before the fixes in §2.</em></div></li>
+
+    <li><b>Collect &amp; act on feedback → approve → commit</b>
+      <div class="out"><span class="ok">✓</span> Accepted the top agreed blocking issue (FR-10). It routed to <code>spec-author</code>, which revised the requirement (+3.9 KB) with a clean resolution: a freshly-formed colony <em>telegraphs</em> on its formation round and <em>spawns next</em> round — keeping FR-08's telegraph invariant absolute. Then <b>Approve &amp; persist</b> moved the spec <code>draft → in-review</code> and committed it to branch <code>spec/untitled-001</code>.</div></li>
+
+    <li><b>Delivery board moves; implementation begins &amp; is tracked</b>
+      <div class="out"><span class="ok">✓</span> The board — computed from frontmatter + session state, not drag-and-drop — moved the spec card into <b>IN REVIEW</b>, with <code>panel.complete · 32 issues</code> and <code>panel.agreed</code> in the live event stream. A simulated PR-approval webhook (non-owner approver, passing the fail-closed second-human gate) advanced it to <b>approved</b> and auto-fired task fan-out. The <em>Foundation</em> task dispatched to a real <code>implementer</code>, which produced a working <b>TypeScript + Canvas 2D</b> scaffold (<code>index.html</code>, <code>src/main.ts</code> with a delta-timed <code>requestAnimationFrame</code> loop, <code>package.json</code>, <code>tsconfig.json</code>). The board tracked that session live in the <b>IMPLEMENTING</b> column.</div></li>
+  </ol>
+
+  <blockquote>
+    <span class="q">Sample of the agent's own product reasoning (Round 2)</span>
+    "Your own rules — linked cells, adjacency, colony-of-3, cascade-pop — are describing a grid. Pixel terrain would force us to bolt a hidden grid on top anyway to make infection legible. I recommend a cellular grid of hex tissue cells, rendered organic so it <em>looks</em> gooey but <em>is</em> a clean lattice underneath."
+  </blockquote>
+  </section>
+
+  <!-- ================= FIXES ================= -->
+  <section>
+  <h2><span class="n">02</span>Bugs found &amp; fixed</h2>
+  <p>Each was blocking a stage of the loop, each is fixed on <code>feat/spec-020-authoring</code>, and each ships with a regression test that fails on the old code.</p>
+
+  <table>
+    <thead><tr><th>Sev</th><th>Defect</th><th>Root cause</th><th>Fix &amp; test</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="sev crit">CRIT</span></td>
+        <td>Review panel completed with <b>0 issues</b> on a 32-issue review</td>
+        <td>Two compounding bugs. (a) The pump ingested the <em>first</em> non-streaming <code>message.updated</code> — which is the reviewer's own <b>prompt</b> (role <code>user</code>), and the v2 prompt embeds an example issues array — so the parser extracted the <em>example</em> and marked the reviewer done before its real answer arrived. (b) The parser used <code>indexOf("[")…lastIndexOf("]")</code>, swallowing the whole span between the first and last bracket in 20 KB of prose (<code>[FR-01]</code>, <code>[STRETCH]</code>, links) → parse fail → nothing.</td>
+        <td>Gate ingest on <code>role === "assistant"</code> (only <code>session.idle</code> finalises the real answer). Rewrite the parser to enumerate <em>balanced</em> array candidates (fenced blocks first) and keep the one yielding the most well-formed issues. v2 reviewer prompt permits analysis but requires a closing <code>```json</code> block. <span class="tag">+3 unit, +1 integration test</span></td>
+      </tr>
+      <tr>
+        <td><span class="sev crit">CRIT</span></td>
+        <td>First implementer dispatch <b>400 BadRequest</b> — no task ever ran</td>
+        <td>Task fan-out passes the canonical spec id (<code>SPEC-2026-…</code>) as the <em>logical</em> parent session. <code>createSession</code> forwarded it as OpenCode's <code>parentID</code>, which 400s on any id that isn't a real <code>ses_…</code> session. The mock adapter accepts any parent, so the whole suite was green — only a live fan-out surfaced it.</td>
+        <td>Only forward a genuine <code>ses_</code> ref; a logical id makes the task a root session whose title still encodes the spec for ownership recovery. <span class="tag">+1 message-body test (records POST /session)</span></td>
+      </tr>
+      <tr>
+        <td><span class="sev high">HIGH</span></td>
+        <td>Coordinator wedged in a restart loop after an overnight OpenCode auto-update (1.17.11 → 1.17.13)</td>
+        <td>Three issues. (1) 1.17.13 validates <code>?directory=</code> with POSIX <code>isAbsolute</code> and 500s on <code>C:\…</code>. (2) A transient <code>spawn cmd.exe ENOENT</code> under Windows process churn emitted an <em>unhandled</em> <code>error</code> event on the harness child, crashing the coordinator. (3) An unbounded health <code>fetch</code> could hang the start loop.</td>
+        <td>Send the directory forward-slash on the wire; handle the child <code>error</code> event as a clean start-failure; bound the health probe with <code>AbortSignal.timeout(5s)</code>. <span class="tag">harness-process + auth tests updated</span></td>
+      </tr>
+      <tr>
+        <td><span class="sev high">HIGH</span></td>
+        <td>Turn-1 prompt misrouted to the wrong project after a silent WS reconnect</td>
+        <td>A silent WebSocket reconnect rebinds the connection to the <em>default</em> project; a queued prompt then dispatched to the wrong harness.</td>
+        <td>Client rebinds to the intended project (<code>desiredProjectId</code>) after a reconnect; the coordinator refuses <code>prompt.send</code> for a spec absent from the active project, naming the stale-client cause. <span class="tag">live.ts + project-context guard</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </section>
+
+  <!-- ================= GAPS ================= -->
+  <section>
+  <h2><span class="n">03</span>Gaps identified (not fixed this pass)</h2>
+  <p>Honest findings surfaced by driving the real loop. Ordered by impact. None blocked the E2E, but each is a rough edge worth a ticket.</p>
+
+  <div class="gap arch">
+    <h4>1 · Task worktrees aren't wired to the harness — parallel isolation doesn't hold <span class="sev crit">architectural</span></h4>
+    <div class="why">Fan-out creates a per-task git worktree (<code>.arke/worktrees/&lt;hash&gt;</code> on a task branch), but the implementer session is created on the <em>root-scoped</em> adapter. The observed result: the Foundation task's files landed in the project <b>root</b>, not its worktree, which stayed an untouched checkout. With the default concurrency of 10, ten implementers would write into one directory. On Windows this is compounded by OpenCode's inability to serve a non-primary directory (the same class of issue the per-root harness ports were built for).</div>
+    <div class="fixidea"><b>mitigation used</b> Ran the E2E with <code>ARKE_MAX_CONCURRENT_TASKS=1</code> so one task built cleanly. <b>Real fix</b> a per-worktree harness server (reuse <code>perRootHarnessPort</code>) so each task session is scoped to its own worktree directory.</div>
+  </div>
+
+  <div class="gap arch">
+    <h4>2 · Fan-out queue never auto-advances against OpenCode <span class="sev high">high</span></h4>
+    <div class="why">The queue drains on <code>session.status === "done"</code>, but the OpenCode adapter only ever emits <code>idle</code> for a finished turn — it has no <code>done</code>. So a completed task stays <code>running</code> and the next queued task never dispatches. The Foundation task finished and produced code, but tasks 2…29 remained queued.</div>
+    <div class="fixidea"><b>fix</b> Treat a task session's <code>idle</code>-after-dispatch as terminal for a single-turn implementer (it does exactly one turn), or have the adapter emit a synthetic <code>done</code> when a task session goes idle with no pending fan-out follow-up.</div>
+  </div>
+
+  <div class="gap">
+    <h4>3 · Client review panel shows "Review complete" while reviewers are still streaming <span class="sev med">medium</span></h4>
+    <div class="why">During the run the panel rendered <em>"Review complete · 0 issues"</em> for ~2 minutes while both reviewers were still mid-analysis. It was partly a symptom of the parse bugs (§2), but the UI also lacks a per-reviewer "reviewing…" state gated on <code>session.idle</code>.</div>
+    <div class="fixidea"><b>fix</b> Keep each reviewer column in a running state until its <code>panel.issue</code>/idle arrives; only show "complete" after <code>panel.complete</code>.</div>
+  </div>
+
+  <div class="gap">
+    <h4>4 · Project scaffold doesn't gitignore its own <code>.arke/</code> state <span class="sev med">medium</span></h4>
+    <div class="why">After the run, <code>git status</code> in <code>inner-siege</code> lists <code>.arke/sessions.ndjson</code>, <code>.arke/trace.ndjson</code>, <code>.arke/fanout.ndjson</code> and <code>.arke/worktrees/</code> as changes. The implementer added a node <code>.gitignore</code>, but the scaffold itself never writes a root <code>.gitignore</code> covering Arke's own runtime state, so it leaks into the user's working tree.</div>
+    <div class="fixidea"><b>fix</b> Scaffold a root <code>.gitignore</code> with <code>.arke/</code> (state) while keeping grounding rules intact.</div>
+  </div>
+
+  <div class="gap">
+    <h4>5 · Cold project open is slow (&gt; 90 s) <span class="sev med">medium</span></h4>
+    <div class="why">First open of a managed-harness project can exceed 90 s (spawn + health + model-catalog read). The client timeout was raised to 180 s so it no longer reports a false failure, but the latency itself is a poor first impression.</div>
+    <div class="fixidea"><b>fix</b> Stream readiness progress to the UI, and adopt an already-healthy server faster (the adopt path is in place; the catalog read dominates).</div>
+  </div>
+
+  <div class="gap">
+    <h4>6 · Harness version drift is unguarded <span class="sev med">medium</span></h4>
+    <div class="why">An unattended <code>opencode</code> auto-update (1.17.11 → 1.17.13) changed the <code>?directory=</code> wire contract overnight and wedged the coordinator until diagnosed. Arke trusts whatever <code>opencode</code> is on PATH.</div>
+    <div class="fixidea"><b>fix</b> Record the harness version at connect, warn on an untested range, and document a pinned/vendored harness option.</div>
+  </div>
+
+  <div class="gap">
+    <h4>7 · Reviewer model independence is registry-level only <span class="sev med">phase-2</span></h4>
+    <div class="why">The panel enforces distinct <em>capable model strings</em>, but both reviewers currently run through the same adapter instance. True multi-instance / multi-vendor physical routing (so a blind spot in one provider can't mask another) is Phase-2.</div>
+    <div class="fixidea"><b>fix</b> Route each reviewer to its own connected instance per the pinned <code>instanceId</code>.</div>
+  </div>
+
+  <div class="gap">
+    <h4>8 · The second-human approval gate needs a UI affordance <span class="sev med">low</span></h4>
+    <div class="why">Advancing to <code>approved</code> fails closed unless the PR approver differs from the spec <code>owner</code> (correct security posture — no self-approval). But a spec with no <code>owner</code>, or with no way to name a distinct approver, can never be approved. In this run the transition had to be driven by a webhook payload.</div>
+    <div class="fixidea"><b>fix</b> Surface owner/approver in the cockpit and make the approve action carry a non-owner reviewer identity.</div>
+  </div>
+  </section>
+
+  <!-- ================= EVIDENCE ================= -->
+  <section>
+  <h2><span class="n">04</span>Test &amp; artifact evidence</h2>
+  <h3>Automated suites (all green after the fixes)</h3>
+  <p>
+    <span class="pill on">adapter-opencode · 105 pass</span>
+    <span class="pill on">coordinator · 291 pass</span>
+    <span class="pill on">review-panel · 12 pass</span>
+    <span class="pill on">review-panel-integration · 5 pass</span>
+    <span class="pill on">harness-process · 10 pass</span>
+    <span class="pill on">message-body · 10 pass</span>
+  </p>
+  <h3>New regression tests (fail on the old code)</h3>
+  <ul>
+    <li><code>parseReviewerIssues</code> recovers the real array from a prose critique full of stray brackets, and picks the issue array over a stray string array.</li>
+    <li>The panel ingests the reviewer's <b>answer</b>, never the example array embedded in its <b>prompt</b> (drives a user-echo + assistant-reply through the real pump).</li>
+    <li><code>createSession</code> sends <code>parentID</code> only for a real <code>ses_</code> ref; a canonical spec id is omitted.</li>
+  </ul>
+  <h3>Artifacts produced</h3>
+  <ul>
+    <li><b>Specification</b> — <code>inner-siege/docs/specifications/001.untitled-001.md</code>, 892 lines, 20 requirements, committed on <code>spec/untitled-001</code>, status <code>approved</code>.</li>
+    <li><b>Working game scaffold</b> — TypeScript + Canvas 2D with a delta-timed render loop, produced by the <code>implementer</code> from the Foundation task.</li>
+    <li><b>Release</b> — <code>v0.1.0</code> tagged; the CI release workflow packages the client, source, and self-contained CLI binaries on <code>v*</code> tags.</li>
+    <li><b>Fixes</b> — commits <code>2a65e87</code>, <code>9b3245e</code>, <code>6a3e4c0</code> on <code>feat/spec-020-authoring</code>.</li>
+  </ul>
+  </section>
+
+  <section>
+  <h2><span class="n">05</span>Bottom line</h2>
+  <p class="lead">The propose·decide·execute loop works end to end against a live harness: an engineer can talk a blank slate into a rigorous, reviewed, committed specification, and the system will begin building it and track that work on a board it computes rather than one a human drags. Two of the four fixes were <em>invisible</em> failures — the review panel quietly returning nothing, and fan-out quietly 400-ing — the kind only a real, honest end-to-end run surfaces. The remaining gaps are concentrated in the implementation-fan-out edge (worktree isolation and the <code>idle</code>-vs-<code>done</code> drain); everything up to and including "start implementation" is solid.</p>
+  </section>
+
+  <div class="foot">
+    Generated autonomously during the QA run · Arke · 2026-07-02 · harness OpenCode 1.17.13 · all findings verified against the live system, not simulated.
+  </div>
+
+</div>
+</body>
+</html>

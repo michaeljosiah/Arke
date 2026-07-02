@@ -26,7 +26,7 @@ import {
   type OpenCodeConfig,
   type ResolvedModel,
 } from "./config.js";
-import { OpenCodeHttp } from "./http.js";
+import { OpenCodeError, OpenCodeHttp } from "./http.js";
 import { HarnessProcess } from "./harness-process.js";
 import { probeCapabilities } from "./capabilities.js";
 import {
@@ -58,6 +58,11 @@ interface OpenCodeProvidersDoc {
   }>;
 }
 
+/** True for a genuine OpenCode session ref (e.g. "ses_0de6…"); false for our logical spec ids. */
+function isOpenCodeSessionId(id: string): boolean {
+  return /^ses_/.test(id);
+}
+
 export interface OpenCodeAdapterDeps {
   /** Durable session ownership graph. Defaults to in-memory (durability needs a file store). */
   sessionStore?: SessionStore;
@@ -87,6 +92,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
   private deadLetterCount = 0;
   /** sessionId → correlationId of the in-flight turn, so emitted events attribute to it. */
   private readonly activeTurn = new Map<string, string>();
+  /**
+   * The agent names the connected server actually recognises for THIS directory (from `GET /agent`),
+   * or null when the catalog could not be read. OpenCode 500s on an unknown `agent`, and its
+   * per-directory agent loading is unreliable for non-primary directories — so we only ever send an
+   * agent the live catalog confirms (keep adapters honest about the backend's real surface).
+   */
+  private knownAgents: Set<string> | null = null;
   // Correlation state for the split transcript model (role on message.updated, text on the parts).
   private readonly normState: NormalizeState = createNormalizeState();
 
@@ -152,7 +164,23 @@ export class OpenCodeAdapter implements HarnessAdapter {
     this.caps = probe.capabilities;
     this._readiness = probe.readiness;
     if (probe.readiness.ready) {
+      await this.refreshAgentCatalog();
       await this.rebuildSessionGraph();
+    }
+  }
+
+  /**
+   * Read the live agent catalog for this adapter's directory (`GET /agent`). Best-effort: a failed
+   * read leaves `knownAgents` null and the configured agent names are trusted verbatim.
+   */
+  private async refreshAgentCatalog(): Promise<void> {
+    try {
+      const list = await this.http.req<Array<{ name?: string }>>("GET", "/agent");
+      this.knownAgents = new Set(
+        (list ?? []).map((a) => a?.name).filter((n): n is string => typeof n === "string" && n.length > 0),
+      );
+    } catch {
+      this.knownAgents = null; // catalog unavailable — degrade to trusting the caller's agent
     }
   }
 
@@ -165,7 +193,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
       cwd: this.http.directory,
       // Host-only credentials go into the child's environment, never to the client (NFR-1).
       env: this.config.password ? { OPENCODE_SERVER_PASSWORD: this.config.password } : undefined,
-      healthCheck: () => this.http.req("GET", "/global/health").then(() => true).catch(() => false),
+      // Bounded probe: an unresponsive socket must fail the poll, not wedge the whole start loop.
+      healthCheck: () =>
+        this.http.req("GET", "/global/health", undefined, { signal: AbortSignal.timeout(5_000) })
+          .then(() => true)
+          .catch(() => false),
       shell: process.platform === "win32", // resolve the `opencode` shim on Windows
       onExit: (code, signal) => {
         this._readiness = {
@@ -227,15 +259,20 @@ export class OpenCodeAdapter implements HarnessAdapter {
   // ---- sessions -----------------------------------------------------------
 
   async createSession(input: CreateSessionInput): Promise<SessionRef> {
+    // OpenCode rejects an unknown parentID with 400 BadRequest. Task fan-out (SPEC-009) uses the
+    // canonical spec id (e.g. "SPEC-2026-…") as its *logical* parent for grouping — that is NOT a real
+    // OpenCode session, so it must never be sent as parentID. Only forward a genuine "ses_…" ref; the
+    // task otherwise becomes a root session whose title still encodes the spec for ownership recovery.
+    const parentID = input.parent && isOpenCodeSessionId(input.parent) ? input.parent : undefined;
     const session = await this.http.req<{ id: string }>("POST", "/session", {
-      parentID: input.parent,
+      ...(parentID ? { parentID } : {}),
       title: input.specId, // title encodes the spec_id so REST resync can recover ownership
     });
     this.store.upsert({
       sessionId: session.id,
-      kind: input.parent ? "task" : "spec",
+      kind: input.parent ? "task" : "spec", // logical kind follows the caller's intent, not the wire parentID
       specId: input.specId,
-      parentSessionId: input.parent,
+      parentSessionId: input.parent, // keep the logical grouping (may be a canonical spec id)
     });
     return { sessionId: session.id };
   }
@@ -246,11 +283,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const correlationId = input.correlationId ?? `msg_${randomUUID()}`;
     this.activeTurn.set(input.sessionId, correlationId);
     try {
-      await this.http.req(
-        "POST",
-        `/session/${input.sessionId}/message`,
-        this.messageBody(input, correlationId),
-      );
+      await this.postMessage(`/session/${input.sessionId}/message`, input, correlationId);
       return { sessionId: input.sessionId, correlationId };
     } finally {
       // Sync turn is done when the POST returns; idle event also clears this defensively.
@@ -262,29 +295,69 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const correlationId = input.correlationId ?? `msg_${randomUUID()}`;
     // Stays set until session.idle: completion is signalled, never inferred by the caller.
     this.activeTurn.set(input.sessionId, correlationId);
-    await this.http.req(
-      "POST",
-      `/session/${input.sessionId}/prompt_async`,
-      this.messageBody(input, correlationId),
-    );
+    await this.postMessage(`/session/${input.sessionId}/prompt_async`, input, correlationId);
     return { sessionId: input.sessionId, correlationId };
   }
 
-  private messageBody(input: SendMessageInput, correlationId: string) {
+  /**
+   * POST a message body, self-healing around OpenCode's unreliable per-directory agent handling:
+   * a named agent can draw a 500 (UnknownError) even when the catalog listed it — the server's
+   * directory-scoped config loading is racy for non-primary directories. When a request that NAMED
+   * an agent fails with a 5xx, retry once WITHOUT the agent (OpenCode then uses its default), and
+   * record the degradation in the trace. A failure with no agent named is surfaced as-is — the
+   * error now carries the server's own detail (see {@link OpenCodeError}).
+   */
+  private async postMessage(path: string, input: SendMessageInput, correlationId: string): Promise<void> {
+    const body = this.messageBody(input, correlationId);
+    try {
+      await this.http.req("POST", path, body);
+    } catch (err) {
+      if (!(err instanceof OpenCodeError) || err.status < 500 || !body.agent) throw err;
+      const { agent: droppedAgent, ...withoutAgent } = body;
+      await this.http.req("POST", path, withoutAgent);
+      this.onLifecycleEvent?.({
+        kind: "agent.fallback",
+        harness: this.id,
+        agent: droppedAgent,
+        sessionId: input.sessionId,
+        reason: err.detail ?? `${err.status} ${err.statusText}`,
+        at: Date.now(),
+      });
+    }
+  }
+
+  private messageBody(input: SendMessageInput, _correlationId: string) {
     const m = this.resolveModel(input.tier);
     const body: {
-      messageID: string;
       agent?: string;
       model?: { providerID: string; modelID: string };
       parts: { type: "text"; text: string }[];
     } = {
-      // OpenCode's message API validates that `messageID` starts with "msg" (a caller-supplied
-      // correlationId — e.g. the cockpit's UUID — otherwise 400s). Coerce any non-conforming id to
-      // the same `msg_` shape the adapter uses by default, so no caller can produce a bad request.
-      messageID: this.toOpenCodeMessageId(correlationId),
-      ...(input.agent ? { agent: input.agent } : {}),
+      // NO client messageID: OpenCode orders a session's messages by id (its ids are monotonic,
+      // time-sortable), and a client-generated random id sorts BEFORE the last assistant reply — the
+      // agent loop then sees "no new user input" and exits at step 0, silently killing every turn
+      // after the first. Let the server assign the id; the correlationId stays client-side only
+      // (receipts + in-flight attribution never depended on the wire id).
       parts: input.parts.map((p) => ({ type: "text", text: p.text })),
     };
+    // Only name an agent the connected server actually recognises for this directory: OpenCode 500s
+    // (UnknownError) on an unknown `agent`, and its per-directory agent loading is unreliable for
+    // non-primary directories — a scaffolded roster on disk is no guarantee the catalog has it. When
+    // the agent is absent from a KNOWN catalog, omit the field (OpenCode uses its default agent) and
+    // record the degradation in the trace rather than hard-failing the whole turn.
+    if (input.agent) {
+      if (this.knownAgents === null || this.knownAgents.has(input.agent)) {
+        body.agent = input.agent;
+      } else {
+        this.onLifecycleEvent?.({
+          kind: "agent.unavailable",
+          harness: this.id,
+          agent: input.agent,
+          sessionId: input.sessionId,
+          at: Date.now(),
+        });
+      }
+    }
     // OpenCode's message API requires `model: { providerID, modelID }` (not { provider, name }). Only
     // send a model when Arke has a REAL one configured: the "gateway" value is Arke's not-configured
     // sentinel (an unmapped tier / empty `serves`), and OpenCode has no `gateway` provider — so omit
@@ -293,11 +366,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
       body.model = { providerID: m.provider, modelID: m.name };
     }
     return body;
-  }
-
-  /** Coerce a correlation id into an OpenCode-valid `messageID` (must start with `msg`). */
-  private toOpenCodeMessageId(id: string): string {
-    return /^msg/.test(id) ? id : `msg_${id.replace(/[^A-Za-z0-9_]/g, "")}`;
   }
 
   // ---- todos / diff / permissions / commands ------------------------------
@@ -604,7 +672,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
 }
 
 // Public surface for the coordinator and tests.
-export { OpenCodeHttp, OpenCodeError } from "./http.js";
+export { OpenCodeHttp, OpenCodeError, errorDetailFrom } from "./http.js";
 export { HarnessProcess, type HarnessProcessOptions } from "./harness-process.js";
 export {
   type OpenCodeConfig,

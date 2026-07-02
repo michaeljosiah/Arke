@@ -117,6 +117,25 @@ function LiveCockpit() {
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
   const scroller = React.useRef<any>(null);
+  // Grounding files (SPEC-020): host-side context for the discussion, uploaded via the composer.
+  const [grounding, setGrounding] = React.useState<any[]>([]);
+  const [uploading, setUploading] = React.useState(false);
+  const fileInput = React.useRef<any>(null);
+  const refreshGrounding = React.useCallback(() => {
+    void liveRequest('grounding.list').then((res: any) => { if (res?.ok && Array.isArray(res.result)) setGrounding(res.result); });
+  }, []);
+  React.useEffect(() => { refreshGrounding(); }, [refreshGrounding]);
+  const onFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    for (const f of Array.from(files)) {
+      const content = await f.text().catch(() => '');
+      await liveRequest('grounding.upload', { name: f.name, content });
+    }
+    setUploading(false);
+    if (fileInput.current) fileInput.current.value = '';
+    refreshGrounding();
+  };
 
   // Reset all per-spec state when the active spec changes, so a prompt is never routed to the prior
   // spec's session and the preview/conversation don't bleed across specs (PR #18 review round 4).
@@ -130,6 +149,25 @@ function LiveCockpit() {
     lastSentRole.current = undefined;
     lastSentTier.current = undefined;
   }, [specId]);
+
+  // Keep the store's activeSpec in step with the spec the cockpit actually resolved (fallback chain
+  // above), so the topbar breadcrumb never shows a stale/demo id while a different file is open.
+  React.useEffect(() => {
+    if (specId && activeSpec !== specId) store.set({ activeSpec: specId });
+  }, [specId, activeSpec]);
+
+  // One-shot opening nudge (SPEC-020): a freshly created blank spec arms cockpit.kickoffFor; the
+  // spec-author greets the engineer and asks what they want to achieve, so the slate never opens
+  // onto dead silence. Silent send — no human bubble; the flag clears first so it can't double-fire.
+  const kickoffFired = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const target = cockpit?.kickoffFor;
+    if (!target || target !== specId || kickoffFired.current === target) return;
+    if (!isCoordinatorConnected() || sending || convo.length > 0) return;
+    kickoffFired.current = target;
+    store.set((s: any) => ({ cockpit: { ...s.cockpit, kickoffFor: null } }));
+    void send('This is a brand-new blank specification the engineer just created. Greet them briefly and ask what they want to achieve with this change — one or two focused questions to draw out the goal and who it is for. Do not write to the specification file yet.');
+  }, [cockpit?.kickoffFor, specId, sending, convo.length]);
 
   // Resolve the live AUTHORING session for this spec. Authoring sessions are spec-kind sessions for
   // this spec (id !== specId) — NOT the spec status card and NOT implementation task sessions, which
@@ -195,7 +233,7 @@ function LiveCockpit() {
         // Label with the resolved model if the session carries one, else the tier the turn ran at
         // (client-safe; SPEC-005 keeps vendor model ids off the client).
         const label = modelLabel ?? tierByMsgId.current.get(t.messageId) ?? lastSentTier.current;
-        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming };
+        const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming, toolCalls: t.toolCalls || [] };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
         else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) {
@@ -207,9 +245,10 @@ function LiveCockpit() {
     });
   }, [transcriptSig, liveCard?.model]);
 
-  const send = async () => {
-    if (!draft.trim() || !specId || sending) return; // guard double-submit (PR #18 review round 4)
-    const text = draft.trim();
+  const send = async (overrideText?: string) => {
+    if (!(overrideText ?? draft).trim() || !specId || sending) return; // guard double-submit (PR #18 review round 4)
+    const text = (overrideText ?? draft).trim();
+    const silent = overrideText !== undefined; // a kickoff nudge: no optimistic human bubble, no draft touch
     const sentAs = role;
     setSending(true);
     try {
@@ -242,14 +281,19 @@ function LiveCockpit() {
       lastSentRole.current = sentAs;
       lastSentTier.current = tier;
       // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
-      // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4).
+      // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4). A silent
+      // kickoff nudge shows no human bubble and never touches the composer.
       const key = 'h:' + Date.now();
-      setConvo((c) => [...c, { key, kind: 'human', text }]);
-      setDraft('');
-      const outcome = await sendCockpitPrompt({ sessionId: sid, agent: sentAs, tier, message: text, correlationId });
+      if (!silent) {
+        setConvo((c) => [...c, { key, kind: 'human', text }]);
+        setDraft('');
+      }
+      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, tier, message: text, correlationId });
       if (outcome.status === 'rejected' || outcome.status === 'full') {
-        setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
-        setDraft((d) => d || text); // restore the text if the composer is still empty
+        if (!silent) {
+          setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
+          setDraft((d) => d || text); // restore the text if the composer is still empty
+        }
         return;
       }
       if (outcome.correlationId) roleByMsgId.current.set(outcome.correlationId, sentAs); // attribute the reply
@@ -275,9 +319,26 @@ function LiveCockpit() {
     else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `convene failed — ${res.error}` } }));
   };
 
-  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length]);
+  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length, sending, inFlight]);
 
   const turns = convo;
+  // Live activity (SPEC-020 UX): while a turn is in flight and the agent hasn't streamed visible text
+  // yet, show an animated thinking/working bubble instead of dead air — a long tool-using turn looks
+  // identical to a broken one otherwise. When the streaming entry carries toolCalls, name the latest.
+  const lastTurn: any = turns[turns.length - 1];
+  const streamingWithText = lastTurn && lastTurn.kind === 'agent' && lastTurn.streaming && (lastTurn.text || '').trim();
+  const liveTools: string[] = (lastTurn && lastTurn.kind === 'agent' && lastTurn.streaming && lastTurn.toolCalls) || [];
+  const showThinking = (sending || inFlight) && !streamingWithText;
+  const lastLiveTool: any = liveTools[liveTools.length - 1];
+  const thinkingLabel = liveTools.length ? `using ${lastLiveTool?.name ?? lastLiveTool}…` : 'thinking…';
+  const ThinkingDots = () => e('span', { style: { display: 'inline-flex', gap: 4, alignItems: 'center' } },
+    [0, 1, 2].map((i) => e('span', { key: i, style: { width: 5, height: 5, borderRadius: 999, background: 'var(--muted-foreground)', animation: 'soPulse 1.2s ease-in-out infinite', animationDelay: (i * 0.2) + 's' } })));
+  // Small mono chips naming the tools an agent turn used, indented to align under the bubble.
+  const ToolChips = ({ tools }: any) => (tools && tools.length)
+    ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, margin: '2px 0 0 31px' } },
+        tools.map((tc: any, i: number) => e('span', { key: i + String(tc?.name ?? tc), style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 7px' } },
+          e(Icon, { name: 'terminal', size: 10 }), (tc?.name ?? tc))))
+    : null;
 
   return e('div', { style: { display: 'flex', height: '100%' } },
     e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
@@ -288,15 +349,31 @@ function LiveCockpit() {
         e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId || !file?.exists || !(doc?.requirements?.length), onClick: () => void convene() }, 'Convene review')),
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
-        turns.length === 0 ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
-          : turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'))),
+        turns.length === 0 && !showThinking ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
+          : turns.map((m: any) => e('div', { key: m.key },
+              e(AgentMessage, { role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'),
+              m.kind === 'agent' ? e(ToolChips, { tools: m.toolCalls }) : null)),
+        showThinking ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, alignItems: 'flex-start' } },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
+            e('span', { style: { width: 24, height: 24, borderRadius: 'var(--radius-sm)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: 'bot', size: 13 })),
+            e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } }, lastSentRole.current ?? role),
+            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)' } }, thinkingLabel)),
+          e('div', { style: { padding: '12px 14px', borderRadius: '4px 12px 12px 12px', background: 'var(--secondary)' } }, e(ThinkingDots))) : null),
       e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
+        grounding.length ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
+          e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
+          grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
+            e(Icon, { name: 'file', size: 11 }), g.name))) : null,
         e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
           e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
           e(MiniSelect, { value: tier, icon: 'cpu', options: ['capable', 'mid', 'fast'], onChange: setTier })),
         e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
-        e('div', { style: { display: 'flex', alignItems: 'center', marginTop: 9 } },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
+          e('button', { onClick: () => fileInput.current?.click(), disabled: uploading, title: 'Upload files as grounding for the discussion',
+            style: { display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)' } },
+            e(Icon, { name: 'file', size: 13 }), uploading ? 'Uploading…' : 'Attach files'),
+          e('input', { ref: fileInput, type: 'file', multiple: true, style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) }),
           e('div', { style: { flex: 1 } }),
           e(Button, { size: 'sm', disabled: !specId || sending, onClick: () => void send() }, sending ? 'Sending…' : 'Send'))),
     ),

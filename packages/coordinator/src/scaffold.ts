@@ -299,9 +299,13 @@ export class ScaffoldRunner {
       case "grounding":
         return [{ relPath: "AGENTS.md", content: AGENTS_STUB }];
       case "plugins":
+        // These are ARKE-coordinator policy/projection stubs, not OpenCode plugins — they must NOT
+        // live under `.opencode/plugins/`, where OpenCode loads (and chokes on) them: a non-plugin
+        // module there crashes OpenCode's provider pipeline for the whole project (Provider.list →
+        // 500 on every message) whenever the project is a harness's primary directory.
         return [
-          { relPath: ".opencode/plugins/policy.ts", content: POLICY_STUB },
-          { relPath: ".opencode/plugins/projection.ts", content: PROJECTION_STUB },
+          { relPath: ".arke/plugins/policy.ts", content: POLICY_STUB },
+          { relPath: ".arke/plugins/projection.ts", content: PROJECTION_STUB },
         ];
       case "repos":
         return [{ relPath: ".repos/README.md", content: REPOS_README }];

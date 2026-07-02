@@ -41,7 +41,7 @@ test("a full scaffold creates the canonical artefacts and writes the manifest", 
   assert.ok(existsSync(resolve(root, "docs/specifications/specification.template.md")));
   assert.ok(existsSync(resolve(root, "docs/specifications/README.md")));
   assert.ok(existsSync(resolve(root, "AGENTS.md")));
-  assert.ok(existsSync(resolve(root, ".opencode/plugins/projection.ts")));
+  assert.ok(existsSync(resolve(root, ".arke/plugins/projection.ts")));
   // manifest records scaffold-time checksums
   const manifest = JSON.parse(readFileSync(resolve(root, ".arke/scaffold-manifest.json"), "utf8"));
   assert.equal(manifest.version, 1);

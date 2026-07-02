@@ -42,6 +42,10 @@ export type SpecFrontmatter = z.infer<typeof SpecFrontmatter>;
  * section against this outline; it is a view, not a second copy of the spec.
  */
 export const SPEC_ANATOMY = [
+  // Why / What changes lead the template and are where a blank-slate conversation starts (SPEC-020);
+  // without them in the anatomy, the agent's earliest writes were invisible in the live preview.
+  { key: "why", title: "Why", sections: [] },
+  { key: "what-changes", title: "What changes", sections: [] },
   {
     key: "requirements",
     title: "Requirements",

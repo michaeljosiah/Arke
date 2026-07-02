@@ -31,11 +31,12 @@ const SCREENS: Record<string, React.ComponentType<any>> = {
   settings: Settings,
 };
 
+// `{spec}` is substituted with the live active spec id at render (never a hardcoded demo id).
 const CRUMBS: Record<string, string[]> = {
   library: ['Specifications'],
-  cockpit: ['SPEC-014', 'Authoring cockpit'],
-  review: ['SPEC-014', 'Review panel'],
-  generation: ['SPEC-014', 'Generation'],
+  cockpit: ['{spec}', 'Authoring cockpit'],
+  review: ['{spec}', 'Review panel'],
+  generation: ['{spec}', 'Generation'],
   board: ['Delivery board'],
   session: ['Delivery board', 'Session'],
   diff: ['Delivery board', 'Diff review'],
@@ -94,7 +95,9 @@ export function Root() {
   }
 
   // Shell view — all navigable screens
-  const crumbs = [s.project.name, ...(CRUMBS[view] || [view])];
+  const crumbs = [s.project.name, ...(CRUMBS[view] || [view])]
+    // Substitute the LIVE active spec id (drop the crumb entirely when no spec is active yet).
+    .flatMap((c) => (c === '{spec}' ? (s.activeSpec ? [s.activeSpec] : []) : [c]));
 
   return e(React.Fragment, null,
     e(Shell, { crumbs },
