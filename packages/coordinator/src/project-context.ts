@@ -1577,6 +1577,13 @@ export class ProjectContext {
           // session yet. Reject rather than execute blindly; only a brand-new session's first online
           // prompt (unknown AND not a replay) is allowed through (PR #18 final review).
           throw new Error(`session '${sessionId}' is not active — replayed message rejected`);
+        } else if (a.specId && !this.findSpecFile(String(a.specId))) {
+          // Cross-project guard: an unknown session whose claimed spec does not exist in THIS
+          // project means the client is bound to the wrong active project (e.g. a silent reconnect
+          // reset it to the default). Executing would dispatch the prompt to the wrong harness.
+          throw new Error(
+            `spec '${String(a.specId)}' is not in project '${this.name}' — the client's active project looks stale; reopen the project and retry`,
+          );
         }
         // Anchor the turn to the session's working specification (SPEC-020): without an explicit
         // file reference the agent globs `docs/specifications/` and can guess the WRONG spec when

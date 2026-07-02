@@ -418,8 +418,27 @@ export async function reprobeRegistry(): Promise<void> {
   if (res?.ok && res.result) applyRegistrySnapshot(res.result);
 }
 
+// The project this client INTENDS to be on (set by every successful project.open). A reconnect
+// binds the fresh server-side connection to the DEFAULT project, so without re-binding, prompts
+// silently dispatch against the wrong project's harness while the UI still shows the intended one.
+let desiredProjectId: string | null = null;
+let rebindInFlight = false;
+
 /** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */
 function applySnapshot(snap: any) {
+  // A snapshot for a project OTHER than the one this client intends (e.g. the default-project
+  // snapshot pushed after a silent reconnect): do not apply it — re-open the intended project
+  // instead, whose own snapshot then arrives and applies. One attempt per mismatch; if the reopen
+  // fails, fall through to applying whatever the server sends so the UI is never stranded.
+  if (desiredProjectId && snap?.projectId && snap.projectId !== desiredProjectId && !rebindInFlight) {
+    rebindInFlight = true;
+    void liveRequest('project.open', { projectId: desiredProjectId }, 180000).then((res: any) => {
+      rebindInFlight = false;
+      if (!res?.ok) { desiredProjectId = null; store.set({ live: true }); }
+    });
+    return;
+  }
+  if (snap?.projectId && snap.projectId === desiredProjectId) rebindInFlight = false;
   const snapCards: any[] = Array.isArray(snap?.cards) ? snap.cards : [];
   cards.clear();
   specStatus.clear();
@@ -507,7 +526,10 @@ export async function openProjectLive(target: { projectId?: string; path?: strin
   // much longer than the default request window; allow 3 minutes so the UI doesn't report a
   // still-in-progress open as failed (observed cold spawns >90s on Windows).
   const res = await liveRequest('project.open', target, 180000);
-  if (res?.ok) void refreshRecents();
+  if (res?.ok) {
+    desiredProjectId = res.result?.projectId ?? null; // the project this client now intends to be on
+    void refreshRecents();
+  }
   return res;
 }
 

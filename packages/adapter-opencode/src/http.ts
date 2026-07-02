@@ -56,7 +56,10 @@ export class OpenCodeHttp {
   /** Build an absolute URL, always scoping to the validated project directory. */
   url(path: string): string {
     const u = new URL(path, this.config.baseUrl);
-    u.searchParams.set("directory", this.directory);
+    // Send the directory in forward-slash form: OpenCode ≥1.17.13 validates the param with
+    // POSIX-style isAbsolute and 500s ("Path is not absolute") on `C:\...`, while `C:/...` passes.
+    // The canonical Windows form stays internal for filesystem work; only the wire form changes.
+    u.searchParams.set("directory", this.directory.replaceAll("\\", "/"));
     return u.toString();
   }
 
@@ -72,11 +75,12 @@ export class OpenCodeHttp {
   }
 
   /** JSON request; throws {@link OpenCodeError} (with body detail) on a non-2xx status. */
-  async req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async req<T>(method: string, path: string, body?: unknown, init?: { signal?: AbortSignal }): Promise<T> {
     const res = await fetch(this.url(path), {
       method,
       headers: this.headers(),
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: init?.signal,
     });
     if (!res.ok) {
       // Surface WHY: OpenCode's error body names the failure (e.g. UnknownError + a ref) — a bare

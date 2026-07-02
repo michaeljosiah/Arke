@@ -188,7 +188,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
       cwd: this.http.directory,
       // Host-only credentials go into the child's environment, never to the client (NFR-1).
       env: this.config.password ? { OPENCODE_SERVER_PASSWORD: this.config.password } : undefined,
-      healthCheck: () => this.http.req("GET", "/global/health").then(() => true).catch(() => false),
+      // Bounded probe: an unresponsive socket must fail the poll, not wedge the whole start loop.
+      healthCheck: () =>
+        this.http.req("GET", "/global/health", undefined, { signal: AbortSignal.timeout(5_000) })
+          .then(() => true)
+          .catch(() => false),
       shell: process.platform === "win32", // resolve the `opencode` shim on Windows
       onExit: (code, signal) => {
         this._readiness = {

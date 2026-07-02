@@ -36,7 +36,8 @@ test("the password never appears in a built URL", () => {
 test("every request URL is scoped to the validated project directory", () => {
   const http = new OpenCodeHttp({ baseUrl: "http://127.0.0.1:4096", projectRoot });
   const url = new URL(http.url("/session/abc/todo"));
-  assert.equal(url.searchParams.get("directory"), projectRoot);
+  // The wire form is forward-slash (OpenCode ≥1.17.13 500s on backslash paths); same canonical dir.
+  assert.equal(url.searchParams.get("directory"), projectRoot.replaceAll("\\", "/"));
 });
 
 test("a configured project root that escapes is refused at construction", () => {
