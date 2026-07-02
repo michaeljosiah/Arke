@@ -503,9 +503,10 @@ export async function createSpecLive(title: string): Promise<{ specId: string } 
 
 /** Open/switch the active project; the coordinator re-snapshots. Returns the open result. */
 export async function openProjectLive(target: { projectId?: string; path?: string }): Promise<any> {
-  // A cold open may spawn + health-check a managed harness, which can take much longer than the
-  // default request window; allow 90s so the UI doesn't report a still-in-progress open as failed.
-  const res = await liveRequest('project.open', target, 90000);
+  // A cold open may spawn + health-check a managed harness AND read its model catalog, which can take
+  // much longer than the default request window; allow 3 minutes so the UI doesn't report a
+  // still-in-progress open as failed (observed cold spawns >90s on Windows).
+  const res = await liveRequest('project.open', target, 180000);
   if (res?.ok) void refreshRecents();
   return res;
 }

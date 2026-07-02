@@ -304,17 +304,17 @@ export class Coordinator {
   }
 
   /**
-   * After a scaffold writes the first `.arke/config.json` into a project that opened greenfield (its
-   * context holds a not-ready adapter), rebuild that context so it picks up the real harness. Without
-   * this the project still holds the NullAdapter and can't create sessions or run grounding until the
-   * coordinator restarts (PR #10 review). Re-snapshots the affected connections so the gate flips.
+   * After a scaffold writes into a project's own root, rebuild that context so it picks up what the
+   * scaffold produced: the `.arke/config.json` registry AND the `.opencode/agents` roster. This must
+   * run even when the harness was ALREADY live — a per-root OpenCode spawned pre-scaffold cached an
+   * agent catalog without the roster, so `spec-author` etc. would silently degrade to the default
+   * agent until a restart. Re-snapshots the affected connections so the gate/roster state is fresh.
    */
   private async reloadContextIfHarnessAppeared(ctx: ProjectContext, rawPath: unknown): Promise<void> {
     // Only the in-place case: a scaffold targeting the context's OWN root. A clone scaffolds a
     // subdirectory that becomes its own context on project.open (which already builds fresh deps).
     const target = resolve(ctx.root, typeof rawPath === "string" && rawPath.trim() ? rawPath : ".");
     if (target !== ctx.root) return;
-    if (ctx.adapter.readiness?.().ready !== false) return; // harness already live → nothing to do
     if (!existsSync(resolve(ctx.root, ".arke", "config.json"))) return; // no config was produced
     await this.reloadContext(ctx.projectId);
   }
