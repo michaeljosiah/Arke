@@ -13,7 +13,7 @@ function adapterIn(root: string): OpenCodeAdapter {
 const image: AgentImage = {
   name: "implementer",
   description: "Executes the Tasks; writes code on the feature branch.",
-  tier: "mid",
+  executor: { type: "omnigent", config: { harness: "opencode-native", model: "github-copilot/gpt-5.5", options: { reasoningEffort: "xhigh" } } },
   instructions: "You implement the approved specification's tasks.",
   interaction: { conversational: true, mode: "subagent" },
   tools: [],
@@ -22,19 +22,34 @@ const image: AgentImage = {
   subAgents: [],
 };
 
-test("materializeAgent writes the OpenCode convention with a logical tier (not a model id)", async () => {
+test("materializeAgent writes the OpenCode convention with the agent's declared model + options", async () => {
   const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-materialize-")));
   await adapterIn(root).materializeAgent(image);
 
   const md = readFileSync(join(root, ".opencode", "agents", "implementer.md"), "utf8");
   assert.match(md, /^---/);
   assert.match(md, /mode: subagent/);
-  assert.match(md, /tier: mid/);
+  assert.match(md, /model: github-copilot\/gpt-5.5/);
+  assert.match(md, /options:/);
+  assert.match(md, /reasoningEffort: xhigh/);
   assert.match(md, /permission:/);
   assert.match(md, /edit: allow/);
   assert.match(md, /You implement the approved specification/);
-  // the logical tier is the contract — no vendor model id is written
-  assert.equal(/claude|gpt|gemini|sonnet|opus/i.test(md), false);
+  // the tier indirection is gone — no `tier:` line
+  assert.equal(/^tier:/m.test(md), false);
+});
+
+test("a gateway/bare placeholder model is OMITTED from the materialised frontmatter", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-materialize-")));
+  await adapterIn(root).materializeAgent({
+    ...image,
+    name: "greenfield",
+    executor: { type: "omnigent", config: { harness: "opencode-native", model: "gateway/greenfield" } },
+  });
+  const md = readFileSync(join(root, ".opencode", "agents", "greenfield.md"), "utf8");
+  // gateway = "use the harness default" — writing `model: gateway/…` would make OpenCode resolve a
+  // literal non-existent model, so it must be omitted (the agent falls back to the harness default).
+  assert.equal(/^model:/m.test(md), false);
 });
 
 test("sub-agents are materialised as their own files", async () => {

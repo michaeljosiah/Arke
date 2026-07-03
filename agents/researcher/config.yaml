@@ -1,7 +1,13 @@
 spec_version: 1
 name: researcher
 description: "Gathers and summarises codebase + vendored context to ground authoring."
-tier: mid
+executor:
+  type: omnigent
+  config:
+    harness: opencode-native
+    model: github-copilot/gpt-5.5
+    auth:
+      profile: opencode-local
 instructions: AGENTS.md
 interaction:
   conversational: true

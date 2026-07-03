@@ -302,7 +302,7 @@ export function Picker() {
 }
 
 const SCAFFOLD = [
-  { id: 'config', icon: 'settings', title: 'Project configuration', detail: '.arke/config.json — the registry: tier→model mapping (capable/mid/fast) and the role roster; vendor model ids live only here', lines: ['+ .arke/config.json'] },
+  { id: 'config', icon: 'settings', title: 'Project configuration', detail: '.arke/config.json — provider/auth profiles (endpoint + host-side credentialsRef); agents declare their own model+provider', lines: ['+ .arke/config.json'] },
   { id: 'agents', icon: 'bot', title: 'Agent roster', detail: '.opencode/agents/ — six canonical roles: spec-author, architect, reviewer-a/b, implementer, researcher', lines: ['+ .opencode/agents/spec-author.md', '+ .opencode/agents/architect.md', '+ .opencode/agents/implementer.md', '+ .opencode/agents/researcher.md'] },
   { id: 'specs', icon: 'fileText', title: 'Specification structure', detail: 'docs/specifications/ with specification.template.md — SHALL statements, WHEN/THEN scenarios, delta tags', lines: ['+ docs/specifications/', '+ docs/specifications/specification.template.md'] },
   { id: 'grounding', icon: 'book', title: 'Grounding baseline', detail: 'AGENTS.md baseline stub, enriched in full by the researcher grounding session', lines: ['+ AGENTS.md', '+ .repos/ (read-only references)'] },
@@ -311,9 +311,7 @@ const SCAFFOLD = [
 
 export function Initialisation() {
   const project = useStore((s) => s.project);
-  const tiers = useStore((s) => s.tiers);
   const live = useStore((s) => s.live);
-  const tierDefaults = useStore((s) => s.tierDefaults);
   const projectState = useStore((s) => s.projectState);
   const missingSentinels = useStore((s) => s.missingSentinels);
   const scaffold = useStore((s) => s.scaffold);
@@ -325,30 +323,17 @@ export function Initialisation() {
   const [finished, setFinished] = React.useState(false);
 
   // In live mode the scaffold runs on the coordinator and its progress folds into store.scaffold;
-  // offline (prototype) it falls back to a simulation so the screen still demos. Tier defaults come
-  // from the registry — when absent, scaffolding is blocked rather than run with empty values (D9).
+  // offline (prototype) it falls back to a simulation so the screen still demos. Agents declare their
+  // own model+provider in their image (SPEC-016 revised), so scaffolding is never blocked on tiers —
+  // the `config` step writes .arke/config.json with gateway provider placeholders the engineer edits.
   const liveSteps = (scaffold && scaffold.steps) || {};
   const isDone = (id) => live ? (liveSteps[id] === 'done' || liveSteps[id] === 'skipped') : !!done[id];
   const isRunningStep = (id) => live ? liveSteps[id] === 'running' : running;
   const effLog = live ? ((scaffold && scaffold.log) || []) : log;
   const effRunning = live ? !!(scaffold && scaffold.running) : running;
   const effFinished = live ? !!(scaffold && scaffold.done) : finished;
-  // The coordinator now supplies gateway tier defaults even for a greenfield project, so scaffolding
-  // is no longer blocked: the `config` step writes .arke/config.json (which the engineer then edits
-  // with real models). Kept as a guard only for a truly empty registry.
-  const tiersBlocked = live && (!tierDefaults || !tierDefaults.capable || !tierDefaults.mid);
-  // Tier rows: registry-resolved models in live mode; the static prototype tiers otherwise. Three
-  // logical tiers — capable (authoring/review), mid (implementation), fast (routine/classification).
-  const tierRows = live
-    ? [
-        { tier: 'capable', label: 'Capable tier', model: (tierDefaults && tierDefaults.capable) || 'capable — not configured' },
-        { tier: 'mid', label: 'Mid tier', model: (tierDefaults && tierDefaults.mid) || 'mid — not configured' },
-        { tier: 'fast', label: 'Fast tier', model: (tierDefaults && tierDefaults.fast) || 'fast — not configured' },
-      ]
-    : tiers;
 
   const run = () => {
-    if (tiersBlocked) return;
     if (live) {
       store.set({ scaffold: { steps: {}, log: [], running: true, done: false } });
       // Scaffold the path the picker selected (the cloned subdir for a clone, '.' otherwise) so a
@@ -388,12 +373,8 @@ export function Initialisation() {
         e(Card, { padding: 18, style: { marginBottom: 16 } },
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, marginBottom: 8 } }, 'Repository'),
           e(Input, { mono: true, prefix: 'https://', value: repo, onChange: (ev) => setRepo(ev.target.value) }),
-          e('div', { style: { display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap' } },
-            tierRows.map((t) => e('div', { key: t.tier, style: { flex: '1 1 120px', minWidth: 0 } },
-              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 6 } }, t.label),
-              e(Input, { mono: true, size: 'sm', value: t.model, onChange: () => {} })))),
-          e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: tiersBlocked ? 'var(--warning, #B45309)' : 'var(--muted-foreground)', lineHeight: 1.5 } },
-            tiersBlocked ? 'tier defaults are not configured — configure the registry (.arke/config.json) before scaffolding' : 'agents reference logical tiers, resolved per project to the internal gateway')),
+          e('p', { style: { margin: '12px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } },
+            'Each agent declares its own model and provider in its image (agents/<name>/config.yaml); the config step writes .arke/config.json with gateway provider placeholders you edit host-side.')),
         e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
           SCAFFOLD.map((s) => e('div', { key: s.id, style: { display: 'flex', gap: 12, padding: '13px 15px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--card)' } },
             e('span', { style: { flex: 'none', width: 32, height: 32, borderRadius: 'var(--radius-md)', background: isDone(s.id) ? 'var(--success-bg)' : 'var(--secondary)', color: isDone(s.id) ? 'var(--success)' : 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: isDone(s.id) ? 'check' : s.icon, size: 17 })),
@@ -418,7 +399,7 @@ export function Initialisation() {
           e(Button, { variant: 'outline', onClick: () => store.set({ project: null, view: 'picker' }) }, 'Cancel'),
           effFinished
             ? e(Button, { iconLeft: e(Icon, { name: 'arrowRight', size: 15 }), onClick: () => store.set({ view: 'cockpit' }) }, 'Open authoring cockpit')
-            : e(Button, { disabled: effRunning || tiersBlocked, iconLeft: e(Icon, { name: effRunning ? 'refresh' : 'play', size: 15 }), onClick: run }, effRunning ? 'Scaffolding…' : 'Run scaffold')),
+            : e(Button, { disabled: effRunning, iconLeft: e(Icon, { name: effRunning ? 'refresh' : 'play', size: 15 }), onClick: run }, effRunning ? 'Scaffolding…' : 'Run scaffold')),
       ),
     ),
   );

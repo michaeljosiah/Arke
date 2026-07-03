@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import type {
+  AgentImage,
   Capability,
   CreateSessionInput,
   DomainEvent,
@@ -19,7 +20,7 @@ import { Coordinator } from "../src/server.js";
 import { Trace } from "../src/trace.js";
 import { GrantStore } from "../src/grant-store.js";
 import { ProjectRegistry } from "../src/project-registry.js";
-import type { RegistryConfig } from "../src/registry.js";
+import { AgentRegistry } from "../src/agent-registry.js";
 
 const BRANCH = "feat/multi-model-review-panel";
 const SECTION = "requirements > Requirement: A thing";
@@ -67,20 +68,27 @@ function repoWithSpec(): string {
   return dir;
 }
 
-/** A two-instance registry with distinct capable models so a default panel validates. */
-function registryConfig(capableModels = ["anthropic/opus", "github-copilot/gpt"]): RegistryConfig {
-  const instances = [
-    { id: "claude-local", driver: "claude-code", host: "localhost", cwd: ".", credentialsRef: "c/d", serves: [{ tier: "capable" as const, model: capableModels[0]! }] },
-    ...(capableModels[1] ? [{ id: "opencode-local", driver: "opencode", host: "localhost", cwd: ".", credentialsRef: "o/g", serves: [{ tier: "capable" as const, model: capableModels[1]! }] }] : []),
-  ];
+/** An agent image pinning a concrete model on an OpenCode harness (SPEC-016 revised — agent IS model). */
+function agentImage(name: string, model: string): AgentImage {
   return {
-    instances,
-    roster: {
-      "spec-author": { tier: "capable" },
-      "reviewer-a": { tier: "capable", instance: "claude-local" },
-      "reviewer-b": { tier: "capable", instance: capableModels[1] ? "opencode-local" : "claude-local" },
-    },
+    name,
+    executor: { type: "omnigent", config: { harness: "opencode-native", model, auth: { profile: "opencode-local" } } },
+    interaction: { conversational: name === "spec-author", mode: name === "spec-author" ? "primary" : "subagent" },
+    tools: [],
+    skills: [],
+    permission: name.startsWith("reviewer") ? { edit: "deny", bash: "deny" } : { edit: "allow", bash: "ask" },
+    subAgents: [],
   };
+}
+
+/** A roster with distinct reviewer models so a default panel validates (a single model → dup → reject). */
+function reviewerAgents(models = ["anthropic/opus", "github-copilot/gpt"]): AgentRegistry {
+  const images = [
+    agentImage("spec-author", "anthropic/opus"),
+    agentImage("reviewer-a", models[0]!),
+    agentImage("reviewer-b", models[1] ?? models[0]!),
+  ];
+  return new AgentRegistry(images, { "opencode-local": { harness: "opencode", host: "localhost", port: 4096, credentialsRef: "o/g" } });
 }
 
 /** An adapter that, when a reviewer is dispatched, emits a completed turn carrying JSON issues. */
@@ -127,12 +135,11 @@ class ReviewMockAdapter implements HarnessAdapter {
   }
 }
 
-async function start(dir: string, cfg: RegistryConfig) {
+async function start(dir: string, reg: AgentRegistry) {
   const c = new Coordinator(new ReviewMockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
     projectRoot: dir,
     registry: new ProjectRegistry({ persist: false }),
-    registryConfig: cfg,
-    connectedInstanceId: "claude-local",
+    agents: reg,
     idleTtlMs: 0,
   });
   const port = await c.start();
@@ -170,7 +177,7 @@ function connect(port: number) {
 
 test("a panel runs end to end: issues, agreement, completion — and satisfies the approval gate", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, registryConfig());
+  const { c, port } = await start(dir, reviewerAgents());
   after(() => c.stop());
   const { ws, ready, request, ev, frames } = connect(port);
   await ready;
@@ -178,7 +185,7 @@ test("a panel runs end to end: issues, agreement, completion — and satisfies t
   const conv = await request("convenePanel", { specId: "SPEC-TEST" });
   assert.equal(conv.ok, true);
   assert.equal(conv.result.reviewers.length, 2);
-  assert.ok(/capable — /.test(conv.result.reviewers[0].model)); // tier label, not a vendor id
+  assert.ok(/·/.test(conv.result.reviewers[0].model)); // client-safe label (harness · model), not a bare vendor id
 
   await ev("panel.started");
   await ev("panel.issue", (e) => e.reviewerRole === "reviewer-a");
@@ -202,7 +209,7 @@ test("a panel runs end to end: issues, agreement, completion — and satisfies t
 
 test("approveDraft is blocked by the review gate until a panel completes", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, registryConfig());
+  const { c, port } = await start(dir, reviewerAgents());
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;
@@ -215,9 +222,9 @@ test("approveDraft is blocked by the review gate until a panel completes", async
   ws.close();
 });
 
-test("convenePanel rejects a config without enough distinct capable models", async () => {
+test("convenePanel rejects a roster whose reviewers declare the same model", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, registryConfig(["anthropic/opus"])); // one capable model only
+  const { c, port } = await start(dir, reviewerAgents(["anthropic/opus"])); // reviewer-b falls back to the same model
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;
@@ -288,8 +295,7 @@ test("the panel ingests the reviewer's ANSWER, never the example array embedded 
   const c = new Coordinator(new PromptEchoMockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
     projectRoot: dir,
     registry: new ProjectRegistry({ persist: false }),
-    registryConfig: registryConfig(),
-    connectedInstanceId: "claude-local",
+    agents: reviewerAgents(),
     idleTtlMs: 0,
   });
   const port = await c.start();
@@ -318,7 +324,7 @@ test("the panel ingests the reviewer's ANSWER, never the example array embedded 
 
 test("adjudicate: dismiss records the decision; accept routes to the authoring agent", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, registryConfig());
+  const { c, port } = await start(dir, reviewerAgents());
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;

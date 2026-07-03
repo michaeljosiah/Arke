@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { DomainEvent } from "./events.js";
-import type { ModelTier } from "./spec.js";
 import type { AgentImage } from "./agent-image.js";
 
 /**
@@ -39,12 +38,26 @@ export interface MessagePart {
   text: string;
 }
 
+/**
+ * The concrete model an agent runs on, resolved from its `executor.config` (SPEC-016 revised).
+ * The coordinator reads it off the agent image and passes it on each dispatch; the adapter emits it
+ * to the harness verbatim. Absent → the harness uses the agent's own materialised/default model.
+ */
+export interface AgentModel {
+  /** Provider namespace, e.g. "github-copilot" | "openai" | "anthropic". */
+  provider: string;
+  /** Model id within the provider, e.g. "gpt-5.5". */
+  name: string;
+  /** Model options passed to the harness, e.g. `{ reasoningEffort: "xhigh" }`. */
+  options?: Record<string, string>;
+}
+
 export interface SendMessageInput {
   sessionId: string;
-  /** Named agent role, e.g. "product-owner" | "technical-architect" | "engineering". */
+  /** Named agent, e.g. "spec-author" | "implementer" | "reviewer-a". */
   agent: string;
-  /** Logical model tier; the router resolves tier → model → harness (FR-4, D11). */
-  tier: ModelTier;
+  /** Concrete model resolved from the agent's `executor.config`; omitted → the agent's own default. */
+  model?: AgentModel;
   parts: MessagePart[];
   /**
    * Caller-supplied correlation id (the harness `messageID`, SPEC-002). Lets the

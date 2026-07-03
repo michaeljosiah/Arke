@@ -3,7 +3,7 @@ import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
 import { AgentMessage, Button, Textarea, Badge, StatusDot } from '../ds';
 import { store, useStore } from '../store';
-import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected } from '../live';
+import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected, fetchModels, configureAgent } from '../live';
 
 const e = React.createElement;
 
@@ -16,7 +16,7 @@ function textSig(s: string): number {
 }
 
 // ============================ LIVE MODE (SPEC-006) ============================
-// The authoring agents surfaced in the composer (capable tier; the registry resolves the model).
+// The authoring agents surfaced in the composer; each agent declares its own model (SPEC-016 revised).
 const LIVE_ROLES = ['spec-author', 'architect'];
 const PREVIEW_POLL_MS = 30000; // fallback re-poll guarding against a missed message.updated
 
@@ -100,8 +100,23 @@ function LiveCockpit() {
   const [refreshed, setRefreshed] = React.useState(false);
   const [draft, setDraft] = React.useState('');
   const [role, setRole] = React.useState('spec-author');
-  const [tier, setTier] = React.useState('capable');
   const [sessionId, setSessionId] = React.useState<string | null>(null);
+  // The selected agent's DECLARED model (SPEC-016 revised — the agent owns its model+provider, no
+  // per-turn tier). Looked up from the live roster; a client-safe label (`harness · model`).
+  const roster = useStore((s: any) => s.roster) as any[];
+  const rosterEntry = React.useMemo(() => (roster || []).find((x: any) => x.role === role), [roster, role]);
+  const agentModelLabel = React.useMemo(() => {
+    if (!rosterEntry) return null;
+    return rosterEntry.reasoningEffort ? `${rosterEntry.label} · ${rosterEntry.reasoningEffort}` : rosterEntry.label;
+  }, [rosterEntry]);
+  // Agent-model editor (SPEC-016 revised): click the chip to pick a provider → model → reasoning
+  // effort from the harness catalog and persist it to the agent's image (agent.configure).
+  const [editingModel, setEditingModel] = React.useState(false);
+  const [catalog, setCatalog] = React.useState<any[]>([]);
+  const openModelEditor = () => {
+    setEditingModel(true);
+    if (isCoordinatorConnected()) void fetchModels().then(setCatalog).catch(() => setCatalog([]));
+  };
   // A single ordered conversation: human turns are appended when accepted, agent turns are merged
   // from the live transcript as they arrive — so order is chronological (PR #18 review round 2).
   const [convo, setConvo] = React.useState<any[]>([]);
@@ -109,10 +124,10 @@ function LiveCockpit() {
   // own attribution even if the composer's role selector changes later (PR #18 review round 2).
   const roleByMsgId = React.useRef<Map<string, string>>(new Map());
   const lastSentRole = React.useRef<string | undefined>(undefined); // fallback attribution
-  // The tier each turn ran at (client-safe label; vendor model ids never reach the client per
-  // SPEC-005). Shown on agent turns when the session card carries no resolved model (PR #18 round 6).
-  const tierByMsgId = React.useRef<Map<string, string>>(new Map());
-  const lastSentTier = React.useRef<string | undefined>(undefined);
+  // The model label each turn ran on (client-safe `harness · model`, the agent's declared model —
+  // SPEC-016 revised). Shown on agent turns when the session card carries no resolved model.
+  const modelByMsgId = React.useRef<Map<string, string>>(new Map());
+  const lastSentModel = React.useRef<string | undefined>(undefined);
   const latestSpec = React.useRef<string | null>(specId); // guards against stale spec.file responses
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
@@ -145,9 +160,9 @@ function LiveCockpit() {
     setConvo([]);
     setFile(null);
     roleByMsgId.current = new Map();
-    tierByMsgId.current = new Map();
+    modelByMsgId.current = new Map();
     lastSentRole.current = undefined;
-    lastSentTier.current = undefined;
+    lastSentModel.current = undefined;
   }, [specId]);
 
   // Keep the store's activeSpec in step with the spec the cockpit actually resolved (fallback chain
@@ -232,7 +247,7 @@ function LiveCockpit() {
         const key = 'a:' + t.messageId;
         // Label with the resolved model if the session carries one, else the tier the turn ran at
         // (client-safe; SPEC-005 keeps vendor model ids off the client).
-        const label = modelLabel ?? tierByMsgId.current.get(t.messageId) ?? lastSentTier.current;
+        const label = modelLabel ?? modelByMsgId.current.get(t.messageId) ?? lastSentModel.current;
         const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming, toolCalls: t.toolCalls || [] };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
@@ -271,15 +286,16 @@ function LiveCockpit() {
       if (sid !== sessionId) setSessionId(sid); // remember the (created or reused) session
       // Record the reply's attribution + tier BEFORE awaiting: prompt.send resolves only when the
       // turn completes, by which time the transcript (and its agent turn) may already be merged — so
-      // set roleByMsgId/tierByMsgId by a client-generated correlationId now, with lastSent* fallbacks
+      // set roleByMsgId/modelByMsgId by a client-generated correlationId now, with lastSent* fallbacks
       // for turns whose messageId differs from the correlationId (PR #18 review rounds 5–6).
       // Prefix with `msg` so it is a valid OpenCode messageID (the harness rejects ids that don't) and
       // stays identical on the wire — keeping the correlationId the transcript is attributed by intact.
       const correlationId = `msg_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}${Math.random().toString(36).slice(2)}`).replace(/-/g, '')}`;
+      const modelLabelForTurn = agentModelLabel ?? sentAs;
       roleByMsgId.current.set(correlationId, sentAs);
-      tierByMsgId.current.set(correlationId, tier);
+      modelByMsgId.current.set(correlationId, modelLabelForTurn);
       lastSentRole.current = sentAs;
-      lastSentTier.current = tier;
+      lastSentModel.current = modelLabelForTurn;
       // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
       // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4). A silent
       // kickoff nudge shows no human bubble and never touches the composer.
@@ -288,7 +304,7 @@ function LiveCockpit() {
         setConvo((c) => [...c, { key, kind: 'human', text }]);
         setDraft('');
       }
-      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, tier, message: text, correlationId });
+      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, message: text, correlationId });
       if (outcome.status === 'rejected' || outcome.status === 'full') {
         if (!silent) {
           setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
@@ -364,9 +380,25 @@ function LiveCockpit() {
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
           grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
             e(Icon, { name: 'file', size: 11 }), g.name))) : null,
-        e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
-          e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
-          e(MiniSelect, { value: tier, icon: 'cpu', options: ['capable', 'mid', 'fast'], onChange: setTier })),
+        e('div', { style: { position: 'relative', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+          e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: (v: any) => { setRole(v); setEditingModel(false); } }),
+          // The model is the agent's own (SPEC-016 revised). Click to edit it (provider → model →
+          // effort from the harness catalog); the choice persists to the agent's image.
+          e('button', { onClick: openModelEditor, title: 'Change this agent’s model — writes to its image (agents/<name>/config.yaml)',
+            style: { display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '3px 9px', cursor: 'pointer' } },
+            e(Icon, { name: 'cpu', size: 11 }), agentModelLabel || 'model set by agent',
+            e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'chevronDown', size: 11 }))),
+          editingModel ? e(AgentModelEditor, {
+            role,
+            current: rosterEntry,
+            catalog,
+            onClose: () => setEditingModel(false),
+            onSave: async (provider: string, model: string, effort?: string) => {
+              const res = await configureAgent(role, provider, model, effort);
+              if (res.ok) setEditingModel(false);
+              return res;
+            },
+          }) : null),
         e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
         e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
@@ -429,6 +461,68 @@ function MiniSelect({ value, options, onChange, icon }: any) {
     open ? e('div', { style: { position: 'absolute', bottom: 30, left: 0, minWidth: 150, background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)', zIndex: 40, padding: 4 } },
       options.map((o: any) => e('button', { key: o, onClick: () => { onChange(o); setOpen(false); }, style: { display: 'block', width: '100%', textAlign: 'left', padding: '6px 9px', borderRadius: 'var(--radius-sm)', border: 'none', background: o === value ? 'var(--accent)' : 'transparent', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--foreground)' } }, o))) : null,
   );
+}
+
+/** Split a `provider/model` string; a bare name resolves to the `gateway` (harness-default) sentinel. */
+function splitModel(m?: string): { provider: string; name: string } {
+  if (!m) return { provider: 'gateway', name: '' };
+  const i = m.indexOf('/');
+  return i > 0 ? { provider: m.slice(0, i), name: m.slice(i + 1) } : { provider: 'gateway', name: m };
+}
+
+function editorRow(label: string, control: any) {
+  return e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 } },
+    e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, label), control);
+}
+
+/**
+ * The agent-model editor (SPEC-016 revised): pick a provider → model → reasoning effort from the
+ * harness catalog and persist it to the agent's image. Populated from `models.list`; the model list
+ * filters to the selected provider. Falls back to the current declaration when the catalog is empty.
+ */
+function AgentModelEditor({ role, current, catalog, onClose, onSave }: any) {
+  const init = splitModel(current?.model);
+  const [provider, setProvider] = React.useState(init.provider);
+  const [model, setModel] = React.useState(init.name);
+  const [effort, setEffort] = React.useState(current?.reasoningEffort || 'default');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const ref = React.useRef<any>(null);
+  React.useEffect(() => { const h = (ev: any) => { if (ref.current && !ref.current.contains(ev.target)) onClose(); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+
+  const providers = React.useMemo(() => {
+    const set = new Set<string>((catalog || []).map((m: any) => m.provider));
+    set.add(init.provider); // keep the current provider selectable even when the catalog is empty
+    set.add('gateway');     // the harness-default sentinel (no per-agent override)
+    return [...set].sort();
+  }, [catalog]);
+  const models = React.useMemo(() => {
+    const ids = (catalog || []).filter((m: any) => m.provider === provider).map((m: any) => m.id);
+    if (provider === init.provider && init.name && !ids.includes(init.name)) ids.push(init.name);
+    return [...new Set<string>(ids)].sort();
+  }, [catalog, provider]);
+  // When the provider changes, snap to a valid model for it (unless the current one still fits).
+  React.useEffect(() => { if (models.length && !models.includes(model)) setModel(models[0]); }, [provider]);
+
+  const save = async () => {
+    if (!model) { setError('pick a model'); return; }
+    setSaving(true); setError(null);
+    const res = await onSave(provider, model, effort === 'default' ? undefined : effort);
+    setSaving(false);
+    if (!res.ok) setError(res.error || 'failed to save');
+  };
+
+  return e('div', { ref, style: { position: 'absolute', bottom: 36, left: 0, zIndex: 50, width: 320, background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)', padding: 12 } },
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, marginBottom: 8 } }, `Model for ${role}`),
+    (catalog || []).length === 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', marginBottom: 8, lineHeight: 1.5 } }, 'Harness catalog unavailable (offline or no models capability) — the current provider stays selectable.') : null,
+    e('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+      editorRow('Provider', e(MiniSelect, { value: provider, icon: 'server', options: providers, onChange: setProvider })),
+      editorRow('Model', e(MiniSelect, { value: model || '—', icon: 'cpu', options: models.length ? models : [model || '—'], onChange: setModel })),
+      editorRow('Reasoning', e(MiniSelect, { value: effort, icon: 'zap', options: ['default', 'low', 'medium', 'high', 'xhigh'], onChange: setEffort }))),
+    error ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--destructive)', marginTop: 8 } }, error) : null,
+    e('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 } },
+      e(Button, { variant: 'outline', size: 'sm', onClick: onClose }, 'Cancel'),
+      e(Button, { size: 'sm', disabled: saving, onClick: save }, saving ? 'Saving…' : 'Save')));
 }
 
 function Section({ title, children, editing }: any) {

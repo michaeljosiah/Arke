@@ -47,7 +47,7 @@ test("no client messageID is ever sent — the server assigns its own monotonic 
   // killing every turn after the first. The receipt still carries the client correlationId.
   const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", correlationId: "msg_client_corr_1", parts: [{ type: "text", text: "hi" }] });
+  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", correlationId: "msg_client_corr_1", parts: [{ type: "text", text: "hi" }] });
   assert.equal("messageID" in lastMessageBody(), false, "wire body must not carry a client messageID");
   assert.equal(receipt.correlationId, "msg_client_corr_1"); // correlation stays client-side
 });
@@ -55,7 +55,7 @@ test("no client messageID is ever sent — the server assigns its own monotonic 
 test("an absent correlationId still yields a receipt correlationId (client-side only)", async () => {
   const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
   assert.match(receipt.correlationId, /^msg_/);
   assert.equal("messageID" in lastMessageBody(), false);
 });
@@ -74,32 +74,39 @@ test("createSession sends parentID only for a real ses_ ref; a canonical spec id
   assert.equal(goodParent.parentID, "ses_realparent123", "a genuine session ref is forwarded");
 });
 
-test("a real configured model is sent as { providerID, modelID }", async () => {
-  const adapter = makeAdapter({ resolveModel: () => ({ provider: "openai", name: "gpt-5.3-codex-spark" }) });
+test("the agent's resolved model is sent as { providerID, modelID }", async () => {
+  const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", model: { provider: "openai", name: "gpt-5.3-codex-spark" }, parts: [{ type: "text", text: "hi" }] });
   assert.deepEqual(lastMessageBody().model, { providerID: "openai", modelID: "gpt-5.3-codex-spark" });
 });
 
-test("a model with a reasoning effort emits model.options.reasoningEffort (gpt-5.5 xhigh)", async () => {
-  const adapter = makeAdapter({ resolveModel: () => ({ provider: "github-copilot", name: "gpt-5.5", reasoningEffort: "xhigh" }) });
+test("a model with options emits model.options (gpt-5.5 xhigh)", async () => {
+  const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: "build it" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", model: { provider: "github-copilot", name: "gpt-5.5", options: { reasoningEffort: "xhigh" } }, parts: [{ type: "text", text: "build it" }] });
   assert.deepEqual(lastMessageBody().model, { providerID: "github-copilot", modelID: "gpt-5.5", options: { reasoningEffort: "xhigh" } });
 });
 
-test("a model without a reasoning effort sends no options key", async () => {
-  const adapter = makeAdapter({ resolveModel: () => ({ provider: "github-copilot", name: "claude-sonnet-4.5" }) });
+test("a model without options sends no options key", async () => {
+  const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", model: { provider: "github-copilot", name: "claude-sonnet-4.5" }, parts: [{ type: "text", text: "hi" }] });
   const model = lastMessageBody().model as Record<string, unknown>;
   assert.equal("options" in model, false);
 });
 
-test("the unconfigured gateway placeholder omits the model entirely (OpenCode uses its default)", async () => {
-  const adapter = makeAdapter({ resolveModel: () => ({ provider: "gateway", name: "capable-tier" }) });
+test("an absent model (agent pins none) omits the model entirely — OpenCode uses the agent's default", async () => {
+  const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
+  assert.equal("model" in lastMessageBody(), false);
+});
+
+test("the gateway sentinel provider omits the model entirely", async () => {
+  const adapter = makeAdapter();
+  const s = await adapter.createSession({ specId: "SPEC-A" });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", model: { provider: "gateway", name: "capable" }, parts: [{ type: "text", text: "hi" }] });
   assert.equal("model" in lastMessageBody(), false);
 });
 
@@ -110,7 +117,7 @@ test("an agent present in the live catalog is sent through", async () => {
   const adapter = makeAdapter();
   await adapter.init(); // reads the catalog
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
   assert.equal(lastMessageBody().agent, "spec-author");
 });
 
@@ -125,7 +132,7 @@ test("an agent ABSENT from a known catalog is omitted (degrade to the server def
   });
   await adapter.init();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
   assert.equal("agent" in lastMessageBody(), false, "unknown agent must be omitted, not sent");
   const note = lifecycle.find((r) => r.kind === "agent.unavailable");
   assert.ok(note, "the degradation is recorded in the trace");
@@ -146,7 +153,7 @@ test("a 5xx on an agent-naming send retries once WITHOUT the agent and succeeds 
   });
   await adapter.init();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  const receipt = await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
   assert.equal(receipt.sessionId, s.sessionId); // the turn succeeded despite the server fault
   assert.equal(server.count("POST /session/:id/message"), 2, "one failed attempt + one agent-less retry");
   assert.equal("agent" in lastMessageBody(), false, "the retry dropped the agent");
@@ -161,7 +168,7 @@ test("a 5xx on an agent-LESS send is surfaced, not retried", async () => {
   const adapter = makeAdapter();
   const s = await adapter.createSession({ specId: "SPEC-A" });
   // No agent named → goes through directly (the stub only fails agent-naming bodies).
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "", parts: [{ type: "text", text: "hi" }] });
   assert.equal(server.count("POST /session/:id/message"), 1, "no retry when no agent was named");
 });
 
@@ -170,6 +177,6 @@ test("with no catalog (endpoint absent), the configured agent is trusted verbati
   const adapter = makeAdapter();
   await adapter.init();
   const s = await adapter.createSession({ specId: "SPEC-A" });
-  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: "hi" }] });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "spec-author", parts: [{ type: "text", text: "hi" }] });
   assert.equal(lastMessageBody().agent, "spec-author");
 });

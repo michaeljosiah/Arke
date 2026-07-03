@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { DomainEvent, ModelTier, ScaffoldStep } from "@arke/contracts";
+import type { DomainEvent, ScaffoldStep } from "@arke/contracts";
 import type { Trace } from "./trace.js";
 
 /**
@@ -61,6 +61,10 @@ interface ScaffoldManifest {
   stale: string[];
 }
 
+/**
+ * Vestigial (SPEC-016 revised): agents declare their own model per-image, so the scaffold no longer
+ * takes logical-tier model bindings. Retained (optional, unused) so older callers/tests still type.
+ */
 export interface ScaffoldTiers {
   capable?: string;
   mid?: string;
@@ -68,7 +72,7 @@ export interface ScaffoldTiers {
 }
 
 export interface ScaffoldRunOptions {
-  tiers: ScaffoldTiers;
+  tiers?: ScaffoldTiers;
   /** When set, steps before this one in {@link SCAFFOLD_STEP_ORDER} are skipped (manifest-aware). */
   resumeFrom?: ScaffoldStep;
 }
@@ -107,17 +111,11 @@ export class ScaffoldRunner {
    * steps are not attempted), records `lastCompletedStep` up to the prior success, and surfaces a
    * `scaffold.step` `error` event so the client can offer "Retry from step".
    */
-  async run(opts: ScaffoldRunOptions): Promise<ScaffoldResult> {
-    // Greenfield is NOT blocked on a missing registry (revises SPEC-004 D9): the `config` step
-    // creates `.arke/config.json` with the logical-tier roster + model placeholders, and the agent
-    // roster references logical tiers (constant) — never vendor models — so nothing unusable is
-    // written. Any tier value not supplied falls back to a gateway placeholder the user edits later.
-    const tiers: ScaffoldTiers = {
-      capable: opts.tiers.capable ?? "gateway/capable-tier",
-      mid: opts.tiers.mid ?? "gateway/mid-tier",
-      fast: opts.tiers.fast ?? "gateway/fast-tier",
-    };
-
+  async run(opts: ScaffoldRunOptions = {}): Promise<ScaffoldResult> {
+    // Greenfield is NOT blocked (revises SPEC-004 D9): the `config` step writes `.arke/config.json`
+    // with a gateway provider/auth profile, and the agent roster (`agents/<name>/config.yaml` +
+    // materialised `.opencode/agents/*.md`) declares gateway-placeholder models — never a real vendor
+    // id — so nothing unusable is written; the engineer edits the models/provider host-side later.
     const manifest = this.readManifest();
     const startIndex = opts.resumeFrom ? SCAFFOLD_STEP_ORDER.indexOf(opts.resumeFrom) : 0;
     const results: ScaffoldStepResult[] = [];
@@ -128,7 +126,7 @@ export class ScaffoldRunner {
       stepsRun.push(step);
       await this.emitStep(step, "running");
       try {
-        const result = await this.runStep(step, manifest, tiers);
+        const result = await this.runStep(step, manifest);
         results.push(result);
         manifest.lastCompletedStep = step;
         this.writeManifest(manifest); // atomic, after each successful step
@@ -161,14 +159,13 @@ export class ScaffoldRunner {
   private async runStep(
     step: ScaffoldStep,
     manifest: ScaffoldManifest,
-    tiers: ScaffoldTiers,
   ): Promise<ScaffoldStepResult> {
     if (step === "repos" && !this.gitAvailable()) {
       // Advisory step: surface the skip with a reason rather than silently omitting it (D10).
       return { step, status: "skipped", detail: "git not found on PATH", artefacts: [] };
     }
 
-    const files = this.filesFor(step, tiers);
+    const files = this.filesFor(step);
     const artefacts = files.map((f) => this.writeArtefact(f.relPath, f.content, manifest));
     const changed = artefacts.filter((a) => a.outcome === "created" || a.outcome === "overwritten");
     const userModified = artefacts.filter((a) => a.outcome === "skipped-user-modified");
@@ -282,15 +279,18 @@ export class ScaffoldRunner {
 
   // ---- artefact content ----------------------------------------------------
 
-  private filesFor(step: ScaffoldStep, tiers: ScaffoldTiers): Array<{ relPath: string; content: string }> {
+  private filesFor(step: ScaffoldStep): Array<{ relPath: string; content: string }> {
     switch (step) {
       case "config":
-        return [{ relPath: ".arke/config.json", content: configFile(tiers) }];
+        return [{ relPath: ".arke/config.json", content: configFile() }];
       case "agents":
-        return ROSTER.map((r) => ({
-          relPath: `.opencode/agents/${r.name}.md`,
-          content: agentFile(r),
-        }));
+        // Each role ships BOTH its Omnigent source image (`agents/<name>/config.yaml`, the coordinator's
+        // AgentRegistry reads this) and the materialised OpenCode agent (`.opencode/agents/<name>.md`,
+        // what the harness reads) — self-describing (declares its own model), no logical-tier indirection.
+        return ROSTER.flatMap((r) => [
+          { relPath: `agents/${r.name}/config.yaml`, content: agentConfigYaml(r) },
+          { relPath: `.opencode/agents/${r.name}.md`, content: agentFile(r) },
+        ]);
       case "specs":
         return [
           { relPath: "docs/specifications/specification.template.md", content: SPEC_TEMPLATE },
@@ -343,81 +343,106 @@ function defaultGitProbe(): boolean {
 interface RosterRole {
   name: string;
   role: string;
-  tier: ModelTier;
+  /** The concrete `provider/model` the agent declares. Greenfield uses a `gateway/…` placeholder. */
+  model: string;
+  /** Optional reasoning effort for a reasoning-capable model (e.g. gpt-5.5 → "xhigh"). */
+  reasoningEffort?: string;
   mode: "primary" | "subagent" | "all";
   writes: string;
   description: string;
-  /** Per-capability permission posture written to the harness profile (SPEC-007 read-only reviewers). */
+  /** Per-capability permission posture written to the agent image (SPEC-007 read-only reviewers). */
   permission?: Record<string, "allow" | "deny" | "ask">;
 }
 
-/** The six canonical roles. Each references a logical `tier`, never a vendor model id (FR-4). */
+/**
+ * The six canonical roles. Each DECLARES its own model (SPEC-016 revised). Greenfield uses distinct
+ * `gateway/…` placeholders — never a real vendor id — the engineer edits host-side; the reviewers'
+ * placeholders are distinct so the panel-independence check (SPEC-007) is satisfiable out of the box.
+ */
 const ROSTER: RosterRole[] = [
-  { name: "spec-author", role: "Specification Author", tier: "capable", mode: "primary", writes: "Requirements", description: "Co-authors the requirements section of a specification with the engineer." },
-  { name: "architect", role: "Technical Architect", tier: "capable", mode: "primary", writes: "Design", description: "Designs the target architecture, data model, and contracts for a specification." },
+  { name: "spec-author", role: "Specification Author", model: "gateway/spec-author", mode: "primary", writes: "Requirements", description: "Co-authors the requirements section of a specification with the engineer." },
+  { name: "architect", role: "Technical Architect", model: "gateway/architect", mode: "primary", writes: "Design", description: "Designs the target architecture, data model, and contracts for a specification." },
   // Reviewers are READ-ONLY (SPEC-007): they critique into the panel only and never write/commit.
-  { name: "reviewer-a", role: "Reviewer (panel A)", tier: "capable", mode: "subagent", writes: "Critique", description: "Independent review-panel member; critiques a specification or generated change.", permission: { edit: "deny", bash: "deny" } },
-  { name: "reviewer-b", role: "Reviewer (panel B)", tier: "capable", mode: "subagent", writes: "Critique", description: "Second independent review-panel member; surfaces divergent findings.", permission: { edit: "deny", bash: "deny" } },
-  { name: "implementer", role: "Implementer", tier: "mid", mode: "subagent", writes: "Code", description: "Implements an approved task: edits source, runs checks, opens a pull request (gated)." },
-  { name: "researcher", role: "Researcher", tier: "mid", mode: "subagent", writes: "Grounding", description: "Analyses the repository to produce or refresh the AGENTS.md grounding baseline." },
+  { name: "reviewer-a", role: "Reviewer (panel A)", model: "gateway/reviewer-a", mode: "subagent", writes: "Critique", description: "Independent review-panel member; critiques a specification or generated change.", permission: { edit: "deny", bash: "deny" } },
+  { name: "reviewer-b", role: "Reviewer (panel B)", model: "gateway/reviewer-b", mode: "subagent", writes: "Critique", description: "Second independent review-panel member; surfaces divergent findings.", permission: { edit: "deny", bash: "deny" } },
+  { name: "implementer", role: "Implementer", model: "gateway/implementer", mode: "subagent", writes: "Code", description: "Implements an approved task: edits source, runs checks, opens a pull request (gated)." },
+  { name: "researcher", role: "Researcher", model: "gateway/researcher", mode: "subagent", writes: "Grounding", description: "Analyses the repository to produce or refresh the AGENTS.md grounding baseline." },
 ];
 
+/** The Omnigent source image (`agents/<name>/config.yaml`) — the agent DECLARES its harness + model. */
+function agentConfigYaml(r: RosterRole): string {
+  const options = r.reasoningEffort ? `    options:\n      reasoningEffort: ${r.reasoningEffort}\n` : "";
+  const permission = r.permission
+    ? `permission:\n${Object.entries(r.permission).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\n`
+    : "";
+  return `spec_version: 1
+name: ${r.name}
+description: "${r.description}"
+executor:
+  type: omnigent
+  config:
+    harness: opencode-native
+    model: ${r.model}
+${options}    auth:
+      profile: opencode-local
+instructions: AGENTS.md
+interaction:
+  conversational: true
+  mode: ${r.mode}
+${permission}`;
+}
+
 function agentFile(r: RosterRole): string {
-  // OpenCode-native agent markdown: YAML frontmatter (tier, mode, description, permission) + body.
+  // OpenCode-native agent markdown (materialised): YAML frontmatter (description, mode, model,
+  // options, permission) + body. The agent is self-describing — it declares its own model. A
+  // `gateway/…` placeholder is the "use the harness default" sentinel, so it is OMITTED from the
+  // OpenCode frontmatter (writing it would make OpenCode resolve a literal, non-existent model);
+  // the engineer edits the source image with a real provider-qualified model.
+  const isConcrete = r.model.includes("/") && !r.model.startsWith("gateway/");
+  const modelLine = isConcrete ? `model: ${r.model}\n` : "";
+  const options = r.reasoningEffort ? `options:\n  reasoningEffort: ${r.reasoningEffort}\n` : "";
   const permission = r.permission
     ? `permission:\n${Object.entries(r.permission).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\n`
     : "";
   return `---
 name: ${r.name}
 description: ${r.description}
-tier: ${r.tier}
 mode: ${r.mode}
-${permission}---
+${modelLine}${options}${permission}---
 
 # ${r.role}
 
 You are the **${r.role}** in an Arke specification workflow. You write the **${r.writes}** of the work.
 
-This agent references the logical model tier \`${r.tier}\`; the concrete model is resolved by the
-project registry (\`.arke/config.json\`), never hardcoded here. Edit the registry, not this file,
-to change which model serves this tier.
+This agent declares its own model (\`${r.model}\`) and provider in its image
+(\`agents/${r.name}/config.yaml\`, executor.config). Edit that image — not a central registry — to
+change the model; the credential is resolved host-side via the referenced provider profile.
 `;
 }
 
 /**
- * The project's `.arke/config.json` (SPEC-005 registry + roster) created during init. Maps each
- * logical tier (capable/mid/fast) to a concrete model and binds the six roles to their tiers. The
- * tier model values are gateway placeholders for a greenfield project — the engineer replaces them
- * with real vendor model ids, which live ONLY in this file (behind the gateway), never in the
- * agent files or the client. Process-wide coordinator settings come from the global/launch source.
+ * The project's `.arke/config.json` (SPEC-016 revised) created during init: host-side provider/auth
+ * PROFILES — the harness endpoint + a `credentialsRef` resolved on the host, never sent to the
+ * client. Agents declare their own model+provider in their image and reference a profile by name
+ * (`executor.config.auth.profile`). Process-wide coordinator settings come from the global source.
  */
-function configFile(tiers: ScaffoldTiers): string {
-  const roster: Record<string, { tier: ModelTier }> = {};
-  for (const r of ROSTER) roster[r.name] = { tier: r.tier };
+function configFile(): string {
   const config = {
     $comment:
-      "Arke project config, created by `arke` scaffolding. registry.instances[].serves maps each " +
-      "logical tier to a concrete model — replace the gateway placeholders with your real vendor " +
-      "model ids (capable=authoring/review, mid=implementation, fast=routine/classification). " +
-      "Vendor model ids live ONLY here. Process-wide coordinator settings (port, maxProjects, OTLP) " +
-      "come from the global/launch source, not this file (SPEC-005/018).",
-    registry: {
-      instances: [
-        {
-          id: "opencode-local",
-          driver: "opencode",
-          host: "localhost",
-          port: 4096,
-          cwd: ".",
-          credentialsRef: "opencode/gateway",
-          serves: [
-            { tier: "capable", model: tiers.capable ?? "gateway/capable-tier" },
-            { tier: "mid", model: tiers.mid ?? "gateway/mid-tier" },
-            { tier: "fast", model: tiers.fast ?? "gateway/fast-tier" },
-          ],
-        },
-      ],
-      roster,
+      "Arke project config (SPEC-016 revised), created by `arke` scaffolding. `providers` are " +
+      "host-side provider/auth profiles: the harness endpoint + a credentialsRef resolved on the " +
+      "host (never sent to the client). Agents declare their own model+provider in " +
+      "agents/<name>/config.yaml and reference a profile by executor.config.auth.profile. Replace the " +
+      "gateway placeholder models in the agent images with real vendor ids. Process-wide coordinator " +
+      "settings (port, maxProjects, OTLP) come from the global/launch source, not this file.",
+    providers: {
+      "opencode-local": {
+        harness: "opencode",
+        host: "localhost",
+        port: 4096,
+        cwd: ".",
+        credentialsRef: "opencode/gateway",
+      },
     },
     settings: { permissionTimeoutMs: 120000 },
   };

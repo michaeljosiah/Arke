@@ -52,14 +52,14 @@ async function connect(port: number) {
   return { ws, frames, waitFor };
 }
 
-test("the snapshot frame carries onboarding state (reachable, projectState, tierDefaults)", async () => {
+test("the snapshot frame carries onboarding state (reachable, projectState, harnessSetup)", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());
   const { ws, waitFor } = await connect(port);
   const snap = await waitFor((f) => f.type === "snapshot");
   assert.equal(snap.harnessReachable, true); // mock is always ready
   assert.equal(snap.projectState, "empty"); // fresh temp dir
-  assert.deepEqual(snap.tierDefaults, { capable: "capable-tier", mid: "mid-tier" });
+  assert.ok(snap.harnessSetup, "snapshot carries harness-setup state (SPEC-016 revised — agents declare their model)");
   ws.close();
 });
 

@@ -78,7 +78,6 @@ test("dispatchAsync returns immediately with a correlation id", async () => {
   const receipt = await adapter.dispatchAsync({
     sessionId: spec.sessionId,
     agent: "implementer",
-    tier: "mid",
     parts: [{ type: "text", text: "go" }],
   });
   assert.equal(receipt.sessionId, spec.sessionId);
@@ -98,7 +97,6 @@ test("events produced during a dispatched turn carry its correlation id", async 
   const receipt = await adapter.dispatchAsync({
     sessionId: spec.sessionId,
     agent: "implementer",
-    tier: "mid",
     correlationId: "corr_xyz",
     parts: [{ type: "text", text: "go" }],
   });
@@ -126,7 +124,6 @@ test("an idle-only turn (no message parts) still tags turn.quiescent with the di
   await adapter.dispatchAsync({
     sessionId: spec.sessionId,
     agent: "implementer",
-    tier: "mid",
     correlationId: "corr_idle",
     parts: [{ type: "text", text: "go" }],
   });

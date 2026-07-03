@@ -1,15 +1,62 @@
 import { z } from "zod";
-import { ModelTier } from "./spec.js";
 
 /**
- * Portable agent image (SPEC-016).
+ * Portable agent image — Omnigent-shaped (SPEC-016, revised).
  *
- * A self-contained, harness-agnostic definition of an agent — its identity, instructions,
- * logical model tier, declared tools, skills, and recursive sub-agents. Parsed from an image
- * directory (`config.yaml` + `AGENTS.md` + `skills/` + `tools/` + `agents/`) and materialised
- * per harness (for OpenCode, into `.opencode/agents/<name>.md`). It references a **logical tier**,
- * never a vendor model id — resolution stays in the registry (FR-4, SPEC-005).
+ * A self-contained, declarative definition of an agent — its identity, prompt/instructions, its
+ * **executor** (which harness runs it, and the concrete model + provider it uses), declared tools,
+ * skills, permission posture, OS access, and recursive sub-agents. Parsed from an image directory
+ * (`config.yaml` + `AGENTS.md` + `skills/` + `tools/` + `agents/`) and materialised per harness
+ * (for OpenCode, into `.opencode/agents/<name>.md`).
+ *
+ * The agent declares its **model and provider directly** in `executor.config` (the Omnigent model),
+ * replacing the earlier logical-tier indirection. Vendor model ids are public and live in the YAML;
+ * only credentials stay host-side, referenced by `executor.config.auth.profile` (NFR-1 — an inline
+ * `api_key` in a committed image is rejected by the loader).
  */
+
+/** The runtime harness that runs an agent. `opencode-native` is Arke's wired adapter today. */
+export const Harness = z.enum([
+  "opencode-native",
+  "claude-sdk",
+  "claude-native",
+  "codex",
+  "codex-native",
+  "cursor-native",
+  "hermes-native",
+  "pi",
+]);
+export type Harness = z.infer<typeof Harness>;
+
+/** Provider auth for an executor: a host-side profile reference (never an inline key in an image). */
+export const ExecutorAuth = z.object({
+  /** References a provider/auth profile in `.arke/config.json` (endpoint + credentialsRef, host-side). */
+  profile: z.string().optional(),
+  /** Structure parity with Omnigent: provider | api_key | databricks | … (advisory to Arke today). */
+  type: z.string().optional(),
+  /** Optional endpoint override (scheme-preserving). */
+  baseUrl: z.string().optional(),
+});
+export type ExecutorAuth = z.infer<typeof ExecutorAuth>;
+
+/** The harness + model + provider an executor runs on (Omnigent `executor.config`). */
+export const ExecutorConfig = z.object({
+  harness: Harness,
+  /** Concrete `provider/model` (or bare model). Omit to use the provider's default model. */
+  model: z.string().optional(),
+  /** Model options passed to the harness, e.g. `{ reasoningEffort: "xhigh" }`. */
+  options: z.record(z.string(), z.string()).optional(),
+  auth: ExecutorAuth.optional(),
+});
+export type ExecutorConfig = z.infer<typeof ExecutorConfig>;
+
+/** The Omnigent `executor` block. `type: omnigent` is the seam for delegating to Omnigent later. */
+export const Executor = z.object({
+  type: z.literal("omnigent").default("omnigent"),
+  contextWindow: z.number().optional(),
+  config: ExecutorConfig,
+});
+export type Executor = z.infer<typeof Executor>;
 
 /** A declared tool the agent may use. `kind` distinguishes local code, an MCP server, or a sub-agent. */
 export const ToolDecl = z.object({
@@ -36,19 +83,33 @@ export const AgentInteraction = z.object({
 });
 export type AgentInteraction = z.infer<typeof AgentInteraction>;
 
+/** OS/filesystem access + sandbox (Omnigent `os_env`). Advisory to Arke today; carried for parity. */
+export const OsEnv = z.object({
+  type: z.string().default("caller_process"),
+  cwd: z.string().optional(),
+  sandbox: z.object({ type: z.enum(["none", "linux_bwrap", "darwin_seatbelt"]).default("none") }).optional(),
+});
+export type OsEnv = z.infer<typeof OsEnv>;
+
 // Recursive schema (sub-agents) needs an explicit type + getter.
 export interface AgentImage {
   name: string;
   description?: string;
-  /** Logical tier — resolved to a concrete model by the registry, never hard-coded here. */
-  tier: ModelTier;
-  /** Instruction body (from AGENTS.md or inline). */
+  /** The harness + concrete model + provider this agent runs on (Omnigent `executor`). */
+  executor: Executor;
+  /** Inline system prompt (Omnigent `prompt`). */
+  prompt?: string;
+  /** Instruction body from a file (AGENTS.md) or inline; complements/overrides `prompt`. */
   instructions?: string;
   interaction: AgentInteraction;
   tools: ToolDecl[];
   skills: SkillRef[];
   /** Per-capability permission posture (edit/bash/webfetch…) carried to the harness. */
   permission: Record<string, AgentPermission>;
+  /** OS/filesystem access + sandbox (Omnigent `os_env`). */
+  osEnv?: OsEnv;
+  /** May spawn child sessions/agents (Omnigent `spawn`). */
+  spawn?: boolean;
   subAgents: AgentImage[];
 }
 
@@ -56,12 +117,15 @@ export const AgentImage: z.ZodType<AgentImage, z.ZodTypeDef, unknown> = z.lazy((
   z.object({
     name: z.string(),
     description: z.string().optional(),
-    tier: ModelTier,
+    executor: Executor,
+    prompt: z.string().optional(),
     instructions: z.string().optional(),
     interaction: AgentInteraction,
     tools: z.array(ToolDecl).default([]),
     skills: z.array(SkillRef).default([]),
     permission: z.record(z.string(), AgentPermission).default({}),
+    osEnv: OsEnv.optional(),
+    spawn: z.boolean().optional(),
     subAgents: z.array(AgentImage).default([]),
   }),
   // The lazy ZodObject (with `.default()`ed fields) infers an input/output shape that does not

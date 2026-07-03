@@ -1,7 +1,13 @@
 spec_version: 1
 name: architect
 description: "Fills the Design depth: architecture, data model, interfaces, cross-cutting."
-tier: capable
+executor:
+  type: omnigent
+  config:
+    harness: opencode-native
+    model: github-copilot/claude-opus-4.8
+    auth:
+      profile: opencode-local
 instructions: AGENTS.md
 interaction:
   conversational: true

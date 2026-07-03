@@ -1,7 +1,13 @@
 spec_version: 1
 name: spec-author
 description: "Co-authors the specification with the human: Why, Requirements, scenarios."
-tier: capable
+executor:
+  type: omnigent
+  config:
+    harness: opencode-native
+    model: github-copilot/claude-opus-4.8
+    auth:
+      profile: opencode-local
 instructions: AGENTS.md
 interaction:
   conversational: true

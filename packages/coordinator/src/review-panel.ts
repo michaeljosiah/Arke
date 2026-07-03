@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ReviewSeverity } from "@arke/contracts";
-import type { RegistryResolver } from "./registry.js";
+import type { AgentRegistry } from "./agent-registry.js";
 
 /**
  * Pure helpers for the multi-model review panel (SPEC-007): reviewer-model validation (pairwise
@@ -152,14 +152,13 @@ export function sectionHashOf(text: string): string {
 
 export interface ReviewerConfig {
   role: string;
-  instanceId?: string;
 }
 
 export interface ResolvedReviewer {
   role: string;
-  instanceId: string;
-  model: string; // concrete model string (host-only; never sent to the client)
-  label: string; // client-safe tier label
+  model: string; // the reviewer agent's declared `executor.config.model`
+  harness: string;
+  label: string; // client-safe label (harness · model)
 }
 
 export interface ReviewerValidation {
@@ -169,53 +168,36 @@ export interface ReviewerValidation {
 }
 
 /**
- * Resolve every reviewer to a concrete model and enforce SPEC-007's constraints: at least two
- * reviewers, EVERY pair distinct (not merely all-identical), and the registry must supply enough
- * distinct capable models for the requested reviewer count.
+ * Enforce SPEC-007 review independence directly from the reviewer AGENTS' declared models (Omnigent
+ * model): at least two reviewers, each with an agent image that pins a concrete model, and EVERY pair
+ * distinct (not merely all-identical). No tiers, no registry indirection — the agent IS the model.
  */
-export function validateReviewers(resolver: RegistryResolver, reviewers: ReviewerConfig[]): ReviewerValidation {
+export function validateReviewers(agents: AgentRegistry, reviewers: ReviewerConfig[]): ReviewerValidation {
   if (reviewers.length < 2) {
     return { ok: false, reason: `a review panel needs at least two reviewers (got ${reviewers.length})`, reviewers: [] };
   }
   const resolved: ResolvedReviewer[] = [];
   for (const rc of reviewers) {
-    try {
-      let model: string | undefined;
-      let instanceId: string | undefined;
-      if (rc.instanceId) {
-        // Pinned override: take the instance's capable model directly.
-        const inst = resolver.instance(rc.instanceId);
-        if (!inst) return { ok: false, reason: `reviewer '${rc.role}' pins unknown instance '${rc.instanceId}'`, reviewers: [] };
-        model = inst.serves.find((s) => s.tier === "capable")?.model;
-        instanceId = rc.instanceId;
-        if (!model) return { ok: false, reason: `instance '${rc.instanceId}' serves no capable model for reviewer '${rc.role}'`, reviewers: [] };
-      } else {
-        const sel = resolver.resolve(rc.role);
-        model = sel.model;
-        instanceId = sel.instanceId;
-      }
-      const driver = resolver.instance(instanceId)?.driver ?? "unknown";
-      resolved.push({ role: rc.role, instanceId, model, label: `capable — ${driver}` });
-    } catch (err) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err), reviewers: [] };
+    const img = agents.image(rc.role);
+    if (!img) return { ok: false, reason: `reviewer '${rc.role}' has no agent image`, reviewers: [] };
+    const model = img.executor.config.model;
+    if (!model) return { ok: false, reason: `reviewer '${rc.role}' declares no model in its executor`, reviewers: [] };
+    // A bare name or a `gateway/…` placeholder is NOT a concrete model: the adapter omits the gateway
+    // provider from the dispatch, so the harness picks its own default — meaning two such reviewers
+    // silently run on the SAME model. Require a provider-qualified, non-gateway model (SPEC-007).
+    if (!model.includes("/") || model.startsWith("gateway/")) {
+      return { ok: false, reason: `reviewer '${rc.role}' declares a non-concrete model ('${model}') — pin a provider-qualified model (e.g. github-copilot/claude-opus-4.8) so review independence is verifiable`, reviewers: [] };
     }
+    const harness = img.executor.config.harness;
+    resolved.push({ role: rc.role, model, harness, label: `${harness} · ${model}` });
   }
   // Pairwise distinctness: any two reviewers on the same model is a gap in independence.
   for (let i = 0; i < resolved.length; i++) {
     for (let j = i + 1; j < resolved.length; j++) {
       if (resolved[i]!.model === resolved[j]!.model) {
-        return { ok: false, reason: `reviewers '${resolved[i]!.role}' and '${resolved[j]!.role}' resolve to the same model`, reviewers: [] };
+        return { ok: false, reason: `reviewers '${resolved[i]!.role}' and '${resolved[j]!.role}' declare the same model (${resolved[i]!.model})`, reviewers: [] };
       }
     }
-  }
-  // Registry sufficiency: enough distinct capable models to satisfy the reviewer count.
-  const distinctCapable = new Set<string>();
-  for (const inst of resolver.instances()) {
-    const m = inst.serves.find((s) => s.tier === "capable")?.model;
-    if (m) distinctCapable.add(m);
-  }
-  if (distinctCapable.size < reviewers.length) {
-    return { ok: false, reason: `insufficient distinct capable models: need ${reviewers.length}, have ${distinctCapable.size}`, reviewers: [] };
   }
   return { ok: true, reviewers: resolved };
 }

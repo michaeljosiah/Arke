@@ -246,16 +246,16 @@ test("approveDraft rolls back the working tree AND the index when the commit fai
   ws.close();
 });
 
-test("convenePanel refuses without a registry (can't guarantee distinct reviewer models, SPEC-007)", async () => {
-  // This coordinator is built with no registryConfig, so the panel cannot resolve distinct models.
-  // (The full convene→panel flow with a registry is covered in review-panel-integration.test.ts.)
+test("convenePanel refuses without reviewer agents (can't guarantee distinct reviewer models, SPEC-007)", async () => {
+  // This coordinator is built with no agent images, so the panel cannot resolve distinct reviewer
+  // models. (The full convene→panel flow with a roster is covered in review-panel-integration.test.ts.)
   const { c, port } = await coordinatorAt(repoWith(BRANCH));
   after(() => c.stop());
   const { ws, ready, request } = connect(port);
   await ready;
   const res = await request("convenePanel", { specId: "SPEC-TEST" });
   assert.equal(res.ok, false);
-  assert.match(res.error, /no registry configured/);
+  assert.match(res.error, /has no agent image/);
   ws.close();
 });
 
