@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentImageError, loadAgentImage } from "../src/index.js";
+import { AgentImageError, loadAgentImage, setAgentModel } from "../src/index.js";
 
 function imageDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "arke-image-"));
@@ -55,6 +55,33 @@ test("sub-agents load recursively", () => {
   assert.equal(image.subAgents.length, 1);
   assert.equal(image.subAgents[0]!.name, "helper");
   assert.equal(image.subAgents[0]!.executor.config.harness, "opencode-native");
+});
+
+test("setAgentModel rewrites the declared model + reasoning effort, preserving the rest", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: implementer\ndescription: writes code\nexecutor:\n  type: omnigent\n  config:\n    harness: opencode-native\n    model: gateway/implementer\n    auth:\n      profile: opencode-local\ninteraction:\n  mode: subagent\npermission:\n  edit: allow\n",
+  });
+  setAgentModel(dir, "github-copilot/gpt-5.5", "xhigh");
+  const image = loadAgentImage(dir);
+  assert.equal(image.executor.config.model, "github-copilot/gpt-5.5");
+  assert.equal(image.executor.config.options?.reasoningEffort, "xhigh");
+  // untouched fields survive the surgical edit
+  assert.equal(image.executor.config.harness, "opencode-native");
+  assert.equal(image.executor.config.auth?.profile, "opencode-local");
+  assert.equal(image.description, "writes code");
+  assert.equal(image.permission.edit, "allow");
+});
+
+test("setAgentModel with no effort drops a previously-set reasoning effort", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: r\nexecutor:\n  config:\n    harness: opencode-native\n    model: github-copilot/gpt-5.5\n    options:\n      reasoningEffort: xhigh\n",
+  });
+  setAgentModel(dir, "github-copilot/claude-opus-4.8"); // no effort
+  const image = loadAgentImage(dir);
+  assert.equal(image.executor.config.model, "github-copilot/claude-opus-4.8");
+  assert.equal(image.executor.config.options?.reasoningEffort, undefined);
 });
 
 test("a missing config.yaml is rejected whole", () => {

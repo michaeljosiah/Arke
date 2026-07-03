@@ -60,7 +60,7 @@ import {
   type ArtifactProposal,
 } from "./generation.js";
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
-import { loadAgentImage } from "@arke/agent-image";
+import { loadAgentImage, setAgentModel } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
@@ -155,8 +155,9 @@ export class ProjectContext {
   private readonly registry: ProjectRegistry;
   private readonly probe: HarnessReachabilityProbe;
   private readonly publish: (event: DomainEvent) => void;
-  /** The project's agents (declared model + provider) and provider/auth profiles (SPEC-016 revised). */
-  private readonly agents: AgentRegistry;
+  /** The project's agents (declared model + provider) and provider/auth profiles (SPEC-016 revised).
+   *  Reassigned when an agent's model is edited (`agent.configure`) so the roster stays live. */
+  private agents: AgentRegistry;
   private registrySnapshot: RegistrySnapshot | null = null;
   /** Serialises approveDraft per project so two concurrent approvals can't race the commit/rollback. */
   private approvalInFlight = false;
@@ -365,6 +366,46 @@ export class ProjectContext {
       reason,
       detail,
     } as DomainEvent);
+  }
+
+  /**
+   * Rewrite an agent's declared model in its image (SPEC-016 revised) — the write half of the
+   * model-selection UX. Edits `agents/<name>/config.yaml` (`executor.config.model` + optional
+   * `options.reasoningEffort`), re-materialises the harness agent (`.opencode/agents/<name>.md`),
+   * reloads the {@link AgentRegistry}, and refreshes the projection so the roster updates live. The
+   * write is confined to this project's root; the model id is public (only credentials are host-side).
+   */
+  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown): Promise<{ name: string; model: string; reasoningEffort?: string }> {
+    const name = String(rawName ?? "");
+    // Guard the path segment: agent names index a directory, so only a safe slug is addressable.
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
+    if (!this.agents.has(name)) throw new Error(`unknown agent '${name}'`);
+    const provider = String(rawProvider ?? "").trim();
+    const model = String(rawModel ?? "").trim();
+    if (!model) throw new Error("a model is required");
+    const effort = rawEffort ? String(rawEffort).trim() : undefined;
+    // A concrete provider prefixes the model; the `gateway` sentinel (harness default) stays bare.
+    const full = provider && provider !== "gateway" ? `${provider}/${model}` : model;
+
+    const agentDir = resolve(this.root, "agents", name);
+    if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
+    if (!existsSync(resolve(agentDir, "config.yaml"))) throw new Error(`agent '${name}' has no config.yaml image`);
+
+    setAgentModel(agentDir, full, effort);
+    // Reload the roster from disk (keeping the same provider profiles) so modelFor()/list() are fresh.
+    this.agents = loadAgentRegistry(this.root, this.agents.providers);
+    // Re-materialise so the harness agent (.opencode/agents/<name>.md) matches the new declaration.
+    const img = this.agents.image(name);
+    if (img && this.adapter.materializeAgent) {
+      try {
+        await this.adapter.materializeAgent(img);
+      } catch {
+        /* materialisation is best-effort; the per-dispatch model override still carries the new model */
+      }
+    }
+    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, model: full, ...(effort ? { reasoningEffort: effort } : {}) });
+    await this.refreshRegistry(); // emit registry.updated + refresh the snapshot roster
+    return { name, model: full, ...(effort ? { reasoningEffort: effort } : {}) };
   }
 
   // ---- authoring cockpit (SPEC-006) ---------------------------------------
@@ -1665,6 +1706,14 @@ export class ProjectContext {
       case "harness.probe":
         await this.refreshReachability();
         return this.reachableSummary();
+      case "models.list":
+        // SPEC-016 revised: the harness's live model catalog (provider/model), for the agent-model
+        // editor. Capability-gated — empty when the harness exposes no catalog or is unreachable.
+        return this.adapter.capabilities().has("models") && this.adapter.listModels
+          ? await this.adapter.listModels().catch(() => [])
+          : [];
+      case "agent.configure": // SPEC-016 revised: rewrite an agent's declared model+effort in its image
+        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort);
       case "registry.get":
         return this.registrySnapshot; // current projection, no re-probe (read-only)
       case "registry.probe":

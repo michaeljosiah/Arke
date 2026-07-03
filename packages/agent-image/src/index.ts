@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { AgentImage, type SkillRef, type ToolDecl } from "@arke/contracts";
 
 /**
@@ -95,6 +95,37 @@ export function loadAgentImage(dir: string): AgentImage {
     throw new AgentImageError(`invalid agent image '${raw.name ?? dir}': ${result.error.message}`);
   }
   return result.data;
+}
+
+/**
+ * Rewrite an agent image's declared model (and optional reasoning effort) in place — the write half of
+ * the model-selection UX (SPEC-016 revised). Edits ONLY `executor.config.model` and
+ * `executor.config.options.reasoningEffort` in the image's `config.yaml`, preserving the rest of the
+ * document (other fields, formatting, comments) via the YAML Document API. `model` is a full
+ * `provider/model` string (or a bare gateway name). Passing no `reasoningEffort` removes it (and drops
+ * an `options` block left empty). Throws {@link AgentImageError} if the image or its config is missing.
+ */
+export function setAgentModel(dir: string, model: string, reasoningEffort?: string): void {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) throw new AgentImageError(`missing required config.yaml in ${dir}`);
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  doc.setIn(["executor", "config", "model"], model);
+  if (reasoningEffort) {
+    doc.setIn(["executor", "config", "options", "reasoningEffort"], reasoningEffort);
+  } else {
+    doc.deleteIn(["executor", "config", "options", "reasoningEffort"]);
+    // Drop an options map that is now empty, so we don't leave a bare `options:` key behind.
+    const options = doc.getIn(["executor", "config", "options"]) as { items?: unknown[] } | undefined;
+    if (options && Array.isArray(options.items) && options.items.length === 0) {
+      doc.deleteIn(["executor", "config", "options"]);
+    }
+  }
+  writeFileSync(configPath, String(doc), "utf8");
 }
 
 /**
