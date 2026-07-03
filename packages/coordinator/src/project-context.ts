@@ -325,13 +325,18 @@ export class ProjectContext {
       // No explicit provider profiles but the adapter is live — surface it as the single harness.
       harnesses.push({ id: this.adapter.id, harness: this.adapter.id, endpoint: liveEndpoint, reachable: r.ready, caps });
     } else {
+      // Only ONE OpenCode profile is actually wired — `loadOpenCodeConfig` picks the first — so only
+      // that one carries the live endpoint/reachability/caps. Any other profile (a second OpenCode
+      // provider, or a non-OpenCode harness) is surfaced configured-but-not-wired.
+      let wiredOpenCode = false;
       for (const [id, prof] of entries) {
         const kind = prof.harness ?? "opencode";
-        const isOpenCode = kind.startsWith("opencode");
-        const endpoint = isOpenCode
+        const isWired = kind.startsWith("opencode") && !wiredOpenCode;
+        if (isWired) wiredOpenCode = true;
+        const endpoint = isWired
           ? liveEndpoint
           : prof.baseUrl ?? [prof.host, prof.port].filter(Boolean).join(":") ?? id;
-        harnesses.push({ id, harness: kind, endpoint, reachable: isOpenCode ? r.ready : false, caps: isOpenCode ? caps : [] });
+        harnesses.push({ id, harness: kind, endpoint, reachable: isWired ? r.ready : false, caps: isWired ? caps : [] });
       }
     }
 
@@ -394,15 +399,11 @@ export class ProjectContext {
     setAgentModel(agentDir, full, effort);
     // Reload the roster from disk (keeping the same provider profiles) so modelFor()/list() are fresh.
     this.agents = loadAgentRegistry(this.root, this.agents.providers);
-    // Re-materialise so the harness agent (.opencode/agents/<name>.md) matches the new declaration.
-    const img = this.agents.image(name);
-    if (img && this.adapter.materializeAgent) {
-      try {
-        await this.adapter.materializeAgent(img);
-      } catch {
-        /* materialisation is best-effort; the per-dispatch model override still carries the new model */
-      }
-    }
+    // NB: we deliberately do NOT re-materialise the `.opencode/agents/<name>.md` here. The source
+    // image's `instructions: AGENTS.md` may not resolve per-agent, so a re-materialise would rewrite
+    // the harness agent with an EMPTY instruction body — clobbering its system prompt. Correctness is
+    // preserved without it: every Arke dispatch sends the agent's declared model as a per-message
+    // override (`SendMessageInput.model`), so the harness uses the new model regardless of the `.md`.
     await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, model: full, ...(effort ? { reasoningEffort: effort } : {}) });
     await this.refreshRegistry(); // emit registry.updated + refresh the snapshot roster
     return { name, model: full, ...(effort ? { reasoningEffort: effort } : {}) };
@@ -1523,8 +1524,11 @@ export class ProjectContext {
       writeFileSync(found.absPath, text, "utf8");
       renameSync(found.absPath, newAbs);
 
-      // Rename the git branch when we are on it (best-effort; frontmatter branch is the approval guard).
-      if (gitAvailable() && oldBranch !== newBranch && gitHeadBranch(this.root) === oldBranch) {
+      // Rename the git branch ONLY when it is the `spec/untitled-NNN` branch `spec.create` made and
+      // we are still on it (best-effort; frontmatter branch is the approval guard). If spec.create
+      // fell back to the engineer's existing branch (e.g. `main`/a feature branch, recorded verbatim
+      // in frontmatter), renaming it would hijack their working branch — so skip that case entirely.
+      if (gitAvailable() && oldBranch !== newBranch && oldBranch.startsWith("spec/untitled-") && gitHeadBranch(this.root) === oldBranch) {
         spawnSync("git", ["branch", "-m", newBranch], gitOpts(this.root));
       }
 
@@ -2045,6 +2049,10 @@ export class ProjectContext {
 
   /** After an authoring turn settles, rename an `untitled-NNN` spec whose title is now set (SPEC-020). */
   private async maybeRenameTitledSpec(sessionId: string): Promise<void> {
+    // Only the AUTHORING session drives the rename. Reviewer / generation / task sessions are also
+    // created parentless (so they surface as spec-kind cards), but a reviewer or generation turn on
+    // a still-untitled spec must NOT trigger the rename — otherwise it races the author.
+    if (this.reviewerSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.taskSessions.has(sessionId)) return;
     const card = this.read.snapshot().find((c) => c.id === sessionId);
     if (!card || card.kind !== "spec") return;
     await this.renameSpec(card.specId).catch(() => undefined);

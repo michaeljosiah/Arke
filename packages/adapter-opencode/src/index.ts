@@ -246,7 +246,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
   private agentMarkdown(image: AgentImage): string {
     const lines: string[] = ["---", `description: ${image.description ?? image.name}`, `mode: ${image.interaction.mode}`];
     const model = image.executor.config.model;
-    if (model) lines.push(`model: ${model}`);
+    // Omit a bare name or `gateway/…` placeholder: those are the "use the harness default" sentinel
+    // (the message body omits them too). Writing `model: gateway/x` would make OpenCode resolve a
+    // literal, non-existent model. A concrete provider-qualified model is written through.
+    if (model && model.includes("/") && !model.startsWith("gateway/")) lines.push(`model: ${model}`);
     const options = image.executor.config.options;
     if (options && Object.keys(options).length > 0) {
       lines.push("options:");

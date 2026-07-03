@@ -394,7 +394,12 @@ ${permission}`;
 
 function agentFile(r: RosterRole): string {
   // OpenCode-native agent markdown (materialised): YAML frontmatter (description, mode, model,
-  // options, permission) + body. The agent is self-describing — it declares its own model.
+  // options, permission) + body. The agent is self-describing — it declares its own model. A
+  // `gateway/…` placeholder is the "use the harness default" sentinel, so it is OMITTED from the
+  // OpenCode frontmatter (writing it would make OpenCode resolve a literal, non-existent model);
+  // the engineer edits the source image with a real provider-qualified model.
+  const isConcrete = r.model.includes("/") && !r.model.startsWith("gateway/");
+  const modelLine = isConcrete ? `model: ${r.model}\n` : "";
   const options = r.reasoningEffort ? `options:\n  reasoningEffort: ${r.reasoningEffort}\n` : "";
   const permission = r.permission
     ? `permission:\n${Object.entries(r.permission).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\n`
@@ -403,8 +408,7 @@ function agentFile(r: RosterRole): string {
 name: ${r.name}
 description: ${r.description}
 mode: ${r.mode}
-model: ${r.model}
-${options}${permission}---
+${modelLine}${options}${permission}---
 
 # ${r.role}
 

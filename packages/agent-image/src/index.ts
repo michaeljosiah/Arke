@@ -20,17 +20,27 @@ export class AgentImageError extends Error {
   }
 }
 
+interface RawAuth {
+  profile?: string;
+  type?: string;
+  base_url?: string;
+  baseUrl?: string;
+  api_key?: unknown;
+  apiKey?: unknown;
+}
+
 interface RawExecutor {
   type?: string;
   context_window?: number;
   contextWindow?: number;
   harness?: string; // direct (unwrapped) Omnigent form
   model?: unknown;
+  auth?: RawAuth; // direct-form auth (executor.auth), mirrored by config.auth in the wrapped form
   config?: {
     harness?: string;
     model?: unknown;
     options?: Record<string, unknown>;
-    auth?: { profile?: string; type?: string; base_url?: string; baseUrl?: string; api_key?: unknown; apiKey?: unknown };
+    auth?: RawAuth;
   };
 }
 
@@ -145,7 +155,7 @@ function parseExecutor(raw: RawExecutor | undefined, who: string): unknown {
   const harness = cfg.harness ?? raw.harness;
   if (!harness) throw new AgentImageError(`agent image '${who}' executor is missing a harness`);
   const model = cfg.model ?? raw.model;
-  const auth = cfg.auth;
+  const auth = cfg.auth ?? raw.auth; // check BOTH the wrapped (config.auth) and direct (executor.auth) forms
   if (auth && (auth.api_key !== undefined || auth.apiKey !== undefined)) {
     throw new AgentImageError(
       `agent image '${who}' must not inline a provider api_key — reference a host-side auth profile instead (NFR-1)`,

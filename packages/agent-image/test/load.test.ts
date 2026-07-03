@@ -39,6 +39,14 @@ test("the direct (unwrapped) executor form is accepted", () => {
   assert.equal(image.executor.config.model, "kimi-k2-turbo");
 });
 
+test("an inline api_key is rejected in BOTH the wrapped and the direct executor form (NFR-1)", () => {
+  const wrapped = imageDir({ "config.yaml": "spec_version: 1\nname: w\nexecutor:\n  config:\n    harness: opencode-native\n    auth:\n      api_key: sk-secret\n" });
+  assert.throws(() => loadAgentImage(wrapped), /must not inline a provider api_key/);
+  // Regression: the direct form (executor.auth, not executor.config.auth) must also be rejected.
+  const direct = imageDir({ "config.yaml": "spec_version: 1\nname: d\nexecutor:\n  harness: opencode-native\n  auth:\n    api_key: sk-secret\n" });
+  assert.throws(() => loadAgentImage(direct), /must not inline a provider api_key/);
+});
+
 test("an executor with no model is allowed (harness resolves the provider default)", () => {
   const dir = imageDir({ "config.yaml": "spec_version: 1\nname: brain\nexecutor:\n  config:\n    harness: claude-sdk\n" });
   const image = loadAgentImage(dir);

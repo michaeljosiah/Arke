@@ -60,9 +60,11 @@ test("roster ships both the Omnigent source image and the materialised agent, ea
   assert.match(src, /harness: opencode-native/);
   assert.match(src, /model: gateway\/spec-author/);
   assert.match(src, /profile: opencode-local/);
-  // The materialised agent (.opencode/agents/<name>.md) declares the same model — no logical tier.
+  // The materialised agent (.opencode/agents/<name>.md) OMITS a `gateway/…` placeholder model — that
+  // is the "use the harness default" sentinel; writing it would make OpenCode resolve a literal,
+  // non-existent model. (A concrete provider-qualified model IS written through — see the adapter.)
   const author = readFileSync(resolve(root, ".opencode/agents/spec-author.md"), "utf8");
-  assert.match(author, /model: gateway\/spec-author/);
+  assert.doesNotMatch(author, /^model:/m); // no placeholder model line
   assert.doesNotMatch(author, /^tier:/m); // the logical-tier indirection is gone
   // Reviewers declare DISTINCT placeholder models so panel independence (SPEC-007) holds out of the box.
   const rA = readFileSync(resolve(root, "agents/reviewer-a/config.yaml"), "utf8");

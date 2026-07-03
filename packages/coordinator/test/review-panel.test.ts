@@ -56,6 +56,18 @@ test("validateReviewers requires at least two reviewers", () => {
   assert.equal(validateReviewers(r, [{ role: "reviewer-a" }]).ok, false);
 });
 
+test("validateReviewers rejects gateway/bare placeholder models (they resolve to the same harness default)", () => {
+  // Freshly-scaffolded reviewers pin `gateway/reviewer-a` / `gateway/reviewer-b`: distinct strings,
+  // but the adapter omits the gateway provider so BOTH run on the harness default → not independent.
+  const gw = agents({ "reviewer-a": "gateway/reviewer-a", "reviewer-b": "gateway/reviewer-b" });
+  const v = validateReviewers(gw, [{ role: "reviewer-a" }, { role: "reviewer-b" }]);
+  assert.equal(v.ok, false);
+  assert.match(v.reason!, /non-concrete model/);
+  // A bare name (no provider) is likewise non-concrete.
+  const bare = agents({ "reviewer-a": "opus", "reviewer-b": "anthropic/opus" });
+  assert.equal(validateReviewers(bare, [{ role: "reviewer-a" }, { role: "reviewer-b" }]).ok, false);
+});
+
 test("parseReviewerIssues reads a raw JSON array and defaults a missing section to 'general'", () => {
   const raw = '[{"section":"requirements > R1","severity":"blocking","text":"ambiguous"},{"section":"","text":"x"}]';
   const issues = parseReviewerIssues(raw);

@@ -39,6 +39,19 @@ test("materializeAgent writes the OpenCode convention with the agent's declared 
   assert.equal(/^tier:/m.test(md), false);
 });
 
+test("a gateway/bare placeholder model is OMITTED from the materialised frontmatter", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-materialize-")));
+  await adapterIn(root).materializeAgent({
+    ...image,
+    name: "greenfield",
+    executor: { type: "omnigent", config: { harness: "opencode-native", model: "gateway/greenfield" } },
+  });
+  const md = readFileSync(join(root, ".opencode", "agents", "greenfield.md"), "utf8");
+  // gateway = "use the harness default" — writing `model: gateway/…` would make OpenCode resolve a
+  // literal non-existent model, so it must be omitted (the agent falls back to the harness default).
+  assert.equal(/^model:/m.test(md), false);
+});
+
 test("sub-agents are materialised as their own files", async () => {
   const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-materialize-")));
   await adapterIn(root).materializeAgent({

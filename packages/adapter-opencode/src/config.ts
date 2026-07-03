@@ -108,10 +108,43 @@ export function resolveDirectory(root: string, candidate?: string): string {
 
 // ---- .arke/config.json loading -------------------------------------------------
 
+interface LegacyInstance {
+  id: string;
+  driver?: string;
+  host?: string;
+  port?: number;
+  baseUrl?: string;
+  cwd?: string;
+  credentialsRef?: string;
+}
+
 interface ArkeConfigFile {
   /** Provider/auth profiles keyed by name (referenced by an agent's `executor.config.auth.profile`). */
   providers?: Record<string, ProviderProfile>;
+  /**
+   * Legacy (SPEC-019) harness storage still written by the quick-setup connect flow
+   * (`upsertGlobalInstance(descriptorFor(...))`). Read as a fallback so a harness connected through
+   * the UI is still wired even though it lands under `registry.instances`, not `providers`.
+   */
+  registry?: { instances?: LegacyInstance[] };
   settings?: { permissionTimeoutMs?: number; manageHarness?: boolean };
+}
+
+/** Fold legacy `registry.instances[]` (quick-setup storage) into provider profiles keyed by instance id. */
+function legacyInstancesAsProviders(cfg: ArkeConfigFile | null): Record<string, ProviderProfile> {
+  const out: Record<string, ProviderProfile> = {};
+  for (const inst of cfg?.registry?.instances ?? []) {
+    if (!inst?.id) continue;
+    out[inst.id] = {
+      ...(inst.driver ? { harness: inst.driver } : {}),
+      ...(inst.host ? { host: inst.host } : {}),
+      ...(inst.port !== undefined ? { port: inst.port } : {}),
+      ...(inst.baseUrl ? { baseUrl: inst.baseUrl } : {}),
+      ...(inst.cwd ? { cwd: inst.cwd } : {}),
+      ...(inst.credentialsRef ? { credentialsRef: inst.credentialsRef } : {}),
+    };
+  }
+  return out;
 }
 
 function profileBaseUrl(p: ProviderProfile): string {
@@ -161,8 +194,15 @@ export function loadOpenCodeConfig(opts: LoadConfigOptions): OpenCodeConfig | nu
   const global = opts.globalConfigPath ? tryParseConfig(opts.globalConfigPath) : null;
   if (!project && !global) return null;
 
-  // Merge provider profiles by name (project wins). Pick the first with an OpenCode harness.
-  const merged: Record<string, ProviderProfile> = { ...(global?.providers ?? {}), ...(project?.providers ?? {}) };
+  // Merge provider profiles by name (project wins). Explicit `providers` take precedence over the
+  // legacy `registry.instances` quick-setup storage, but the latter is folded in so a UI-connected
+  // harness is still wired. Pick the first with an OpenCode harness.
+  const merged: Record<string, ProviderProfile> = {
+    ...legacyInstancesAsProviders(global),
+    ...legacyInstancesAsProviders(project),
+    ...(global?.providers ?? {}),
+    ...(project?.providers ?? {}),
+  };
   const profile = Object.values(merged).find((p) => (p.harness ?? "opencode").startsWith("opencode"));
   if (!profile) return null;
 

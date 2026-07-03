@@ -60,6 +60,27 @@ test("loadOpenCodeConfig returns null when no opencode provider is configured", 
   assert.equal(loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} }), null);
 });
 
+test("a harness connected via legacy quick-setup (registry.instances) is still wired", () => {
+  // The SPEC-019 quick-setup connect flow persists under `registry.instances`, not `providers`. The
+  // loader must fold that in so a UI-connected OpenCode harness still yields an endpoint.
+  const { dir, path } = writeConfig({
+    registry: { instances: [{ id: "opencode-local", driver: "opencode", host: "localhost", port: 4096, cwd: ".", credentialsRef: "opencode/gateway" }] },
+  });
+  const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} });
+  assert.ok(config);
+  assert.equal(config!.baseUrl, "http://127.0.0.1:4096");
+});
+
+test("an explicit `providers` profile wins over a legacy registry.instances entry of the same id", () => {
+  const { dir, path } = writeConfig({
+    providers: { "opencode-local": { harness: "opencode", host: "localhost", port: 5000 } },
+    registry: { instances: [{ id: "opencode-local", driver: "opencode", host: "localhost", port: 4096 }] },
+  });
+  const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} });
+  assert.ok(config);
+  assert.equal(config!.baseUrl, "http://127.0.0.1:5000"); // providers profile wins
+});
+
 test("loadOpenCodeConfig returns null on an empty/absent config", () => {
   const { dir, path } = writeConfig({});
   assert.equal(loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} }), null);

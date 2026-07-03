@@ -182,6 +182,12 @@ export function validateReviewers(agents: AgentRegistry, reviewers: ReviewerConf
     if (!img) return { ok: false, reason: `reviewer '${rc.role}' has no agent image`, reviewers: [] };
     const model = img.executor.config.model;
     if (!model) return { ok: false, reason: `reviewer '${rc.role}' declares no model in its executor`, reviewers: [] };
+    // A bare name or a `gateway/…` placeholder is NOT a concrete model: the adapter omits the gateway
+    // provider from the dispatch, so the harness picks its own default — meaning two such reviewers
+    // silently run on the SAME model. Require a provider-qualified, non-gateway model (SPEC-007).
+    if (!model.includes("/") || model.startsWith("gateway/")) {
+      return { ok: false, reason: `reviewer '${rc.role}' declares a non-concrete model ('${model}') — pin a provider-qualified model (e.g. github-copilot/claude-opus-4.8) so review independence is verifiable`, reviewers: [] };
+    }
     const harness = img.executor.config.harness;
     resolved.push({ role: rc.role, model, harness, label: `${harness} · ${model}` });
   }
