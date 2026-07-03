@@ -60,6 +60,29 @@ export class ReadModel {
         card.column = this.deriveColumn(card, event.status);
         break;
       }
+      case "spec.renamed": {
+        // A blank-slate spec was renamed once titled (SPEC-020): re-key every card and the status
+        // map from the old spec id to the new one so the board keeps tracking the same work.
+        const oldId = event.oldSpecId;
+        const newId = event.specId;
+        if (oldId !== newId) {
+          const st = this.specStatus.get(oldId);
+          if (st !== undefined) {
+            this.specStatus.delete(oldId);
+            this.specStatus.set(newId, st);
+          }
+          for (const card of this.cards.values()) if (card.specId === oldId) card.specId = newId;
+          const specCard = this.cards.get(oldId); // the spec card is keyed by its spec id
+          if (specCard) {
+            this.cards.delete(oldId);
+            specCard.id = newId;
+            specCard.specId = newId;
+            if (specCard.title === oldId) specCard.title = newId;
+            this.cards.set(newId, specCard);
+          }
+        }
+        break;
+      }
       case "session.status": {
         const card = this.ensureCard(event.sessionId, event.specId, event.kind);
         card.status = event.status;
