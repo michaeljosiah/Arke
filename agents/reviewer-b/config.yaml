@@ -1,7 +1,13 @@
 spec_version: 1
 name: reviewer-b
 description: "Independent critique on a different model, grounded in source."
-tier: capable
+executor:
+  type: omnigent
+  config:
+    harness: opencode-native
+    model: github-copilot/claude-sonnet-4.5
+    auth:
+      profile: opencode-local
 instructions: AGENTS.md
 interaction:
   conversational: true

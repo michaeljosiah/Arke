@@ -3,48 +3,13 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_RESOLVE_MODEL, loadOpenCodeConfig, parseModelRef } from "../src/index.js";
+import { loadOpenCodeConfig } from "../src/index.js";
 
-test("parseModelRef splits provider/name", () => {
-  assert.deepEqual(parseModelRef("anthropic/claude-sonnet"), {
-    provider: "anthropic",
-    name: "claude-sonnet",
-  });
-});
-
-test("parseModelRef defaults a bare name to the gateway provider", () => {
-  assert.deepEqual(parseModelRef("capable-tier"), { provider: "gateway", name: "capable-tier" });
-});
-
-test("the default resolver targets the internal gateway per tier", () => {
-  assert.deepEqual(DEFAULT_RESOLVE_MODEL("capable"), { provider: "gateway", name: "capable-tier" });
-  assert.deepEqual(DEFAULT_RESOLVE_MODEL("mid"), { provider: "gateway", name: "mid-tier" });
-  assert.deepEqual(DEFAULT_RESOLVE_MODEL("fast"), { provider: "gateway", name: "fast-tier" });
-});
-
-test("a configured fast serve resolves to its concrete model, not a downgrade", () => {
-  const { dir, path } = writeConfig({
-    registry: {
-      instances: [
-        {
-          id: "opencode-local",
-          driver: "opencode",
-          host: "localhost",
-          cwd: ".",
-          serves: [
-            { tier: "mid", model: "vendorx/small" },
-            { tier: "fast", model: "vendorx/tiny" },
-          ],
-        },
-      ],
-    },
-  });
-  const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} });
-  assert.ok(config);
-  assert.deepEqual(config!.resolveModel!("fast"), { provider: "vendorx", name: "tiny" });
-  // an unconfigured tier still falls back to its own gateway placeholder, never another tier
-  assert.deepEqual(config!.resolveModel!("capable"), { provider: "gateway", name: "capable-tier" });
-});
+/**
+ * `.arke/config.json` is now a PROVIDER/AUTH PROFILE store (SPEC-016 revised) — the ENDPOINT the
+ * adapter talks to. The concrete MODEL is declared per-agent in the image's `executor` and passed on
+ * each dispatch, so `loadOpenCodeConfig` no longer resolves models — only the endpoint + settings.
+ */
 
 function writeConfig(contents: unknown): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "arke-cfg-"));
@@ -53,46 +18,31 @@ function writeConfig(contents: unknown): { dir: string; path: string } {
   return { dir, path };
 }
 
-test("loadOpenCodeConfig resolves tiers from the registry, never hardcoded", () => {
+test("loadOpenCodeConfig derives baseUrl from an opencode provider profile's host/port", () => {
   const { dir, path } = writeConfig({
-    registry: {
-      instances: [
-        {
-          id: "opencode-local",
-          driver: "opencode",
-          host: "localhost",
-          cwd: ".",
-          serves: [
-            { tier: "capable", model: "vendorx/big" },
-            { tier: "mid", model: "vendorx/small" },
-          ],
-        },
-      ],
+    providers: { "opencode-local": { harness: "opencode", host: "localhost", port: 5000, cwd: ".", credentialsRef: "opencode/gateway" } },
+  });
+  const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: { OPENCODE_SERVER_PASSWORD: "host-only" } });
+  assert.ok(config);
+  assert.equal(config!.baseUrl, "http://127.0.0.1:5000");
+  assert.equal(config!.password, "host-only"); // credentials come from the host env only
+});
+
+test("loadOpenCodeConfig picks the first OpenCode provider and ignores non-opencode ones", () => {
+  const { dir, path } = writeConfig({
+    providers: {
+      "claude-remote": { harness: "claude-code", host: "localhost" },
+      "opencode-local": { harness: "opencode", host: "localhost", port: 4096 },
     },
   });
   const config = loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} });
   assert.ok(config);
-  assert.deepEqual(config!.resolveModel!("capable"), { provider: "vendorx", name: "big" });
-  assert.deepEqual(config!.resolveModel!("mid"), { provider: "vendorx", name: "small" });
-});
-
-test("loadOpenCodeConfig derives baseUrl from host/port and reads password from env only", () => {
-  const { dir, path } = writeConfig({
-    registry: { instances: [{ driver: "opencode", host: "localhost", port: 5000, cwd: "." }] },
-  });
-  const config = loadOpenCodeConfig({
-    configPath: path,
-    baseDir: dir,
-    env: { OPENCODE_SERVER_PASSWORD: "host-only" },
-  });
-  assert.ok(config);
-  assert.equal(config!.baseUrl, "http://127.0.0.1:5000");
-  assert.equal(config!.password, "host-only");
+  assert.equal(config!.baseUrl, "http://127.0.0.1:4096");
 });
 
 test("ARKE_* env vars override individual keys", () => {
   const { dir, path } = writeConfig({
-    registry: { instances: [{ driver: "opencode", host: "localhost", cwd: "." }] },
+    providers: { "opencode-local": { harness: "opencode", host: "localhost", cwd: "." } },
     settings: { permissionTimeoutMs: 1000 },
   });
   const config = loadOpenCodeConfig({
@@ -105,9 +55,12 @@ test("ARKE_* env vars override individual keys", () => {
   assert.equal(config!.permissionTimeoutMs, 42);
 });
 
-test("loadOpenCodeConfig returns null when no opencode instance is configured", () => {
-  const { dir, path } = writeConfig({
-    registry: { instances: [{ driver: "claude-code", host: "localhost", cwd: "." }] },
-  });
+test("loadOpenCodeConfig returns null when no opencode provider is configured", () => {
+  const { dir, path } = writeConfig({ providers: { "claude-remote": { harness: "claude-code", host: "localhost" } } });
+  assert.equal(loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} }), null);
+});
+
+test("loadOpenCodeConfig returns null on an empty/absent config", () => {
+  const { dir, path } = writeConfig({});
   assert.equal(loadOpenCodeConfig({ configPath: path, baseDir: dir, env: {} }), null);
 });

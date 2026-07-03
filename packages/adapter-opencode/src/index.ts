@@ -9,7 +9,6 @@ import type {
   DiffSummary,
   HarnessAdapter,
   ModelInfo,
-  ModelTier,
   PermissionAck,
   PermissionDecision,
   Readiness,
@@ -22,9 +21,7 @@ import {
   DEFAULT_PERMISSION_TIMEOUT_MS,
   DEFAULT_RECONNECT_BASE_MS,
   DEFAULT_RECONNECT_MAX_MS,
-  DEFAULT_RESOLVE_MODEL,
   type OpenCodeConfig,
-  type ResolvedModel,
 } from "./config.js";
 import { OpenCodeError, OpenCodeHttp } from "./http.js";
 import { HarnessProcess } from "./harness-process.js";
@@ -82,7 +79,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
   private readonly onLifecycleEvent?: (record: Record<string, unknown>) => void;
   private harness?: HarnessProcess;
   private readonly permissions: PermissionCoordinator;
-  private readonly resolveModel: (tier: ModelTier) => ResolvedModel;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
 
@@ -108,7 +104,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
     this.store = deps.sessionStore ?? new InMemorySessionStore();
     this.dlq = deps.deadLetterSink ?? new ArrayDeadLetterSink();
     this.onLifecycleEvent = deps.onLifecycleEvent;
-    this.resolveModel = config.resolveModel ?? DEFAULT_RESOLVE_MODEL;
     this.reconnectBaseMs = config.reconnectBaseMs ?? DEFAULT_RECONNECT_BASE_MS;
     this.reconnectMaxMs = config.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS;
 
@@ -242,17 +237,27 @@ export class OpenCodeAdapter implements HarnessAdapter {
     for (const sub of image.subAgents) await this.materializeAgent(sub);
   }
 
-  /** Render the OpenCode agent markdown: frontmatter (with logical `tier:`) + instruction body. */
+  /**
+   * Render the OpenCode agent markdown: frontmatter (concrete `model:` from the agent's executor +
+   * permission) + the instruction/prompt body. OpenCode agents natively support a `model:` field, so
+   * the agent is self-describing to the harness — no tier indirection. A model with options
+   * (e.g. reasoning effort) is emitted as the OpenCode `model: provider/id` + `options:` block.
+   */
   private agentMarkdown(image: AgentImage): string {
     const lines: string[] = ["---", `description: ${image.description ?? image.name}`, `mode: ${image.interaction.mode}`];
-    // The tier is the contract; the registry resolves it to a concrete model at session-create.
-    lines.push(`tier: ${image.tier}`);
+    const model = image.executor.config.model;
+    if (model) lines.push(`model: ${model}`);
+    const options = image.executor.config.options;
+    if (options && Object.keys(options).length > 0) {
+      lines.push("options:");
+      for (const [k, v] of Object.entries(options)) lines.push(`  ${k}: ${v}`);
+    }
     const perms = Object.entries(image.permission);
     if (perms.length > 0) {
       lines.push("permission:");
       for (const [k, v] of perms) lines.push(`  ${k}: ${v}`);
     }
-    lines.push("---", "", image.instructions ?? "");
+    lines.push("---", "", image.prompt ?? image.instructions ?? "");
     return lines.join("\n") + "\n";
   }
 
@@ -327,10 +332,9 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   private messageBody(input: SendMessageInput, _correlationId: string) {
-    const m = this.resolveModel(input.tier);
     const body: {
       agent?: string;
-      model?: { providerID: string; modelID: string; options?: { reasoningEffort: string } };
+      model?: { providerID: string; modelID: string; options?: Record<string, string> };
       parts: { type: "text"; text: string }[];
     } = {
       // NO client messageID: OpenCode orders a session's messages by id (its ids are monotonic,
@@ -358,17 +362,17 @@ export class OpenCodeAdapter implements HarnessAdapter {
         });
       }
     }
-    // OpenCode's message API requires `model: { providerID, modelID }` (not { provider, name }). Only
-    // send a model when Arke has a REAL one configured: the "gateway" value is Arke's not-configured
-    // sentinel (an unmapped tier / empty `serves`), and OpenCode has no `gateway` provider — so omit
-    // it and let OpenCode use the agent's / its own default model rather than 400 on a fake provider.
-    if (m.provider !== "gateway") {
+    // The model is declared on the agent (Omnigent `executor.config`) and resolved by the coordinator,
+    // arriving here as `input.model`. OpenCode's message API requires `model: { providerID, modelID }`
+    // (+ optional `options` like `reasoningEffort`, verified accepted by 1.17.13). When the agent pins
+    // no model (`input.model` absent) OR the provider is the "gateway" not-configured sentinel, omit
+    // the field so OpenCode uses the agent's own materialised/default model rather than 400-ing.
+    const m = input.model;
+    if (m && m.provider !== "gateway") {
       body.model = {
         providerID: m.provider,
         modelID: m.name,
-        // Reasoning effort travels as a model option (verified: OpenCode 1.17.13 accepts
-        // `model.options.reasoningEffort` and gpt-5.5 supports it). Omitted for models without one.
-        ...(m.reasoningEffort ? { options: { reasoningEffort: m.reasoningEffort } } : {}),
+        ...(m.options && Object.keys(m.options).length > 0 ? { options: m.options } : {}),
       };
     }
     return body;
@@ -682,15 +686,13 @@ export { OpenCodeHttp, OpenCodeError, errorDetailFrom } from "./http.js";
 export { HarnessProcess, type HarnessProcessOptions } from "./harness-process.js";
 export {
   type OpenCodeConfig,
-  type ResolvedModel,
+  type ProviderProfile,
   type LoadConfigOptions,
   loadOpenCodeConfig,
   canonicalizeRoot,
   isWithinRoot,
   resolveDirectory,
-  parseModelRef,
   DirectoryEscapeError,
-  DEFAULT_RESOLVE_MODEL,
   DEFAULT_PERMISSION_TIMEOUT_MS,
 } from "./config.js";
 export {
