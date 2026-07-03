@@ -94,10 +94,13 @@ export function parseInstances(raw: unknown): InstanceConfig[] {
 function parseServes(raw: unknown): ServesEntry[] {
   if (!Array.isArray(raw)) return [];
   const out: ServesEntry[] = [];
-  for (const s of raw as Array<{ tier?: unknown; model?: unknown }>) {
+  for (const s of raw as Array<{ tier?: unknown; model?: unknown; reasoningEffort?: unknown }>) {
     const tier = str(s?.tier);
     const model = str(s?.model);
-    if (tier && model && KNOWN_TIERS.has(tier)) out.push({ tier: tier as ModelTier, model });
+    const reasoningEffort = str(s?.reasoningEffort);
+    if (tier && model && KNOWN_TIERS.has(tier)) {
+      out.push({ tier: tier as ModelTier, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
+    }
   }
   return out;
 }

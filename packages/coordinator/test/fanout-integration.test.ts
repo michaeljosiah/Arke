@@ -80,7 +80,8 @@ class FanMockAdapter implements HarnessAdapter {
     this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId: "SPEC-FAN", kind: "task", status: "done" } as DomainEvent);
   }
   pushIdle(sessionId: string) {
-    // `idle` is a per-turn signal, NOT completion — used to prove it does NOT drain the queue.
+    // For a single-dispatch fan-out task session, `idle` is the terminal completion (OpenCode emits
+    // `idle`, not `done`). Used to prove idle DOES drain the queue for task sessions.
     this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId: "SPEC-FAN", kind: "task", status: "idle" } as DomainEvent);
   }
   async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
@@ -172,14 +173,12 @@ test("the concurrency cap queues the excess and drains it as tasks complete", as
     assert.equal(r.result.dispatched, 1, "cap=1 → one dispatched");
     assert.equal(r.result.queued, 1, "one queued");
     const firstSession = adapter.dispatched[0]!.sessionId;
-    // `idle` is a per-turn signal, not completion → it must NOT drain the queue.
+    // A fan-out task is dispatched exactly once, so the harness's `idle` (end of that single agent
+    // loop) IS its terminal completion — against live OpenCode, which emits `idle` and never a
+    // distinct `done`, this is the only completion signal, so it MUST drain the queue.
     adapter.pushIdle(firstSession);
-    await sleep(200);
-    assert.equal(adapter.dispatched.length, 1, "idle does not drain the queue");
-    // `done` is terminal → the queued task drains.
-    adapter.pushDone(firstSession);
     await sleep(300);
-    assert.equal(adapter.dispatched.length, 2, "queued task dispatched after the first completed");
+    assert.equal(adapter.dispatched.length, 2, "task-session idle is terminal → the queued task drains");
   } finally {
     delete process.env.ARKE_MAX_CONCURRENT_TASKS;
   }

@@ -330,7 +330,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const m = this.resolveModel(input.tier);
     const body: {
       agent?: string;
-      model?: { providerID: string; modelID: string };
+      model?: { providerID: string; modelID: string; options?: { reasoningEffort: string } };
       parts: { type: "text"; text: string }[];
     } = {
       // NO client messageID: OpenCode orders a session's messages by id (its ids are monotonic,
@@ -363,7 +363,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
     // sentinel (an unmapped tier / empty `serves`), and OpenCode has no `gateway` provider — so omit
     // it and let OpenCode use the agent's / its own default model rather than 400 on a fake provider.
     if (m.provider !== "gateway") {
-      body.model = { providerID: m.provider, modelID: m.name };
+      body.model = {
+        providerID: m.provider,
+        modelID: m.name,
+        // Reasoning effort travels as a model option (verified: OpenCode 1.17.13 accepts
+        // `model.options.reasoningEffort` and gpt-5.5 supports it). Omitted for models without one.
+        ...(m.reasoningEffort ? { options: { reasoningEffort: m.reasoningEffort } } : {}),
+      };
     }
     return body;
   }

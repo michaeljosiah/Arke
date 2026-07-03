@@ -1999,22 +1999,26 @@ export class ProjectContext {
   }
 
   /**
-   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). `done` is
-   * terminal; `idle` is only the end of one turn (the agent may still be working) so it must NOT
-   * count as completion. `error` is terminal too — it frees the slot, so it also drains.
+   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). A fan-out task
+   * is dispatched EXACTLY ONCE with no follow-up turn, so the harness's `idle` (the end of that single
+   * agent loop) IS the task's terminal completion — against live OpenCode, which emits `idle` and
+   * never a distinct `done`, the queue would otherwise never advance. `done` completes too; `error`
+   * fails it. Authoring/spec sessions are never in `taskSessions`, so their multi-turn `idle`
+   * semantics (where `idle` is just the end of one turn) are unaffected by this.
    */
   private async observeTaskCompletion(event: DomainEvent): Promise<void> {
     if (event.type !== "session.status") return;
-    if (event.status !== "done" && event.status !== "error") return;
+    if (event.status !== "done" && event.status !== "idle" && event.status !== "error") return;
     const link = this.taskSessions.get(event.sessionId);
-    if (!link) return;
+    if (!link) return; // not a fan-out task session — nothing to drain
+    const succeeded = event.status !== "error";
     const store = this.fanoutStore;
     const record = store?.get(link.specId);
     if (record) {
       const task = record.tasks.find((t) => t.taskKey === link.taskKey);
       if (task && task.status === "running") {
-        task.status = event.status === "done" ? "done" : "failed";
-        if (event.status === "error") task.error = "task session reported error";
+        task.status = succeeded ? "done" : "failed";
+        if (!succeeded) task.error = "task session reported error";
         store?.put(record);
       }
     }

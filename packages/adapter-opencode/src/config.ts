@@ -16,6 +16,12 @@ import type { ModelTier } from "@arke/contracts";
 export interface ResolvedModel {
   provider: string;
   name: string;
+  /**
+   * Reasoning effort for models that support it (e.g. `github-copilot/gpt-5.5`), emitted to OpenCode
+   * as `model.options.reasoningEffort`. Configured per served-tier in `.arke/config.json`; absent for
+   * models that don't reason. Host-side only — never returned to the client (NFR-1/5).
+   */
+  reasoningEffort?: string;
 }
 
 export interface OpenCodeConfig {
@@ -115,7 +121,7 @@ interface RegistryInstance {
   baseUrl?: string;
   cwd?: string;
   credentialsRef?: string;
-  serves?: Array<{ tier?: string; model?: string }>;
+  serves?: Array<{ tier?: string; model?: string; reasoningEffort?: string }>;
 }
 
 interface ArkeConfigFile {
@@ -135,7 +141,10 @@ export function parseModelRef(model: string): ResolvedModel {
 function buildResolver(instance: RegistryInstance): (tier: ModelTier) => ResolvedModel {
   const byTier = new Map<string, ResolvedModel>();
   for (const s of instance.serves ?? []) {
-    if (s.tier && s.model) byTier.set(s.tier, parseModelRef(s.model));
+    if (s.tier && s.model) {
+      // The reasoning effort is a property of the served tier, not the model string, so attach it here.
+      byTier.set(s.tier, { ...parseModelRef(s.model), ...(s.reasoningEffort ? { reasoningEffort: s.reasoningEffort } : {}) });
+    }
   }
   return (tier: ModelTier) => byTier.get(tier) ?? DEFAULT_RESOLVE_MODEL(tier);
 }

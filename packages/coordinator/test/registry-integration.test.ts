@@ -15,7 +15,7 @@ import type { RegistryConfig } from "../src/registry.js";
 function registryConfig(): RegistryConfig {
   return {
     instances: [
-      { id: "mock-local", driver: "mock", host: "localhost", cwd: ".", credentialsRef: "mock/cred", serves: [{ tier: "capable", model: "vendorx/big" }, { tier: "mid", model: "vendorx/small" }] },
+      { id: "mock-local", driver: "mock", host: "localhost", cwd: ".", credentialsRef: "mock/cred", serves: [{ tier: "capable", model: "vendorx/big" }, { tier: "mid", model: "vendorx/small", reasoningEffort: "xhigh" }] },
       { id: "claude-local", driver: "claude-code", host: "localhost", cwd: ".", credentialsRef: "claude/default", serves: [{ tier: "capable", model: "anthropic/opus" }] },
     ],
     roster: {
@@ -117,16 +117,24 @@ test("a bad registry surfaces warnings in the opening snapshot (not only as even
   ws.close();
 });
 
-test("no model string or credentialsRef leaks into the snapshot", async () => {
+test("credentials never leak into the snapshot, but the roster surfaces the resolved model", async () => {
   const { c, port } = await start();
   after(() => c.stop());
   const { ws, ready, waitFor } = connect(port);
   await ready;
   const snap = await waitFor((f) => f.type === "snapshot");
   const json = JSON.stringify(snap.registry);
-  for (const leak of ["vendorx", "anthropic/opus", "vendorx/big", "mock/cred", "claude/default", "credentialsRef"]) {
-    assert.ok(!json.includes(leak), `registry projection must not leak '${leak}'`);
+  // The credential ref (value AND field name) must NEVER reach the client.
+  for (const leak of ["mock/cred", "claude/default", "credentialsRef"]) {
+    assert.ok(!json.includes(leak), `registry projection must not leak credential '${leak}'`);
   }
+  // The resolved model IS deliberately surfaced on the roster so an operator can verify which agent
+  // runs on which model (the model id is public; only credentials are secret).
+  const implementer = snap.registry.roster.find((r: any) => r.role === "implementer");
+  assert.equal(implementer?.model, "vendorx/small", "roster surfaces the implementer's resolved model");
+  assert.equal(implementer?.reasoningEffort, "xhigh", "roster surfaces the reasoning effort");
+  const reviewer = snap.registry.roster.find((r: any) => r.role === "reviewer-a");
+  assert.equal(reviewer?.model, "anthropic/opus", "roster surfaces a pinned role's resolved model");
   ws.close();
 });
 

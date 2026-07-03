@@ -16,6 +16,8 @@ import type { ModelInfo, ModelTier } from "@arke/contracts";
 export interface ServesEntry {
   tier: ModelTier;
   model: string; // concrete provider/model string; never sent to the client
+  /** Reasoning effort for a reasoning-capable model (e.g. gpt-5.5 → "xhigh"); passed to the harness. */
+  reasoningEffort?: string;
 }
 
 /** A configured harness instance (registry entry). `credentialsRef` is resolved host-side only. */
@@ -49,6 +51,7 @@ export interface ModelSelection {
   instanceId: string;
   tier: ModelTier;
   model: string; // concrete provider/model string for the adapter; never sent to the client
+  reasoningEffort?: string; // carried from the served tier so the dispatch can request it
 }
 
 /**
@@ -79,12 +82,20 @@ export interface RegistryInstanceStatus {
   catalogUnavailable?: boolean;
 }
 
-/** One role's resolution for the harnesses screen's roster table (no model string). */
+/** One role's resolution for the harnesses screen's roster table. */
 export interface RosterResolution {
   role: string;
   instanceId?: string;
   tier?: ModelTier;
   label?: string;
+  /**
+   * The concrete model + reasoning effort this role resolves to. Deliberately surfaced to the client
+   * (relaxing SPEC-005's tier-label-only projection) so an operator can SEE and verify that e.g. the
+   * implementer runs on `github-copilot/gpt-5.5` at `xhigh`. The model id is not a secret — the
+   * `credentialsRef` is, and that is still never projected.
+   */
+  model?: string;
+  reasoningEffort?: string;
   /** True when no instance serves the role's tier (the registry is incomplete for this role). */
   unresolved?: boolean;
 }
@@ -228,14 +239,14 @@ export class RegistryResolver {
       }
       const served = inst.serves.find((s) => s.tier === entry.tier);
       if (!served) throw new NoInstanceForTierError(role, entry.tier);
-      return { instanceId: inst.id, tier: entry.tier, model: served.model };
+      return { instanceId: inst.id, tier: entry.tier, model: served.model, reasoningEffort: served.reasoningEffort };
     }
 
     // Unpinned: first instance in config order serving the tier (host/cwd locality is the documented
     // tie-breaker; config order already yields a unique first, so it is decisive here).
     for (const inst of this.config.instances) {
       const served = inst.serves.find((s) => s.tier === entry.tier);
-      if (served) return { instanceId: inst.id, tier: entry.tier, model: served.model };
+      if (served) return { instanceId: inst.id, tier: entry.tier, model: served.model, reasoningEffort: served.reasoningEffort };
     }
     throw new NoInstanceForTierError(role, entry.tier);
   }
@@ -320,13 +331,21 @@ export class RegistryResolver {
 
   /**
    * Resolve every roster role for the harnesses screen's roster table (SPEC-005). A role whose tier
-   * no instance serves is returned `unresolved` rather than throwing. No model string is included.
+   * no instance serves is returned `unresolved` rather than throwing. The concrete model + reasoning
+   * effort are included so an operator can verify which agent runs on which model (see RosterResolution).
    */
   rosterResolution(): RosterResolution[] {
     return Object.keys(this.config.roster).map((role) => {
       try {
         const sel = this.resolve(role);
-        return { role, instanceId: sel.instanceId, tier: sel.tier, label: this.labelFor(sel) };
+        return {
+          role,
+          instanceId: sel.instanceId,
+          tier: sel.tier,
+          label: this.labelFor(sel),
+          model: sel.model,
+          ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
+        };
       } catch {
         return { role, unresolved: true };
       }
