@@ -105,6 +105,10 @@ test("a blank-slate spec is renamed from untitled-NNN to a title slug once title
   assert.ok(existsSync(newAbs), "renamed file exists");
   assert.ok(!existsSync(oldAbs), "old untitled file is gone");
   const body = readFileSync(newAbs, "utf8");
+  // Frontmatter stays a SINGLE well-formed block (regression guard against the double-fence corruption).
+  assert.equal((body.match(/^---$/gm) || []).length, 2, "exactly one frontmatter block");
+  assert.equal((body.match(/^spec_id:/gm) || []).length, 1, "exactly one spec_id line");
+  assert.equal((body.match(/^branch:/gm) || []).length, 1, "exactly one branch line");
   assert.match(body, /spec_id: SPEC-\d{4}-\d{2}-\d{2}-evolution-research-report/);
   assert.match(body, /branch: spec\/evolution-research-report/);
   assert.match(body, /title: "Evolution research report/); // title preserved

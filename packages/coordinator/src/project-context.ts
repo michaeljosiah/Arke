@@ -1502,20 +1502,23 @@ export class ProjectContext {
    * unless the spec is still `untitled-NNN`, now carries a real title, and the derived slug differs.
    */
   async renameSpec(oldSpecId: string): Promise<{ renamed: boolean; specId: string; path?: string; branch?: string }> {
-    const found = this.findSpecFile(oldSpecId);
-    if (!found) return { renamed: false, specId: oldSpecId };
-    const stem = basename(found.absPath, ".md"); // e.g. "002.untitled-002"
-    const m = /^(\d{3})\.(.+)$/.exec(stem);
-    if (!m) return { renamed: false, specId: oldSpecId };
-    const [nnn, currentSlug] = [m[1]!, m[2]!];
-    if (!/^untitled-\d+$/.test(currentSlug)) return { renamed: false, specId: oldSpecId }; // already titled
-    const title = (found.frontmatter.title ?? "").trim();
-    if (!title || title.toLowerCase() === "untitled specification") return { renamed: false, specId: oldSpecId };
-    const newSlug = conciseSlugFromTitle(title, currentSlug);
-    if (newSlug === currentSlug) return { renamed: false, specId: oldSpecId };
+    // Acquire the per-spec lock FIRST so the whole read→write→rename is atomic: a concurrent call
+    // (e.g. the per-turn auto-trigger racing an explicit spec.rename op) sees the lock and no-ops
+    // rather than double-applying frontmatter edits and corrupting the file.
     if (this.renamingSpecs.has(oldSpecId)) return { renamed: false, specId: oldSpecId };
     this.renamingSpecs.add(oldSpecId);
     try {
+      const found = this.findSpecFile(oldSpecId);
+      if (!found) return { renamed: false, specId: oldSpecId };
+      const stem = basename(found.absPath, ".md"); // e.g. "002.untitled-002"
+      const m = /^(\d{3})\.(.+)$/.exec(stem);
+      if (!m) return { renamed: false, specId: oldSpecId };
+      const [nnn, currentSlug] = [m[1]!, m[2]!];
+      if (!/^untitled-\d+$/.test(currentSlug)) return { renamed: false, specId: oldSpecId }; // already titled
+      const title = (found.frontmatter.title ?? "").trim();
+      if (!title || title.toLowerCase() === "untitled specification") return { renamed: false, specId: oldSpecId };
+      const newSlug = conciseSlugFromTitle(title, currentSlug);
+      if (newSlug === currentSlug) return { renamed: false, specId: oldSpecId };
       const date = /^SPEC-(\d{4}-\d{2}-\d{2})-/.exec(found.canonicalId)?.[1] ?? new Date().toISOString().slice(0, 10);
       const newSpecId = `SPEC-${date}-${newSlug}`;
       const newBranch = `spec/${newSlug}`;
@@ -2020,19 +2023,22 @@ export class ProjectContext {
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
-      } else if (event.type === "message.updated" && !event.isStreaming && this.streaming.delete(event.sessionId)) {
-        await this.emit({
-          seq: 0,
-          ts: 0,
-          harness: event.harness,
-          ...(event.correlationId ? { correlationId: event.correlationId } : {}),
-          type: "turn.quiescent",
-          sessionId: event.sessionId,
-          turnId: event.messageId,
-        });
-        // SPEC-020: once an authoring turn settles, finalise a blank-slate spec's name if the
-        // spec-author has now written a real title (no-op otherwise).
-        await this.maybeRenameTitledSpec(event.sessionId);
+      } else if (event.type === "message.updated" && !event.isStreaming) {
+        if (this.streaming.delete(event.sessionId)) {
+          await this.emit({
+            seq: 0,
+            ts: 0,
+            harness: event.harness,
+            ...(event.correlationId ? { correlationId: event.correlationId } : {}),
+            type: "turn.quiescent",
+            sessionId: event.sessionId,
+            turnId: event.messageId,
+          });
+        }
+        // SPEC-020: once an ASSISTANT authoring turn settles, finalise a blank-slate spec's name if
+        // the spec-author has now written a real title (no-op otherwise). Decoupled from the
+        // streaming gate above, which requires message.part frames that a short turn may not emit.
+        if (event.role === "assistant") await this.maybeRenameTitledSpec(event.sessionId);
       }
     }
   }
@@ -2175,7 +2181,12 @@ export function conciseSlugFromTitle(title: string, fallback: string): string {
   return s && s !== "spec" ? s : fallback;
 }
 
-/** Replace (or insert) a single scalar frontmatter field, leaving the rest of the document intact. */
+/**
+ * Replace (or insert) a single scalar frontmatter field, leaving the rest of the document intact.
+ * Mirrors {@link setFrontmatterStatus}: `parseFrontmatter().raw` ALREADY includes the `---` fences,
+ * so the result is `newRaw + body` — re-wrapping `raw` in a second pair of fences (an earlier bug)
+ * produced a doc the next call could not re-parse, corrupting the frontmatter.
+ */
 export function setFrontmatterField(md: string, key: string, value: string): string {
   const { raw, body } = parseFrontmatter(md);
   if (!raw) return `---\n${key}: ${value}\n---\n\n${md}`;
@@ -2185,8 +2196,8 @@ export function setFrontmatterField(md: string, key: string, value: string): str
     .split("\n")
     .map((line) => (re.test(line) ? ((replaced = true), `${key}: ${value}`) : line))
     .join("\n");
-  const finalRaw = replaced ? newRaw : `${newRaw}\n${key}: ${value}`;
-  return `---\n${finalRaw}\n---\n${body}`;
+  const withField = replaced ? newRaw : newRaw.replace(/\n---(\r?\n?)$/, `\n${key}: ${value}\n---$1`);
+  return withField + body;
 }
 
 /** The next `NNN` spec number: one above the highest `NNN.` file already in the specifications dir. */

@@ -36,13 +36,20 @@ test("conciseSlugFromTitle takes the headline before the em-dash and caps the wo
   assert.equal(conciseSlugFromTitle("   ", "untitled-005"), "untitled-005");
 });
 
-test("setFrontmatterField replaces an existing scalar and preserves the body", () => {
+test("setFrontmatterField replaces scalars without corrupting the frontmatter (double application)", () => {
   const md = "---\nspec_id: SPEC-x-untitled-002\ntitle: Evolution report\nbranch: spec/untitled-002\n---\n\n# Body\ntext\n";
+  // Apply TWICE (spec_id then branch) — the real rename path. The output must remain a single,
+  // well-formed frontmatter block, not gain a second stray `---` fence.
   const out = setFrontmatterField(setFrontmatterField(md, "spec_id", "SPEC-x-evolution-research-report"), "branch", "spec/evolution-research-report");
-  assert.match(out, /spec_id: SPEC-x-evolution-research-report/);
-  assert.match(out, /branch: spec\/evolution-research-report/);
-  assert.match(out, /title: Evolution report/); // untouched
+  assert.equal((out.match(/^---$/gm) || []).length, 2, "exactly one frontmatter block (two fence lines)");
+  const doc = parseSpecDoc(out);
+  assert.equal(doc.frontmatter.spec_id, "SPEC-x-evolution-research-report");
+  assert.equal(doc.frontmatter.branch, "spec/evolution-research-report");
+  assert.equal(doc.frontmatter.title, "Evolution report"); // untouched
   assert.match(out, /# Body\ntext/); // body intact
+  // No duplicate/stale field lines survived.
+  assert.equal((out.match(/^branch:/gm) || []).length, 1, "exactly one branch line");
+  assert.equal((out.match(/^spec_id:/gm) || []).length, 1, "exactly one spec_id line");
 });
 
 test("nextSpecNumber is one above the highest NNN. file", () => {

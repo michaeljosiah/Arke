@@ -22,8 +22,8 @@
     {
       "name": "rfpx-ui",
       "runtimeExecutable": "dotnet",
-      "runtimeArgs": ["run", "--project", "C:/Users/mjosi/source/repos/RfpExtractor/src/RfpExtractor.Cli", "-c", "Release", "--no-build", "--", "serve", "--port=5177", "--no-browser"],
-      "port": 5177
+      "runtimeArgs": ["run", "--project", "C:/Users/mjosi/source/repos/RfpExtractor/src/RfpExtractor.Cli", "-c", "Release", "--no-build", "--", "serve", "--port=5199", "--no-browser"],
+      "port": 5199
     }
   ]
 }
