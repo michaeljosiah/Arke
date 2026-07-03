@@ -392,14 +392,9 @@ function updatePanel(panelId: string, fn: (p: any) => void) {
   });
 }
 
-// ---- registry projection (SPEC-005) ----
-const TIER_META: Record<string, { label: string; note: string }> = {
-  capable: { label: 'Capable tier', note: 'authoring & review' },
-  mid: { label: 'Standard tier', note: 'implementation' },
-  fast: { label: 'Fast tier', note: 'routine, classification & projection drafts' },
-};
+// ---- registry projection (SPEC-016 revised) ----
 
-/** Map registry instance projections to the harnesses-screen shape (tier labels only, no models). */
+/** Map live harness endpoints (from `registry.updated`) to the harnesses-screen shape. */
 function applyRegistryInstances(instances: any[]) {
   store.set({
     harnesses: (instances || []).map((i) => ({
@@ -415,21 +410,32 @@ function applyRegistryInstances(instances: any[]) {
   });
 }
 
-/** Fold the whole registry projection (instances + tier resolution + roster + warnings). */
+/**
+ * Fold the whole registry projection (SPEC-016 revised): the live harness endpoints + the agent
+ * roster (each agent's DECLARED model) + warnings. Agents own their model now, so the roster is a
+ * role → model table (no logical tiers); the cockpit shows the selected agent's model directly.
+ */
 function applyRegistrySnapshot(reg: any) {
   if (!reg) {
-    store.set({ harnesses: [], tiers: [], roster: [], registryWarnings: [] });
+    store.set({ harnesses: [], roster: [], registryWarnings: [] });
     return;
   }
-  applyRegistryInstances(reg.instances || []);
+  // The snapshot carries `harnesses`; the live `registry.updated` event carries `instances` — accept both.
+  applyRegistryInstances(
+    reg.harnesses
+      ? reg.harnesses.map((h: any) => ({ id: h.id, driver: h.harness, endpoint: h.endpoint, reachable: h.reachable, caps: h.caps, serves: [] }))
+      : reg.instances || [],
+  );
   store.set({
-    tiers: (reg.tierResolution || []).map((t) => ({
-      tier: t.tier,
-      label: TIER_META[t.tier]?.label ?? t.tier,
-      note: TIER_META[t.tier]?.note ?? '',
-      model: t.label, // a leak-free resolution label (e.g. "capable — opencode"), never a model id
+    // role → declared model, for the cockpit composer + the roster screen. The model id is public
+    // (only credentials are secret), so it is shown directly with its reasoning effort.
+    roster: (reg.agents || []).map((a: any) => ({
+      role: a.name,
+      model: a.model,
+      reasoningEffort: a.reasoningEffort,
+      harness: a.harness,
+      label: a.model ? `${a.harness} · ${a.model}` : a.harness,
     })),
-    roster: reg.roster || [],
     registryWarnings: reg.warnings || [], // authoritative snapshot of warnings (replaces, not appends)
   });
 }
@@ -673,7 +679,7 @@ async function submitCockpitPrompt(args: any): Promise<any> {
  * coordinator's response so a stale-session rejection is visible); when offline it is queued,
  * bounded at 50 — a full queue is refused, never silently dropped.
  */
-export async function sendCockpitPrompt(args: { sessionId: string; specId?: string | null; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
+export async function sendCockpitPrompt(args: { sessionId: string; specId?: string | null; agent: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
   if (transport && transport.state === 'open') {
     const res = await submitCockpitPrompt(args);
     return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId ?? args.correlationId } : { status: 'rejected', error: res?.error };

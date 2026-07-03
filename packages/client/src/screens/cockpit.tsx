@@ -16,7 +16,7 @@ function textSig(s: string): number {
 }
 
 // ============================ LIVE MODE (SPEC-006) ============================
-// The authoring agents surfaced in the composer (capable tier; the registry resolves the model).
+// The authoring agents surfaced in the composer; each agent declares its own model (SPEC-016 revised).
 const LIVE_ROLES = ['spec-author', 'architect'];
 const PREVIEW_POLL_MS = 30000; // fallback re-poll guarding against a missed message.updated
 
@@ -100,8 +100,15 @@ function LiveCockpit() {
   const [refreshed, setRefreshed] = React.useState(false);
   const [draft, setDraft] = React.useState('');
   const [role, setRole] = React.useState('spec-author');
-  const [tier, setTier] = React.useState('capable');
   const [sessionId, setSessionId] = React.useState<string | null>(null);
+  // The selected agent's DECLARED model (SPEC-016 revised — the agent owns its model+provider, no
+  // per-turn tier). Looked up from the live roster; a client-safe label (`harness · model`).
+  const roster = useStore((s: any) => s.roster) as any[];
+  const agentModelLabel = React.useMemo(() => {
+    const r = (roster || []).find((x: any) => x.role === role);
+    if (!r) return null;
+    return r.reasoningEffort ? `${r.label} · ${r.reasoningEffort}` : r.label;
+  }, [roster, role]);
   // A single ordered conversation: human turns are appended when accepted, agent turns are merged
   // from the live transcript as they arrive — so order is chronological (PR #18 review round 2).
   const [convo, setConvo] = React.useState<any[]>([]);
@@ -109,10 +116,10 @@ function LiveCockpit() {
   // own attribution even if the composer's role selector changes later (PR #18 review round 2).
   const roleByMsgId = React.useRef<Map<string, string>>(new Map());
   const lastSentRole = React.useRef<string | undefined>(undefined); // fallback attribution
-  // The tier each turn ran at (client-safe label; vendor model ids never reach the client per
-  // SPEC-005). Shown on agent turns when the session card carries no resolved model (PR #18 round 6).
-  const tierByMsgId = React.useRef<Map<string, string>>(new Map());
-  const lastSentTier = React.useRef<string | undefined>(undefined);
+  // The model label each turn ran on (client-safe `harness · model`, the agent's declared model —
+  // SPEC-016 revised). Shown on agent turns when the session card carries no resolved model.
+  const modelByMsgId = React.useRef<Map<string, string>>(new Map());
+  const lastSentModel = React.useRef<string | undefined>(undefined);
   const latestSpec = React.useRef<string | null>(specId); // guards against stale spec.file responses
   const [approving, setApproving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
@@ -145,9 +152,9 @@ function LiveCockpit() {
     setConvo([]);
     setFile(null);
     roleByMsgId.current = new Map();
-    tierByMsgId.current = new Map();
+    modelByMsgId.current = new Map();
     lastSentRole.current = undefined;
-    lastSentTier.current = undefined;
+    lastSentModel.current = undefined;
   }, [specId]);
 
   // Keep the store's activeSpec in step with the spec the cockpit actually resolved (fallback chain
@@ -232,7 +239,7 @@ function LiveCockpit() {
         const key = 'a:' + t.messageId;
         // Label with the resolved model if the session carries one, else the tier the turn ran at
         // (client-safe; SPEC-005 keeps vendor model ids off the client).
-        const label = modelLabel ?? tierByMsgId.current.get(t.messageId) ?? lastSentTier.current;
+        const label = modelLabel ?? modelByMsgId.current.get(t.messageId) ?? lastSentModel.current;
         const entry = { key, kind: 'agent', text: t.text, agent: roleByMsgId.current.get(t.messageId) ?? lastSentRole.current ?? 'agent', model: label, streaming: t.isStreaming, toolCalls: t.toolCalls || [] };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
@@ -271,15 +278,16 @@ function LiveCockpit() {
       if (sid !== sessionId) setSessionId(sid); // remember the (created or reused) session
       // Record the reply's attribution + tier BEFORE awaiting: prompt.send resolves only when the
       // turn completes, by which time the transcript (and its agent turn) may already be merged — so
-      // set roleByMsgId/tierByMsgId by a client-generated correlationId now, with lastSent* fallbacks
+      // set roleByMsgId/modelByMsgId by a client-generated correlationId now, with lastSent* fallbacks
       // for turns whose messageId differs from the correlationId (PR #18 review rounds 5–6).
       // Prefix with `msg` so it is a valid OpenCode messageID (the harness rejects ids that don't) and
       // stays identical on the wire — keeping the correlationId the transcript is attributed by intact.
       const correlationId = `msg_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}${Math.random().toString(36).slice(2)}`).replace(/-/g, '')}`;
+      const modelLabelForTurn = agentModelLabel ?? sentAs;
       roleByMsgId.current.set(correlationId, sentAs);
-      tierByMsgId.current.set(correlationId, tier);
+      modelByMsgId.current.set(correlationId, modelLabelForTurn);
       lastSentRole.current = sentAs;
-      lastSentTier.current = tier;
+      lastSentModel.current = modelLabelForTurn;
       // Optimistically show the human turn + clear the composer for immediate feedback. Roll back on
       // a rejection/queue-full so the message stays editable (PR #18 review rounds 1–4). A silent
       // kickoff nudge shows no human bubble and never touches the composer.
@@ -288,7 +296,7 @@ function LiveCockpit() {
         setConvo((c) => [...c, { key, kind: 'human', text }]);
         setDraft('');
       }
-      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, tier, message: text, correlationId });
+      const outcome = await sendCockpitPrompt({ sessionId: sid, specId, agent: sentAs, message: text, correlationId });
       if (outcome.status === 'rejected' || outcome.status === 'full') {
         if (!silent) {
           setConvo((c) => c.filter((x: any) => x.key !== key)); // undo the optimistic turn
@@ -364,9 +372,12 @@ function LiveCockpit() {
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
           grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
             e(Icon, { name: 'file', size: 11 }), g.name))) : null,
-        e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
           e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: setRole }),
-          e(MiniSelect, { value: tier, icon: 'cpu', options: ['capable', 'mid', 'fast'], onChange: setTier })),
+          // The model is the agent's own (SPEC-016 revised) — shown read-only, not chosen per turn.
+          e('span', { title: 'The selected agent declares its own model and provider in its image; edit the agent to change it.',
+            style: { display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '3px 9px' } },
+            e(Icon, { name: 'cpu', size: 11 }), agentModelLabel || 'model set by agent')),
         e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
         e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 9 } },
           e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
