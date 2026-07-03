@@ -1,10 +1,20 @@
 # Adopting the Omnigent agent YAML structure in Arke
 
-**Status:** investigation / design proposal
+**Status:** ✅ implemented (breaking; SPEC-016 revised) — the sections below are the design that was executed.
 **Author:** (drafted with Claude)
 **Scope:** how Arke defines agents and specifies models/providers — adopt Omnigent's
 declarative `executor`-based YAML 100% (copying the *structure*, not depending on the Omnigent
 runtime), as the foundation for a light abstraction over Omnigent later.
+
+**What shipped:** agent images declare `executor: { type: omnigent, config: { harness, model, options?, auth: { profile } } }`;
+the loader rejects an inline `api_key` (NFR-1) but accepts the public `model`. `.arke/config.json` is now a
+`providers` map of host-side provider/auth profiles (endpoint + `credentialsRef`), not a tier→model registry.
+The coordinator's new `AgentRegistry` resolves each agent's declared model and dispatch sends it directly on
+`SendMessageInput.model`; the review panel checks reviewer independence from the agents' declared models; the
+registry projection is now `{ harnesses, agents, warnings }`. The client cockpit shows each agent's declared
+model (read-only) instead of a per-turn tier selector. Scaffolding writes the new provider-profile config plus
+self-describing agent images. Both the OpenCode and Omnigent adapters map `model` onto their wire. The whole
+logical-tier indirection (`capable|mid|fast`, `RegistryResolver`, tier serves/roster) is removed from the live path.
 
 ---
 
