@@ -118,11 +118,16 @@ export function setAgentModel(dir: string, model: string, reasoningEffort?: stri
   if (reasoningEffort) {
     doc.setIn(["executor", "config", "options", "reasoningEffort"], reasoningEffort);
   } else {
-    doc.deleteIn(["executor", "config", "options", "reasoningEffort"]);
-    // Drop an options map that is now empty, so we don't leave a bare `options:` key behind.
+    // Remove a previously-set effort — but ONLY when an `options` map actually exists, else the YAML
+    // Document API throws ("Expected YAML collection at options") traversing a non-existent path.
     const options = doc.getIn(["executor", "config", "options"]) as { items?: unknown[] } | undefined;
-    if (options && Array.isArray(options.items) && options.items.length === 0) {
-      doc.deleteIn(["executor", "config", "options"]);
+    if (options) {
+      doc.deleteIn(["executor", "config", "options", "reasoningEffort"]);
+      // Drop an options map that is now empty, so we don't leave a bare `options:` key behind.
+      const after = doc.getIn(["executor", "config", "options"]) as { items?: unknown[] } | undefined;
+      if (after && Array.isArray(after.items) && after.items.length === 0) {
+        doc.deleteIn(["executor", "config", "options"]);
+      }
     }
   }
   writeFileSync(configPath, String(doc), "utf8");

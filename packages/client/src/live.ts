@@ -466,7 +466,12 @@ export async function fetchModels(): Promise<Array<{ id: string; provider: strin
 export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string): Promise<{ ok: boolean; error?: string; model?: string }> {
   if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to change an agent’s model' };
   const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
-  return res?.ok ? { ok: true, model: res.result?.model } : { ok: false, error: res?.error };
+  if (!res?.ok) return { ok: false, error: res?.error };
+  // Refresh the roster from the authoritative snapshot: the live `registry.updated` event carries
+  // only the harness endpoints, so the agent roster (which drives the model chip) is re-read here.
+  const snap = await liveRequest('registry.get');
+  if (snap?.ok && snap.result) applyRegistrySnapshot(snap.result);
+  return { ok: true, model: res.result?.model };
 }
 
 // The project this client INTENDS to be on (set by every successful project.open). A reconnect

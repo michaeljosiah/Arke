@@ -73,6 +73,19 @@ test("setAgentModel rewrites the declared model + reasoning effort, preserving t
   assert.equal(image.permission.edit, "allow");
 });
 
+test("setAgentModel on an image with no options block does not throw (effort omitted)", () => {
+  // Regression: deleteIn(...options...) threw "Expected YAML collection at options" when no options
+  // map existed (e.g. spec-author), aborting the write. Setting a model with no effort must succeed.
+  const dir = imageDir({
+    "config.yaml": "spec_version: 1\nname: spec-author\nexecutor:\n  type: omnigent\n  config:\n    harness: opencode-native\n    model: github-copilot/claude-opus-4.8\n    auth:\n      profile: opencode-local\n",
+  });
+  setAgentModel(dir, "github-copilot/claude-sonnet-4.5"); // no options block, no effort → must not throw
+  const image = loadAgentImage(dir);
+  assert.equal(image.executor.config.model, "github-copilot/claude-sonnet-4.5");
+  assert.equal(image.executor.config.options?.reasoningEffort, undefined);
+  assert.equal(image.executor.config.auth?.profile, "opencode-local");
+});
+
 test("setAgentModel with no effort drops a previously-set reasoning effort", () => {
   const dir = imageDir({
     "config.yaml":
