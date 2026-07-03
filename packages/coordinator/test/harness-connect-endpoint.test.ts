@@ -33,3 +33,13 @@ test("descriptorFor preserves an https scheme so a TLS harness round-trips", () 
   assert.equal(d.baseUrl, "https://gw.example.com");
   assert.equal(d.host, "gw.example.com");
 });
+
+test("perRootHarnessPort is deterministic per root, distinct across roots, within base+1..base+400", async () => {
+  const { perRootHarnessPort } = await import("../src/server.js");
+  const a1 = perRootHarnessPort(4096, "C:/Users/x/repos/ProjectA");
+  const a2 = perRootHarnessPort(4096, "C:/Users/x/repos/ProjectA");
+  const b = perRootHarnessPort(4096, "C:/Users/x/repos/ProjectB");
+  if (a1 !== a2) throw new Error("not deterministic");
+  if (a1 < 4097 || a1 > 4496) throw new Error(`out of range: ${a1}`);
+  if (a1 === b) throw new Error("collision between distinct roots (expected for these two)");
+});

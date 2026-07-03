@@ -227,6 +227,95 @@ test("convenePanel rejects a config without enough distinct capable models", asy
   ws.close();
 });
 
+/**
+ * Adapter that reproduces the real harness ordering: the reviewer's own PROMPT arrives first as a
+ * completed `message.updated` with role "user" — and that prompt embeds an example issues array —
+ * followed by the reviewer's real assistant answer. The panel must ingest ONLY the assistant answer.
+ */
+class PromptEchoMockAdapter implements HarnessAdapter {
+  readonly id = "PromptEchoMock";
+  private q: DomainEvent[] = [];
+  private n = 0;
+  capabilities(): ReadonlySet<Capability> {
+    return new Set<Capability>(["events", "diff"]);
+  }
+  readiness(): Readiness {
+    return { ready: true };
+  }
+  async createSession(input: CreateSessionInput): Promise<SessionRef> {
+    return { sessionId: `${input.specId}-s${++this.n}` };
+  }
+  async sendMessage(i: SendMessageInput): Promise<SendReceipt> {
+    return { sessionId: i.sessionId, correlationId: "c" };
+  }
+  async dispatchAsync(i: SendMessageInput): Promise<SendReceipt> {
+    const real: Record<string, string> = {
+      "reviewer-a": JSON.stringify([{ section: SECTION, severity: "blocking", text: "REAL-a-concern" }]),
+      "reviewer-b": JSON.stringify([{ section: SECTION, severity: "suggestion", text: "REAL-b-concern" }]),
+    };
+    const mine = real[i.agent];
+    if (mine) {
+      const promptWithExample = [
+        "You are a reviewer. End with a fenced block like:",
+        "```json",
+        '[{"section":"PROMPT EXAMPLE","severity":"blocking","text":"EXAMPLE-FROM-PROMPT-MUST-BE-IGNORED"}]',
+        "```",
+      ].join("\n");
+      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId: i.sessionId, specId: "SPEC-TEST", kind: "task", status: "running" } as DomainEvent);
+      // The user prompt is a COMPLETED (non-streaming) message.updated — the exact shape that fooled the parser.
+      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId: i.sessionId, messageId: `u-${i.sessionId}`, role: "user", text: promptWithExample, toolCalls: [], isStreaming: false } as DomainEvent);
+      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId: i.sessionId, messageId: `m-${i.sessionId}`, role: "assistant", text: mine, toolCalls: [], isStreaming: false } as DomainEvent);
+    }
+    return { sessionId: i.sessionId, correlationId: "c" };
+  }
+  async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
+    while (!signal?.aborted) {
+      const next = this.q.shift();
+      if (next) {
+        yield next;
+        continue;
+      }
+      await new Promise<void>((r) => {
+        const t = setTimeout(r, 10);
+        signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+      });
+    }
+  }
+}
+
+test("the panel ingests the reviewer's ANSWER, never the example array embedded in its prompt", async () => {
+  const dir = repoWithSpec();
+  const c = new Coordinator(new PromptEchoMockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
+    projectRoot: dir,
+    registry: new ProjectRegistry({ persist: false }),
+    registryConfig: registryConfig(),
+    connectedInstanceId: "claude-local",
+    idleTtlMs: 0,
+  });
+  const port = await c.start();
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+
+  const conv = await request("convenePanel", { specId: "SPEC-TEST" });
+  assert.equal(conv.ok, true);
+
+  const issueA = await ev("panel.issue", (e) => e.reviewerRole === "reviewer-a");
+  const issueB = await ev("panel.issue", (e) => e.reviewerRole === "reviewer-b");
+  await ev("panel.complete");
+
+  // The REAL answers are ingested…
+  assert.equal(issueA.event.text, "REAL-a-concern");
+  assert.equal(issueB.event.text, "REAL-b-concern");
+  // …and the example from the prompt is NEVER surfaced as an issue.
+  const anyExample = frames.some((f) => f.type === "event" && f.event?.type === "panel.issue" && /EXAMPLE-FROM-PROMPT|PROMPT EXAMPLE/.test(f.event.text + f.event.section));
+  assert.equal(anyExample, false, "the prompt's example array must not be parsed as a reviewer issue");
+  // Exactly one issue per reviewer (the user echo did not also produce one).
+  const issueCount = frames.filter((f) => f.type === "event" && f.event?.type === "panel.issue").length;
+  assert.equal(issueCount, 2);
+  ws.close();
+});
+
 test("adjudicate: dismiss records the decision; accept routes to the authoring agent", async () => {
   const dir = repoWithSpec();
   const { c, port } = await start(dir, registryConfig());

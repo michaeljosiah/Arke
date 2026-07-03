@@ -418,8 +418,27 @@ export async function reprobeRegistry(): Promise<void> {
   if (res?.ok && res.result) applyRegistrySnapshot(res.result);
 }
 
+// The project this client INTENDS to be on (set by every successful project.open). A reconnect
+// binds the fresh server-side connection to the DEFAULT project, so without re-binding, prompts
+// silently dispatch against the wrong project's harness while the UI still shows the intended one.
+let desiredProjectId: string | null = null;
+let rebindInFlight = false;
+
 /** Seed the local read model from a coordinator snapshot frame (cards + onboarding state). */
 function applySnapshot(snap: any) {
+  // A snapshot for a project OTHER than the one this client intends (e.g. the default-project
+  // snapshot pushed after a silent reconnect): do not apply it — re-open the intended project
+  // instead, whose own snapshot then arrives and applies. One attempt per mismatch; if the reopen
+  // fails, fall through to applying whatever the server sends so the UI is never stranded.
+  if (desiredProjectId && snap?.projectId && snap.projectId !== desiredProjectId && !rebindInFlight) {
+    rebindInFlight = true;
+    void liveRequest('project.open', { projectId: desiredProjectId }, 180000).then((res: any) => {
+      rebindInFlight = false;
+      if (!res?.ok) { desiredProjectId = null; store.set({ live: true }); }
+    });
+    return;
+  }
+  if (snap?.projectId && snap.projectId === desiredProjectId) rebindInFlight = false;
   const snapCards: any[] = Array.isArray(snap?.cards) ? snap.cards : [];
   cards.clear();
   specStatus.clear();
@@ -481,12 +500,36 @@ export async function refreshRecents(): Promise<void> {
   if (res?.ok && Array.isArray(res.result)) store.set({ recents: res.result });
 }
 
+/** Refresh the spec library for the active project (SPEC-008 / SPEC-020 after creating a new spec). */
+export async function refreshSpecs(): Promise<void> {
+  const res = await liveRequest('spec.library');
+  if (res?.ok && Array.isArray(res.result)) store.set({ specs: res.result });
+}
+
+/**
+ * Create a new blank-slate specification (SPEC-020) and open the cockpit on it. Returns the new
+ * specId, or null on failure (surfaced to the caller).
+ */
+export async function createSpecLive(title: string): Promise<{ specId: string } | null> {
+  const res = await liveRequest('spec.create', { title }, 30000);
+  if (!res?.ok) return null;
+  await refreshSpecs();
+  // kickoffFor arms the cockpit's one-shot opening nudge: the spec-author greets the engineer and
+  // asks what they want to achieve, so a blank slate never opens onto dead silence (SPEC-020).
+  store.set((s: any) => ({ activeSpec: res.result.specId, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
+  return { specId: res.result.specId };
+}
+
 /** Open/switch the active project; the coordinator re-snapshots. Returns the open result. */
 export async function openProjectLive(target: { projectId?: string; path?: string }): Promise<any> {
-  // A cold open may spawn + health-check a managed harness, which can take much longer than the
-  // default request window; allow 90s so the UI doesn't report a still-in-progress open as failed.
-  const res = await liveRequest('project.open', target, 90000);
-  if (res?.ok) void refreshRecents();
+  // A cold open may spawn + health-check a managed harness AND read its model catalog, which can take
+  // much longer than the default request window; allow 3 minutes so the UI doesn't report a
+  // still-in-progress open as failed (observed cold spawns >90s on Windows).
+  const res = await liveRequest('project.open', target, 180000);
+  if (res?.ok) {
+    desiredProjectId = res.result?.projectId ?? null; // the project this client now intends to be on
+    void refreshRecents();
+  }
   return res;
 }
 
@@ -602,7 +645,7 @@ async function submitCockpitPrompt(args: any): Promise<any> {
  * coordinator's response so a stale-session rejection is visible); when offline it is queued,
  * bounded at 50 — a full queue is refused, never silently dropped.
  */
-export async function sendCockpitPrompt(args: { sessionId: string; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
+export async function sendCockpitPrompt(args: { sessionId: string; specId?: string | null; agent: string; tier: string; message: string; correlationId?: string }): Promise<{ status: 'sent' | 'rejected' | 'queued' | 'full'; error?: string; correlationId?: string }> {
   if (transport && transport.state === 'open') {
     const res = await submitCockpitPrompt(args);
     return res?.ok ? { status: 'sent', correlationId: res.result?.correlationId ?? args.correlationId } : { status: 'rejected', error: res?.error };

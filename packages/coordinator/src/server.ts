@@ -1,4 +1,5 @@
 import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -303,17 +304,17 @@ export class Coordinator {
   }
 
   /**
-   * After a scaffold writes the first `.arke/config.json` into a project that opened greenfield (its
-   * context holds a not-ready adapter), rebuild that context so it picks up the real harness. Without
-   * this the project still holds the NullAdapter and can't create sessions or run grounding until the
-   * coordinator restarts (PR #10 review). Re-snapshots the affected connections so the gate flips.
+   * After a scaffold writes into a project's own root, rebuild that context so it picks up what the
+   * scaffold produced: the `.arke/config.json` registry AND the `.opencode/agents` roster. This must
+   * run even when the harness was ALREADY live — a per-root OpenCode spawned pre-scaffold cached an
+   * agent catalog without the roster, so `spec-author` etc. would silently degrade to the default
+   * agent until a restart. Re-snapshots the affected connections so the gate/roster state is fresh.
    */
   private async reloadContextIfHarnessAppeared(ctx: ProjectContext, rawPath: unknown): Promise<void> {
     // Only the in-place case: a scaffold targeting the context's OWN root. A clone scaffolds a
     // subdirectory that becomes its own context on project.open (which already builds fresh deps).
     const target = resolve(ctx.root, typeof rawPath === "string" && rawPath.trim() ? rawPath : ".");
     if (target !== ctx.root) return;
-    if (ctx.adapter.readiness?.().ready !== false) return; // harness already live → nothing to do
     if (!existsSync(resolve(ctx.root, ".arke", "config.json"))) return; // no config was produced
     await this.reloadContext(ctx.projectId);
   }
@@ -749,6 +750,19 @@ export function descriptorFor(driver: string, endpoint: string): InstanceConfig 
   };
 }
 
+/**
+ * The deterministic managed-harness port for a non-default project root (SPEC-018: per-project
+ * harness runners). One OpenCode server CANNOT be shared across project directories on this build —
+ * its non-primary `?directory=` handling on Windows mangles paths (interleaving the server cwd with
+ * the requested root) and 500s — so each managed context spawns its own server scoped to its own
+ * root. The port is derived from the root (base+1 … base+400) so the SAME root maps to the SAME port
+ * across coordinator restarts, letting crash-recovery adoption find its own orphan.
+ */
+export function perRootHarnessPort(basePort: number, root: string): number {
+  const h = createHash("sha1").update(resolve(root)).digest();
+  return basePort + 1 + (h.readUInt16BE(0) % 400);
+}
+
 /** Deep-copy a client request, redacting URL credentials from every string value. */
 function redactRequest(msg: unknown): unknown {
   try {
@@ -828,6 +842,15 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
     return { adapter: new MockAdapter(), trace, grants, endpoints: [], tierDefaults: GATEWAY_TIER_DEFAULTS, ...registryDeps };
   }
   const config = loadOpenCodeConfig({ configPath, baseDir: root, globalConfigPath: globalConfigPath() });
+  // SPEC-018 per-project harness runners: a MANAGED context whose root differs from the default
+  // project gets its own OpenCode on a per-root port — this build cannot serve a non-primary
+  // directory (its Windows `?directory=` handling mangles paths and 500s). Attach mode is left
+  // untouched (the engineer owns that server's lifecycle and placement).
+  if (config?.manageHarness && resolve(root) !== resolve(REPO_ROOT)) {
+    const u = new URL(config.baseUrl);
+    u.port = String(perRootHarnessPort(Number(u.port || 4096), root));
+    config.baseUrl = u.origin;
+  }
   if (!config) {
     // Absent config → genuine greenfield (the scaffold `config` step writes the real one). A config
     // that EXISTS but is unparseable / has no OpenCode instance is a different situation: the config

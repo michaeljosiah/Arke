@@ -81,6 +81,15 @@ export class HarnessProcess {
       stdio: "ignore",
       shell: this.opts.shell ?? false,
     });
+    // A ChildProcess with no `error` listener CRASHES the whole process on spawn failure
+    // (observed: transient `spawn cmd.exe ENOENT` under heavy process churn on Windows took the
+    // coordinator down in a tsx-watch restart loop). Treat it like an exit so start() rejects.
+    this.child.on("error", (err) => {
+      if (this.exited) return;
+      this.exited = true;
+      this.opts.onExit?.(null, null);
+      void err;
+    });
     this.child.on("exit", (code, signal) => {
       this.exited = true;
       this.opts.onExit?.(code, signal);

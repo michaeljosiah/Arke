@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { FolderInspector, type FolderState } from "./folder-inspector.js";
 import { InputValidator, ValidationError } from "./input-validator.js";
@@ -102,7 +103,12 @@ export interface CreateResult {
   name: string;
 }
 
-/** Create an empty `<dest ?? workspaceRoot>/<name>` (bounded) for a greenfield project to scaffold into. */
+/**
+ * Create `<dest ?? workspaceRoot>/<name>` (bounded) for a greenfield project to scaffold into. The
+ * folder is initialised as a git repository with an empty first commit when git is available — the
+ * whole method depends on git (spec branches, approval commits, task worktrees), so a "new project"
+ * that isn't a repo dead-ends at the first approval.
+ */
 export function createProject(workspaceRoot: string, rawDest?: unknown, rawName?: unknown): CreateResult {
   const root = resolve(workspaceRoot);
   const dest = destDir(root, rawDest);
@@ -110,6 +116,11 @@ export function createProject(workspaceRoot: string, rawDest?: unknown, rawName?
   const target = InputValidator.canonicalisePath(name, dest);
   if (existsSync(target)) throw new ValidationError("name", `'${name}' already exists in the destination`);
   mkdirSync(target, { recursive: true });
+  if (gitAvailable()) {
+    const opts = { cwd: target, encoding: "utf8" as const, timeout: 20_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+    spawnSync("git", ["init", "-q"], opts);
+    spawnSync("git", ["commit", "-q", "--allow-empty", "-m", "chore: initialise project (arke new-project)"], opts);
+  }
   return { path: target, name };
 }
 
