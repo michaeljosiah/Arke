@@ -472,7 +472,9 @@ export function Library() {
     (s.status || '').toLowerCase().includes(ql) ||
     (s.capabilities || []).some((c: string) => c.toLowerCase().includes(ql))
   ));
-  const open = (s) => store.set({ activeSpec: s.specId, view: s.status === 'draft' || s.status === 'in-review' ? 'cockpit' : 'board' });
+  // Clear activeCard: the cockpit's spec resolution prefers a selected board card over activeSpec, so
+  // a stale card from a prior board interaction would otherwise shadow the spec the user just clicked.
+  const open = (s) => store.set({ activeSpec: s.specId, activeCard: null, view: s.status === 'draft' || s.status === 'in-review' ? 'cockpit' : 'board' });
 
   if (specs.length === 0) {
     return e('div', { style: { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 } },

@@ -542,7 +542,9 @@ export async function createSpecLive(title: string): Promise<{ specId: string } 
   await refreshSpecs();
   // kickoffFor arms the cockpit's one-shot opening nudge: the spec-author greets the engineer and
   // asks what they want to achieve, so a blank slate never opens onto dead silence (SPEC-020).
-  store.set((s: any) => ({ activeSpec: res.result.specId, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
+  // activeCard is cleared so a stale board-card selection can't shadow the brand-new spec in the
+  // cockpit's spec resolution (which prefers a selected card over activeSpec).
+  store.set((s: any) => ({ activeSpec: res.result.specId, activeCard: null, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
   return { specId: res.result.specId };
 }
 
