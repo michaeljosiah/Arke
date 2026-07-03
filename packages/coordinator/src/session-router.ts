@@ -1,3 +1,13 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ⚰️  DEAD CODE — SCHEDULED FOR REMOVAL (SPEC-016 revised / Omnigent adoption).
+//
+// This entire module is unused on the live path. Agents now DECLARE their own harness + model +
+// provider in their image `executor` block, and dispatch sends that model directly on
+// `SendMessageInput.model` (see AgentRegistry + ProjectContext.modelArg). There is no longer any
+// role→tier→instance routing, so this SessionRouter (and the RegistryResolver it wraps) is vestigial.
+// Nothing in src/ imports it — only its own test. Delete this file, session-router.test.ts, and the
+// tier machinery in registry.ts together. Tracking: docs/design/dead-code-removal.md.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 import type { HarnessAdapter, ModelTier } from "@arke/contracts";
 import {
   NoInstanceForTierError,
@@ -8,6 +18,8 @@ import {
 } from "./registry.js";
 
 /**
+ * @deprecated DEAD CODE (SPEC-016 revised) — see the banner above; scheduled for removal.
+ *
  * Routes a role to the harness instance that serves the model it needs (SPEC-005). No caller names
  * a harness directly — routing is always a consequence of {@link RegistryResolver.resolve}. The
  * router also owns the runtime view the resolver (pure config) cannot: which instances are

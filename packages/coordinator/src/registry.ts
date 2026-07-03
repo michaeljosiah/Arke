@@ -222,17 +222,33 @@ export function modelMatchesCatalog(model: string, catalog: ModelInfo[]): boolea
   return catalog.some((m) => m.provider === effectiveProvider && m.id === name);
 }
 
-// ---- resolver ---------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ⚰️  DEAD CODE BELOW — SCHEDULED FOR REMOVAL (SPEC-016 revised / Omnigent adoption).
+//
+// Everything from here to the end of the file (RegistryResolver + tierLabelFor + blockKey) is the
+// logical-tier resolution engine. It is unused on the live path: agents now declare their own model
+// in their image `executor`, and dispatch sends it directly (see AgentRegistry). Only registry.test.ts
+// and the already-dead session-router.ts still reference it. Delete this block together with those.
+//
+// KEEP (still LIVE — do NOT delete with this block): the config types above — ServesEntry,
+// InstanceConfig, RosterEntry, RegistryConfig — and the projection types HarnessStatus /
+// AgentRosterEntry / RegistrySnapshot / RegistryWarning. InstanceConfig/RegistryConfig are still used
+// by the SPEC-019 global harness-connect flow (global-config.ts, descriptorFor, config-resolve.ts),
+// and the projection types are the current snapshot shape. Tracking: docs/design/dead-code-removal.md.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 const REVIEWER_A = "reviewer-a";
 const REVIEWER_B = "reviewer-b";
 
-/** A human-readable, leak-free description of a selection's model for the trace/projection. */
+/** @deprecated DEAD CODE (SPEC-016 revised). A leak-free tier/driver label for the old projection. */
 function tierLabelFor(tier: ModelTier, driver: string): string {
   return `${tier} — ${driver}`;
 }
 
 /**
+ * @deprecated DEAD CODE (SPEC-016 revised) — the logical-tier resolver; agents declare their own
+ * model now (see AgentRegistry). Scheduled for removal with session-router.ts. See the banner above.
+ *
  * Resolves roles to model selections and validates the registry (SPEC-005). Pure and synchronous:
  * tracing and routing side effects live in the SessionRouter / RegistryLoader that wrap it.
  */

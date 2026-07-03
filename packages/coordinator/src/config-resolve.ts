@@ -28,6 +28,12 @@ export interface EffectiveConfig extends RegistryConfig {
   settings?: ProcessSettings;
 }
 
+/**
+ * @deprecated DEAD CODE (SPEC-016 revised) — merges tier `registry` blocks that nothing reads on the
+ * live path anymore (agents declare their own model). Unused except by config-resolve.test.ts;
+ * scheduled for removal. `resolveProcessSettings` below is LIVE — do not remove it with this.
+ * Tracking: docs/design/dead-code-removal.md.
+ */
 export function resolveEffectiveConfig(
   global: GlobalConfig | null | undefined,
   project: RegistryConfig | null | undefined,
@@ -78,6 +84,9 @@ export class SubstrateExclusivityError extends Error {
 }
 
 /**
+ * @deprecated DEAD CODE (SPEC-016 revised) — unused except by config-resolve.test.ts; scheduled for
+ * removal. Tracking: docs/design/dead-code-removal.md.
+ *
  * Enforce substrate exclusivity on a (merged) config (SPEC-019 / ADR-0004): the registry is EITHER
  * leaf instances OR a single Omnigent substrate, never both. Throws {@link SubstrateExclusivityError}
  * on a mix so the caller can surface the conflict rather than silently routing against one.
