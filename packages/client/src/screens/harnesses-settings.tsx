@@ -26,7 +26,7 @@ export function Harnesses() {
   const warnings = registryWarnings || [];
   return e(Page, { max: 1020 },
     e(SectionHead, { eyebrow: 'Project', title: 'Harnesses & models',
-      sub: 'A live registry of configured harness instances, their capabilities, and the logical tiers they serve. You choose a role and a tier; a routing layer chooses the harness — tier → model → harness. Model ids live host-side in .arke/config.json and never reach this screen.',
+      sub: 'A live registry of configured harness instances, their capabilities, and the logical tiers they serve. You choose a role and a tier; a routing layer chooses the harness — tier → model → harness. Models are configured host-side in .arke/config.json; the resolved model and reasoning effort for each role are shown below so you can verify what each agent runs on. Credentials never leave the host.',
       action: e('div', { style: { display: 'flex', gap: 8 } },
         e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => { void reprobeRegistry(); } }, 'Re-probe'),
         e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'plus', size: 15 }) }, 'Connect harness')) }),
@@ -62,12 +62,14 @@ export function Harnesses() {
           e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'arrowRight', size: 16 }))),
         e('div', { style: { marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--foreground)', background: 'var(--secondary)', padding: '8px 11px', borderRadius: 'var(--radius-sm)' } }, t.model))),
     ) : null,
-    (roster && roster.length > 0) ? eyebrowLabel('Roster resolution — role → instance → tier') : null,
+    (roster && roster.length > 0) ? eyebrowLabel('Roster resolution — role → model · reasoning effort') : null,
     (roster && roster.length > 0) ? e(Card, { padding: 0, style: { marginBottom: 18 } },
       roster.map((r, i) => e('div', { key: r.role, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderTop: i === 0 ? 'none' : '1px solid var(--line-soft)' } },
-        e('span', { style: { flex: 1, fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 500 } }, r.role),
+        e('span', { style: { flex: 'none', width: 130, fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 500 } }, r.role),
         e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: r.unresolved ? 'var(--destructive)' : 'var(--muted-foreground)' } }, r.unresolved ? 'unresolved' : (r.instanceId || '—')),
-        e('span', { style: { flex: 'none', width: 150, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--foreground)' } }, r.label || '—')))
+        e('span', { style: { flex: 1, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--foreground)' } }, r.model || r.label || '—'),
+        r.reasoningEffort ? e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 10.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--background)', background: 'var(--primary, #4da3ff)', padding: '2px 7px', borderRadius: 999 } }, r.reasoningEffort)
+          : e('span', { style: { flex: 'none', width: 44 } })))
     ) : null,
     e(Callout, { variant: 'default', label: 'Continuity lives in git, not the harness' }, 'A harness session is ephemeral and disposable — the specification and the code are on the feature branch. Switching harnesses loses nothing durable; you start a fresh session against the same branch.'),
   );

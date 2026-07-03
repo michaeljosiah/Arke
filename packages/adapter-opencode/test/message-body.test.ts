@@ -81,6 +81,21 @@ test("a real configured model is sent as { providerID, modelID }", async () => {
   assert.deepEqual(lastMessageBody().model, { providerID: "openai", modelID: "gpt-5.3-codex-spark" });
 });
 
+test("a model with a reasoning effort emits model.options.reasoningEffort (gpt-5.5 xhigh)", async () => {
+  const adapter = makeAdapter({ resolveModel: () => ({ provider: "github-copilot", name: "gpt-5.5", reasoningEffort: "xhigh" }) });
+  const s = await adapter.createSession({ specId: "SPEC-A" });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: "build it" }] });
+  assert.deepEqual(lastMessageBody().model, { providerID: "github-copilot", modelID: "gpt-5.5", options: { reasoningEffort: "xhigh" } });
+});
+
+test("a model without a reasoning effort sends no options key", async () => {
+  const adapter = makeAdapter({ resolveModel: () => ({ provider: "github-copilot", name: "claude-sonnet-4.5" }) });
+  const s = await adapter.createSession({ specId: "SPEC-A" });
+  await adapter.sendMessage({ sessionId: s.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: "hi" }] });
+  const model = lastMessageBody().model as Record<string, unknown>;
+  assert.equal("options" in model, false);
+});
+
 test("the unconfigured gateway placeholder omits the model entirely (OpenCode uses its default)", async () => {
   const adapter = makeAdapter({ resolveModel: () => ({ provider: "gateway", name: "capable-tier" }) });
   const s = await adapter.createSession({ specId: "SPEC-A" });

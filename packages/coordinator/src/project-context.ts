@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -189,6 +189,8 @@ export class ProjectContext {
   private readonly taskSessions = new Map<string, { specId: string; taskKey: string }>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
+  /** Specs currently being auto-renamed after titling, so the per-turn trigger is not re-entrant (SPEC-020). */
+  private readonly renamingSpecs = new Set<string>();
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -1492,6 +1494,68 @@ export class ProjectContext {
   }
 
   /**
+   * Rename a blank-slate spec once the spec-author has derived its real title (SPEC-020). A spec born
+   * as `untitled-NNN` (filename, spec_id, branch) is renamed to a concise title-derived slug: the file
+   * is renamed, the frontmatter `spec_id`/`branch` rewritten, the git branch renamed, in-memory
+   * lifecycle/review state migrated, and `spec.renamed` emitted so the read model re-keys its card and
+   * the client rebinds its active spec. Idempotent and safe to call after every authoring turn: a no-op
+   * unless the spec is still `untitled-NNN`, now carries a real title, and the derived slug differs.
+   */
+  async renameSpec(oldSpecId: string): Promise<{ renamed: boolean; specId: string; path?: string; branch?: string }> {
+    // Acquire the per-spec lock FIRST so the whole read→write→rename is atomic: a concurrent call
+    // (e.g. the per-turn auto-trigger racing an explicit spec.rename op) sees the lock and no-ops
+    // rather than double-applying frontmatter edits and corrupting the file.
+    if (this.renamingSpecs.has(oldSpecId)) return { renamed: false, specId: oldSpecId };
+    this.renamingSpecs.add(oldSpecId);
+    try {
+      const found = this.findSpecFile(oldSpecId);
+      if (!found) return { renamed: false, specId: oldSpecId };
+      const stem = basename(found.absPath, ".md"); // e.g. "002.untitled-002"
+      const m = /^(\d{3})\.(.+)$/.exec(stem);
+      if (!m) return { renamed: false, specId: oldSpecId };
+      const [nnn, currentSlug] = [m[1]!, m[2]!];
+      if (!/^untitled-\d+$/.test(currentSlug)) return { renamed: false, specId: oldSpecId }; // already titled
+      const title = (found.frontmatter.title ?? "").trim();
+      if (!title || title.toLowerCase() === "untitled specification") return { renamed: false, specId: oldSpecId };
+      const newSlug = conciseSlugFromTitle(title, currentSlug);
+      if (newSlug === currentSlug) return { renamed: false, specId: oldSpecId };
+      const date = /^SPEC-(\d{4}-\d{2}-\d{2})-/.exec(found.canonicalId)?.[1] ?? new Date().toISOString().slice(0, 10);
+      const newSpecId = `SPEC-${date}-${newSlug}`;
+      const newBranch = `spec/${newSlug}`;
+      const oldBranch = found.frontmatter.branch ?? `spec/${currentSlug}`;
+      const newFilename = `${nnn}.${newSlug}.md`;
+      const newAbs = resolve(this.root, "docs", "specifications", newFilename);
+      if (existsSync(newAbs)) return { renamed: false, specId: oldSpecId }; // target name taken — leave as-is
+
+      let text = setFrontmatterField(found.text, "spec_id", newSpecId);
+      text = setFrontmatterField(text, "branch", newBranch);
+      text = appendChangeHistory(text, `${date} · ${newBranch} · draft — renamed from ${currentSlug} to ${newSlug} (title finalised)`);
+      writeFileSync(found.absPath, text, "utf8");
+      renameSync(found.absPath, newAbs);
+
+      // Rename the git branch when we are on it (best-effort; frontmatter branch is the approval guard).
+      if (gitAvailable() && oldBranch !== newBranch && gitHeadBranch(this.root) === oldBranch) {
+        spawnSync("git", ["branch", "-m", newBranch], gitOpts(this.root));
+      }
+
+      // Migrate in-memory state keyed by spec id so lifecycle/review gates follow the rename.
+      const rec = this.specRecords.get(oldSpecId);
+      if (rec) {
+        this.specRecords.delete(oldSpecId);
+        this.specRecords.set(newSpecId, rec);
+      }
+      if (this.completedReviews.delete(oldSpecId)) this.completedReviews.add(newSpecId);
+
+      const relPath = `docs/specifications/${newFilename}`;
+      await this.trace.write({ kind: "spec.rename", projectId: this.projectId, oldSpecId, specId: newSpecId, path: relPath, branch: newBranch });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.renamed", oldSpecId, specId: newSpecId, path: relPath, branch: newBranch, title } as DomainEvent);
+      return { renamed: true, specId: newSpecId, path: relPath, branch: newBranch };
+    } finally {
+      this.renamingSpecs.delete(oldSpecId);
+    }
+  }
+
+  /**
    * Store an uploaded grounding file on the host under this project's `.arke/grounding/` (SPEC-020).
    * The name is confined to that root (traversal rejected) and the content is size-bounded. Grounding
    * is context for the authoring discussion — read by the agent, never written into the spec.
@@ -1662,6 +1726,8 @@ export class ProjectContext {
         return this.readSpecFile(String(a.specId ?? ""));
       case "spec.create": // SPEC-020: new blank-slate specification from the template
         return this.createSpec(a.title);
+      case "spec.rename": // SPEC-020: finalise a blank-slate spec's name from its derived title
+        return this.renameSpec(String(a.specId ?? ""));
       case "grounding.upload": // SPEC-020: store an uploaded grounding file on the host
         return this.groundingUpload(a.name, a.content);
       case "grounding.list":
@@ -1957,18 +2023,31 @@ export class ProjectContext {
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
-      } else if (event.type === "message.updated" && !event.isStreaming && this.streaming.delete(event.sessionId)) {
-        await this.emit({
-          seq: 0,
-          ts: 0,
-          harness: event.harness,
-          ...(event.correlationId ? { correlationId: event.correlationId } : {}),
-          type: "turn.quiescent",
-          sessionId: event.sessionId,
-          turnId: event.messageId,
-        });
+      } else if (event.type === "message.updated" && !event.isStreaming) {
+        if (this.streaming.delete(event.sessionId)) {
+          await this.emit({
+            seq: 0,
+            ts: 0,
+            harness: event.harness,
+            ...(event.correlationId ? { correlationId: event.correlationId } : {}),
+            type: "turn.quiescent",
+            sessionId: event.sessionId,
+            turnId: event.messageId,
+          });
+        }
+        // SPEC-020: once an ASSISTANT authoring turn settles, finalise a blank-slate spec's name if
+        // the spec-author has now written a real title (no-op otherwise). Decoupled from the
+        // streaming gate above, which requires message.part frames that a short turn may not emit.
+        if (event.role === "assistant") await this.maybeRenameTitledSpec(event.sessionId);
       }
     }
+  }
+
+  /** After an authoring turn settles, rename an `untitled-NNN` spec whose title is now set (SPEC-020). */
+  private async maybeRenameTitledSpec(sessionId: string): Promise<void> {
+    const card = this.read.snapshot().find((c) => c.id === sessionId);
+    if (!card || card.kind !== "spec") return;
+    await this.renameSpec(card.specId).catch(() => undefined);
   }
 
   /**
@@ -1999,22 +2078,26 @@ export class ProjectContext {
   }
 
   /**
-   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). `done` is
-   * terminal; `idle` is only the end of one turn (the agent may still be working) so it must NOT
-   * count as completion. `error` is terminal too — it frees the slot, so it also drains.
+   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). A fan-out task
+   * is dispatched EXACTLY ONCE with no follow-up turn, so the harness's `idle` (the end of that single
+   * agent loop) IS the task's terminal completion — against live OpenCode, which emits `idle` and
+   * never a distinct `done`, the queue would otherwise never advance. `done` completes too; `error`
+   * fails it. Authoring/spec sessions are never in `taskSessions`, so their multi-turn `idle`
+   * semantics (where `idle` is just the end of one turn) are unaffected by this.
    */
   private async observeTaskCompletion(event: DomainEvent): Promise<void> {
     if (event.type !== "session.status") return;
-    if (event.status !== "done" && event.status !== "error") return;
+    if (event.status !== "done" && event.status !== "idle" && event.status !== "error") return;
     const link = this.taskSessions.get(event.sessionId);
-    if (!link) return;
+    if (!link) return; // not a fan-out task session — nothing to drain
+    const succeeded = event.status !== "error";
     const store = this.fanoutStore;
     const record = store?.get(link.specId);
     if (record) {
       const task = record.tasks.find((t) => t.taskKey === link.taskKey);
       if (task && task.status === "running") {
-        task.status = event.status === "done" ? "done" : "failed";
-        if (event.status === "error") task.error = "task session reported error";
+        task.status = succeeded ? "done" : "failed";
+        if (!succeeded) task.error = "task session reported error";
         store?.put(record);
       }
     }
@@ -2081,6 +2164,40 @@ export function slugify(title: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 60) || "spec"
   );
+}
+
+/**
+ * A concise, human-readable slug from a derived title (SPEC-020 rename). Strips parentheticals, takes
+ * the headline before an em-dash/en-dash/colon, and caps it to a few words so a long title like
+ * "Evolution research report — agent skills & tooling (…)" yields "evolution-research-report" rather
+ * than a 60-char run-on. Falls back to the given placeholder when nothing usable remains.
+ */
+export function conciseSlugFromTitle(title: string, fallback: string): string {
+  const stripped = title.replace(/\([^)]*\)/g, " ").trim();
+  const headline = (stripped.split(/\s*[—–:]\s*/)[0] ?? stripped).trim();
+  const base = headline.split(/\s+/).filter(Boolean).length >= 2 ? headline : stripped;
+  const capped = base.split(/\s+/).filter(Boolean).slice(0, 6).join(" ");
+  const s = slugify(capped);
+  return s && s !== "spec" ? s : fallback;
+}
+
+/**
+ * Replace (or insert) a single scalar frontmatter field, leaving the rest of the document intact.
+ * Mirrors {@link setFrontmatterStatus}: `parseFrontmatter().raw` ALREADY includes the `---` fences,
+ * so the result is `newRaw + body` — re-wrapping `raw` in a second pair of fences (an earlier bug)
+ * produced a doc the next call could not re-parse, corrupting the frontmatter.
+ */
+export function setFrontmatterField(md: string, key: string, value: string): string {
+  const { raw, body } = parseFrontmatter(md);
+  if (!raw) return `---\n${key}: ${value}\n---\n\n${md}`;
+  let replaced = false;
+  const re = new RegExp(`^${key}:\\s*`);
+  const newRaw = raw
+    .split("\n")
+    .map((line) => (re.test(line) ? ((replaced = true), `${key}: ${value}`) : line))
+    .join("\n");
+  const withField = replaced ? newRaw : newRaw.replace(/\n---(\r?\n?)$/, `\n${key}: ${value}\n---$1`);
+  return withField + body;
 }
 
 /** The next `NNN` spec number: one above the highest `NNN.` file already in the specifications dir. */

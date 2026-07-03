@@ -102,6 +102,32 @@ function applyEvent(ev: any) {
       if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
       break;
     }
+    case 'spec.renamed': {
+      // SPEC-020: a blank-slate spec was renamed once titled. Re-key the board card + status, update
+      // the library entry, and rebind the active spec so the open cockpit keeps working.
+      const oldId = ev.oldSpecId, newId = ev.specId;
+      if (oldId !== newId) {
+        const st = specStatus.get(oldId);
+        if (st !== undefined) { specStatus.delete(oldId); specStatus.set(newId, st); }
+        for (const c of cards.values()) if (c.specId === oldId) c.specId = newId;
+        const specCard = cards.get(oldId);
+        if (specCard) {
+          cards.delete(oldId);
+          specCard.id = newId; specCard.specId = newId;
+          if (specCard.title === oldId) specCard.title = newId;
+          cards.set(newId, specCard);
+        }
+      }
+      store.set((s: any) => {
+        const specs = (s.specs || []).map((sp: any) => sp.specId === oldId ? { ...sp, specId: newId, path: ev.path, branch: ev.branch, title: ev.title } : sp);
+        const patch: any = { specs };
+        if (s.activeSpec === oldId) patch.activeSpec = newId;
+        return patch;
+      });
+      void refreshSpecs();
+      rail('spec.renamed', `spec.renamed · ${oldId} → ${newId}`, ts);
+      break;
+    }
     case 'projection.write': {
       // SPEC-014: append to the projections-status surface (most-recent-first).
       store.set((s: any) => ({ projections: [{ target: ev.target, specId: ev.specId, trigger: ev.trigger, ok: ev.ok, artifactId: ev.artifactId, idempotencyKey: ev.idempotencyKey, error: ev.errorMessage, ts }, ...(s.projections || [])].slice(0, 200) }));
@@ -516,7 +542,9 @@ export async function createSpecLive(title: string): Promise<{ specId: string } 
   await refreshSpecs();
   // kickoffFor arms the cockpit's one-shot opening nudge: the spec-author greets the engineer and
   // asks what they want to achieve, so a blank slate never opens onto dead silence (SPEC-020).
-  store.set((s: any) => ({ activeSpec: res.result.specId, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
+  // activeCard is cleared so a stale board-card selection can't shadow the brand-new spec in the
+  // cockpit's spec resolution (which prefers a selected card over activeSpec).
+  store.set((s: any) => ({ activeSpec: res.result.specId, activeCard: null, view: 'cockpit', cockpit: { ...s.cockpit, kickoffFor: res.result.specId } }));
   return { specId: res.result.specId };
 }
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseSpecDoc } from "@arke/contracts";
-import { nextSpecNumber, renderBlankSpec, slugify } from "../src/project-context.js";
+import { conciseSlugFromTitle, nextSpecNumber, renderBlankSpec, setFrontmatterField, slugify } from "../src/project-context.js";
 
 /** SPEC-020: the blank-slate generation core — slug, next-number, and the empty-section template. */
 
@@ -12,6 +12,44 @@ test("slugify produces a filesystem/branch-safe slug", () => {
   assert.equal(slugify("Extract fields from an RFP!"), "extract-fields-from-an-rfp");
   assert.equal(slugify("  Weird   Spaces  "), "weird-spaces");
   assert.equal(slugify("---"), "spec"); // empty result falls back
+});
+
+test("conciseSlugFromTitle takes the headline before the em-dash and caps the words", () => {
+  // The real Inner Siege titles that were landing as untitled-NNN.
+  assert.equal(
+    conciseSlugFromTitle("Evolution research report — agent skills & tooling to grow Inner Siege (3D, adaptive score)", "untitled-002"),
+    "evolution-research-report",
+  );
+  assert.equal(
+    conciseSlugFromTitle("Inner Siege — vertical slice (bloodstream biome, core turn loop)", "untitled-001"),
+    "inner-siege",
+  );
+  // A colon separates a multi-word headline too.
+  assert.equal(conciseSlugFromTitle("Payment retries: idempotency keys", "untitled-003"), "payment-retries");
+  // A single-word headline falls back to the full title, capped to a few words.
+  assert.equal(conciseSlugFromTitle("Payments: retry with idempotency keys", "untitled-003b"), "payments-retry-with-idempotency-keys");
+  assert.equal(
+    conciseSlugFromTitle("One two three four five six seven eight nine ten", "untitled-004"),
+    "one-two-three-four-five-six",
+  );
+  // Nothing usable → the placeholder is kept.
+  assert.equal(conciseSlugFromTitle("   ", "untitled-005"), "untitled-005");
+});
+
+test("setFrontmatterField replaces scalars without corrupting the frontmatter (double application)", () => {
+  const md = "---\nspec_id: SPEC-x-untitled-002\ntitle: Evolution report\nbranch: spec/untitled-002\n---\n\n# Body\ntext\n";
+  // Apply TWICE (spec_id then branch) — the real rename path. The output must remain a single,
+  // well-formed frontmatter block, not gain a second stray `---` fence.
+  const out = setFrontmatterField(setFrontmatterField(md, "spec_id", "SPEC-x-evolution-research-report"), "branch", "spec/evolution-research-report");
+  assert.equal((out.match(/^---$/gm) || []).length, 2, "exactly one frontmatter block (two fence lines)");
+  const doc = parseSpecDoc(out);
+  assert.equal(doc.frontmatter.spec_id, "SPEC-x-evolution-research-report");
+  assert.equal(doc.frontmatter.branch, "spec/evolution-research-report");
+  assert.equal(doc.frontmatter.title, "Evolution report"); // untouched
+  assert.match(out, /# Body\ntext/); // body intact
+  // No duplicate/stale field lines survived.
+  assert.equal((out.match(/^branch:/gm) || []).length, 1, "exactly one branch line");
+  assert.equal((out.match(/^spec_id:/gm) || []).length, 1, "exactly one spec_id line");
 });
 
 test("nextSpecNumber is one above the highest NNN. file", () => {

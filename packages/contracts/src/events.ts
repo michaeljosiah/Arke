@@ -49,6 +49,20 @@ export const SpecStatusEvent = base.extend({
   reason: z.string().optional(),
 });
 
+/**
+ * SPEC-020: a blank-slate spec was renamed once the spec-author derived its real title — its
+ * `untitled-NNN` filename/spec_id/branch became a title-derived slug. Consumers re-key any state
+ * held under `oldSpecId` (the client rebinds its active spec; the read model re-keys the card).
+ */
+export const SpecRenamedEvent = base.extend({
+  type: z.literal("spec.renamed"),
+  oldSpecId: z.string(),
+  specId: z.string(), // the new canonical spec id
+  path: z.string(), // new repo-relative path
+  branch: z.string(), // new branch
+  title: z.string(),
+});
+
 /** SPEC-008: a system-of-record projection derived from a spec went stale (spec regressed). */
 export const ProjectionStaleEvent = base.extend({
   type: z.literal("projection.stale"),
@@ -412,6 +426,7 @@ export const ReviewGateFailedEvent = base.extend({
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
+  SpecRenamedEvent,
   ProjectionStaleEvent,
   SpecBranchMismatchEvent,
   SpecDivergenceWarningEvent,
