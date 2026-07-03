@@ -9,9 +9,8 @@ import {
   parseSpecDoc,
   setFrontmatterStatus,
   type AgentImage,
+  type AgentModel,
   type HarnessAdapter,
-  type ModelInfo,
-  type ModelTier,
   type PermissionAck,
   type PermissionDecision,
   type ScaffoldStep,
@@ -36,13 +35,12 @@ import {
 } from "./fanout.js";
 import { FanOutStore } from "./fanout-store.js";
 import {
-  RegistryResolver,
-  type RegistryConfig,
-  type RegistryInstanceStatus,
+  type HarnessStatus,
   type RegistrySnapshot,
   type RegistryWarning,
   type RegistryWarningReason,
 } from "./registry.js";
+import { AgentRegistry, loadAgentRegistry } from "./agent-registry.js";
 import {
   ISSUE_EXTRACTION_PROMPT_VERSION,
   buildReviewerPrompt,
@@ -87,12 +85,9 @@ export interface ProjectContextInit {
   trace: Trace;
   grants: GrantStore;
   endpoints: string[];
-  tierDefaults: ScaffoldTiers;
+  /** The project's agents (each declaring model + provider) and provider/auth profiles (SPEC-016 revised). */
+  agents?: AgentRegistry;
   registry: ProjectRegistry;
-  /** The harness/model registry parsed from this project's `.arke/config.json` (SPEC-005). */
-  registryConfig?: RegistryConfig;
-  /** The configured instance the live adapter serves (first `opencode` driver), if any. */
-  connectedInstanceId?: string;
   /** Fan a stamped event out to this context's active client connections (supervisor-supplied). */
   publish: (event: DomainEvent) => void;
   probe?: HarnessReachabilityProbe;
@@ -111,7 +106,6 @@ interface PanelIssueState {
 interface PanelReviewerState {
   role: string;
   sessionId: string;
-  instanceId: string;
   model: string;
   label: string;
   status: "running" | "done" | "error";
@@ -158,12 +152,11 @@ export class ProjectContext {
   private readonly trace: Trace;
   private readonly grants: GrantStore;
   private readonly endpoints: string[];
-  private readonly tierDefaults: ScaffoldTiers;
   private readonly registry: ProjectRegistry;
   private readonly probe: HarnessReachabilityProbe;
   private readonly publish: (event: DomainEvent) => void;
-  private readonly registryResolver?: RegistryResolver;
-  private readonly connectedInstanceId?: string;
+  /** The project's agents (declared model + provider) and provider/auth profiles (SPEC-016 revised). */
+  private readonly agents: AgentRegistry;
   private registrySnapshot: RegistrySnapshot | null = null;
   /** Serialises approveDraft per project so two concurrent approvals can't race the commit/rollback. */
   private approvalInFlight = false;
@@ -215,24 +208,12 @@ export class ProjectContext {
     this.trace = init.trace;
     this.grants = init.grants;
     this.endpoints = init.endpoints;
-    this.tierDefaults = init.tierDefaults;
     this.registry = init.registry;
     this.publish = init.publish;
     this.probe = init.probe ?? new HarnessReachabilityProbe();
-    if (init.connectedInstanceId) this.connectedInstanceId = init.connectedInstanceId;
-    if (init.registryConfig && init.registryConfig.instances.length > 0) {
-      try {
-        this.registryResolver = new RegistryResolver(init.registryConfig);
-      } catch (err) {
-        // A structurally invalid registry (e.g. duplicate instance ids) leaves the projection empty;
-        // record why rather than crashing context startup. The screen then shows no harnesses.
-        void this.trace.write({
-          kind: "registry.config-error",
-          projectId: this.projectId,
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    // Agents declare their own model+provider (SPEC-016 revised). Load them from the project's own
+    // `agents/<name>/config.yaml` when the supervisor did not inject a registry (e.g. tests).
+    this.agents = init.agents ?? loadAgentRegistry(this.root);
   }
 
   /** Classify the folder, register it as a recent, probe reachability, and start the pump if ready. */
@@ -264,6 +245,17 @@ export class ProjectContext {
     return this.streaming.size;
   }
 
+  /**
+   * The dispatch `model` fragment for an agent (SPEC-016 revised): the concrete model+provider the
+   * agent declares in its image `executor`, spread into a {@link SendMessageInput}. An agent that
+   * pins no model (or is unknown) yields `{}` — the adapter then omits `model` and the harness uses
+   * the agent's own materialised/default model.
+   */
+  private modelArg(agent: string): { model?: AgentModel } {
+    const m = this.agents.modelFor(agent);
+    return m ? { model: m } : {};
+  }
+
   // ---- snapshot ------------------------------------------------------------
 
   /** The snapshot payload for this project (cards + onboarding state), scoped by `projectId`. */
@@ -281,11 +273,10 @@ export class ProjectContext {
       ...(this.harnessPartial ? { harnessReachabilityPartial: true } : {}),
       projectState: this.projectState,
       missingSentinels: this.missingSentinels,
-      tierDefaults: this.tierDefaults,
       ...(this.registrySnapshot ? { registry: this.registrySnapshot } : {}),
-      // SPEC-019: whether ANY harness is configured (globally or per-project). When false, the launch
-      // screen shows first-run quick setup instead of the configured-but-down re-probe state.
-      harnessSetup: { configured: this.registryResolver !== undefined },
+      // SPEC-019: whether ANY harness is configured (a provider profile or a live endpoint). When
+      // false, the launch screen shows first-run quick setup instead of the configured-but-down state.
+      harnessSetup: { configured: this.endpoints.length > 0 || Object.keys(this.agents.providers).length > 0 },
       specs: this.specLibrary(), // SPEC-008: the spec library for this project
     };
   }
@@ -304,15 +295,17 @@ export class ProjectContext {
    * string or a credentialsRef — tier labels only.
    */
   async refreshRegistry(reprobe = false): Promise<void> {
-    const resolver = this.registryResolver;
-    if (!resolver) {
+    const providers = this.agents.providers;
+    const agentRoster = this.agents.list();
+    // Nothing configured at all (no provider profile, no agent image) → no projection to show.
+    if (Object.keys(providers).length === 0 && agentRoster.length === 0) {
       this.registrySnapshot = null;
       return;
     }
-    // On an explicit Re-probe, re-run the adapter's startup probe so readiness/caps/catalog reflect
-    // the server's CURRENT state — OpenCodeAdapter caches them at init(), so without this the
-    // Re-probe button could never recover a server that was down at startup. init() is idempotent;
-    // guard it so a still-down server yields reachable:false rather than throwing here.
+    // On an explicit Re-probe, re-run the adapter's startup probe so readiness/caps reflect the
+    // server's CURRENT state — OpenCodeAdapter caches them at init(), so without this the Re-probe
+    // button could never recover a server that was down at startup. init() is idempotent; guard it
+    // so a still-down server yields reachable:false rather than throwing here.
     if (reprobe && this.adapter.init) {
       try {
         await this.adapter.init();
@@ -320,70 +313,36 @@ export class ProjectContext {
         /* readiness()/capabilities() now reflect the failed probe */
       }
     }
-    const catalogs = new Map<string, ModelInfo[] | null>();
-    const instances: RegistryInstanceStatus[] = [];
-    for (const inst of resolver.listInstances()) {
-      const connected = inst.id === this.connectedInstanceId;
-      let reachable = false;
-      let caps: string[] = [];
-      let catalogUnavailable = true;
-      let endpoint = inst.host;
-      if (connected) {
-        const r = this.adapter.readiness?.() ?? { ready: true };
-        reachable = r.ready;
-        caps = [...this.adapter.capabilities()];
-        endpoint = this.endpoints[0] ?? this.adapter.id;
-        if (caps.includes("models") && this.adapter.listModels) {
-          try {
-            catalogs.set(inst.id, await this.adapter.listModels());
-            catalogUnavailable = false;
-          } catch {
-            catalogs.set(inst.id, null);
-          }
-        } else {
-          catalogs.set(inst.id, null);
-        }
-      } else {
-        catalogs.set(inst.id, null); // no adapter wired for non-connected instances yet
+    const r = this.adapter.readiness?.() ?? { ready: true };
+    const caps = [...this.adapter.capabilities()];
+    const liveEndpoint = this.endpoints[0] ?? this.adapter.id;
+    // Each provider/auth profile is a harness endpoint. The OpenCode profile the adapter serves gets
+    // its live reachability + capabilities; any other profile is surfaced configured-but-not-wired.
+    const harnesses: HarnessStatus[] = [];
+    const entries = Object.entries(providers);
+    if (entries.length === 0) {
+      // No explicit provider profiles but the adapter is live — surface it as the single harness.
+      harnesses.push({ id: this.adapter.id, harness: this.adapter.id, endpoint: liveEndpoint, reachable: r.ready, caps });
+    } else {
+      for (const [id, prof] of entries) {
+        const kind = prof.harness ?? "opencode";
+        const isOpenCode = kind.startsWith("opencode");
+        const endpoint = isOpenCode
+          ? liveEndpoint
+          : prof.baseUrl ?? [prof.host, prof.port].filter(Boolean).join(":") ?? id;
+        harnesses.push({ id, harness: kind, endpoint, reachable: isOpenCode ? r.ready : false, caps: isOpenCode ? caps : [] });
       }
-      instances.push({
-        id: inst.id,
-        driver: inst.driver,
-        endpoint,
-        reachable,
-        caps,
-        serves: inst.serves,
-        ...(catalogUnavailable ? { catalogUnavailable: true } : {}),
-      });
     }
 
-    // Validate configured serves against the live catalog(s) and collect config problems as warnings
-    // (labels only — no vendor model string leaks into the detail). Warnings are stored ON the
-    // snapshot so a client opening a project with a bad registry sees them immediately, even though
-    // the emitted `registry.warning` events fire before it has subscribed (PR #15 review).
+    // Reviewer independence (SPEC-007): surface a warning when the two reviewers resolve to the same
+    // model. Stored ON the snapshot so a client opening a project with a bad roster sees it at once.
     const warnings: RegistryWarning[] = [];
-    const validation = resolver.validateServesAgainstCatalog(catalogs);
-    for (const p of validation.problems) {
-      warnings.push({
-        reason: "model-not-in-catalog",
-        detail: `instance '${p.instanceId}' has a model absent from its live catalog for tier '${p.tier}' (${p.label})`,
-      });
-    }
-    try {
-      resolver.assertReviewersDistinct();
-    } catch (err) {
-      warnings.push({
-        reason: "reviewer-models-identical",
-        detail: err instanceof Error ? err.message : String(err),
-      });
+    if (this.agents.has("reviewer-a") && this.agents.has("reviewer-b")) {
+      const v = validateReviewers(this.agents, [{ role: "reviewer-a" }, { role: "reviewer-b" }]);
+      if (!v.ok) warnings.push({ reason: "reviewer-models-identical", detail: v.reason });
     }
 
-    this.registrySnapshot = {
-      instances,
-      tierResolution: resolver.tierResolution(),
-      roster: resolver.rosterResolution(),
-      warnings,
-    };
+    this.registrySnapshot = { harnesses, agents: agentRoster, warnings };
     // Emit the warning events too, for clients already subscribed to a live context.
     for (const w of warnings) await this.emitRegistryWarning(w.reason, w.detail ?? "");
     await this.emit({
@@ -391,15 +350,9 @@ export class ProjectContext {
       ts: 0,
       harness: this.adapter.id,
       type: "registry.updated",
-      instances: instances.map((s) => ({
-        id: s.id,
-        driver: s.driver,
-        endpoint: s.endpoint,
-        reachable: s.reachable,
-        caps: s.caps,
-        serves: s.serves,
-        ...(s.catalogUnavailable ? { catalogUnavailable: true } : {}),
-      })),
+      // The live event carries the harness endpoints (as instances); the agent roster rides the
+      // snapshot (`registry.get`). `serves` is retained by the schema but empty — tiers are gone.
+      instances: harnesses.map((h) => ({ id: h.id, driver: h.harness, endpoint: h.endpoint, reachable: h.reachable, caps: h.caps, serves: [] })),
     } as DomainEvent);
   }
 
@@ -773,7 +726,7 @@ export class ProjectContext {
     await this.trace.write({ kind: "generation.started", projectId: this.projectId, specId: cid, sessionId: ref.sessionId });
     // SPEC-015: span the adapter boundary (attributes carry ids only — never the spec markdown prompt).
     await this.withSpan("dispatchAsync", { "arke.specId": cid, "arke.sessionId": ref.sessionId, "arke.harness": this.adapter.id }, () =>
-      this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "spec-author", tier: "capable", parts: [{ type: "text", text: buildGenerationPrompt(found.text) }] }),
+      this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "spec-author", ...this.modelArg("spec-author"), parts: [{ type: "text", text: buildGenerationPrompt(found.text) }] }),
     );
     const timeoutMs = Number(process.env.ARKE_GENERATION_TIMEOUT_MS) || DEFAULT_GENERATION_TIMEOUT_MS;
     const timer = setTimeout(() => void this.failGeneration(cid, ref.sessionId, "generation timed out"), timeoutMs);
@@ -1019,7 +972,7 @@ export class ProjectContext {
       const ref = await this.adapter.createSession({ specId: cmd.specId, parent: cmd.specSessionId });
       this.taskSessions.set(ref.sessionId, { specId: cmd.specId, taskKey: cmd.taskKey });
       upsert({ status: "running", sessionId: ref.sessionId });
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", tier: "mid", parts: [{ type: "text", text: cmd.taskText }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: cmd.taskText }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cmd.specId, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, sessionId: ref.sessionId });
       return true;
@@ -1185,15 +1138,11 @@ export class ProjectContext {
     const cid = found.canonicalId;
     const resolvedBranch = fmBranch ?? branch;
 
-    // Validate reviewers against the registry (SPEC-007). Without a registry we can't guarantee
-    // distinct models, so refuse rather than run a panel with unverifiable independence.
-    if (!this.registryResolver) {
-      const reason = "no registry configured — cannot resolve distinct reviewer models";
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.config-error", specId: cid, reason } as DomainEvent);
-      throw new Error(reason);
-    }
+    // Validate reviewers against the agent registry (SPEC-007): at least two reviewers, each with a
+    // declared model, and every pair distinct. Refuse rather than run a panel with unverifiable
+    // independence — validateReviewers surfaces the precise reason (missing agent, no model, or dup).
     const reviewers = reviewersArg && reviewersArg.length > 0 ? reviewersArg : [{ role: "reviewer-a" }, { role: "reviewer-b" }];
-    const validation = validateReviewers(this.registryResolver, reviewers);
+    const validation = validateReviewers(this.agents, reviewers);
     if (!validation.ok) {
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.config-error", specId: cid, reason: validation.reason ?? "invalid reviewer configuration" } as DomainEvent);
       throw new Error(validation.reason ?? "invalid reviewer configuration");
@@ -1230,7 +1179,7 @@ export class ProjectContext {
     for (const r of validation.reviewers) {
       const ref = await this.adapter.createSession({ specId: cid });
       this.reviewerSessions.set(ref.sessionId, { panelId, role: r.role });
-      panel.reviewers.push({ role: r.role, sessionId: ref.sessionId, instanceId: r.instanceId, model: r.model, label: r.label, status: "running" });
+      panel.reviewers.push({ role: r.role, sessionId: ref.sessionId, model: r.model, label: r.label, status: "running" });
     }
     this.panels.set(panelId, panel);
 
@@ -1242,7 +1191,7 @@ export class ProjectContext {
       specId: cid,
       branch: resolvedBranch ?? null,
       promptVersion: ISSUE_EXTRACTION_PROMPT_VERSION,
-      reviewers: panel.reviewers.map((r) => ({ role: r.role, instanceId: r.instanceId, model: r.model })), // host-side audit may include the model
+      reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.model })), // host-side audit may include the model
     });
     await this.emit({
       seq: 0,
@@ -1256,7 +1205,7 @@ export class ProjectContext {
 
     // Now dispatch each reviewer as a parallel, read-only turn (HarnessAdapter.dispatchAsync).
     for (const r of panel.reviewers) {
-      await this.adapter.dispatchAsync({ sessionId: r.sessionId, agent: r.role, tier: "capable", parts: [{ type: "text", text: prompt }] });
+      await this.adapter.dispatchAsync({ sessionId: r.sessionId, agent: r.role, ...this.modelArg(r.role), parts: [{ type: "text", text: prompt }] });
     }
 
     return {
@@ -1388,7 +1337,7 @@ export class ProjectContext {
       await this.adapter.dispatchAsync({
         sessionId: session.sessionId,
         agent: "spec-author",
-        tier: "capable",
+        ...this.modelArg("spec-author"),
         parts: [{ type: "text", text: `Apply this reviewer critique to the specification section "${issue.section}":\n\n${issue.text}` }],
       });
     }
@@ -1619,13 +1568,9 @@ export class ProjectContext {
         return this.read.snapshot();
       case "prompt.send":
       case "prompt.dispatch": {
-        // Pass through any known tier (capable | mid | fast); an unknown/absent tier falls back to
-        // mid rather than silently downgrading an explicit fast/capable request.
-        const requested = String(a.tier ?? "");
-        const tier: ModelTier =
-          requested === "capable" || requested === "mid" || requested === "fast"
-            ? (requested as ModelTier)
-            : "mid";
+        // The dispatch model is the AGENT's declared model+provider (SPEC-016 revised) — no per-turn
+        // tier. An agent that pins no model (or an unknown agent) sends without one and the harness
+        // uses the agent's own materialised/default model.
         const sessionId = String(a.sessionId ?? "");
         // Stale-session guard (SPEC-006): a queued message that targets a session no longer idle or
         // running (e.g. it went waiting/done/error while the client was offline) is rejected with its
@@ -1670,10 +1615,11 @@ export class ProjectContext {
         } catch {
           /* context is a nicety — never block the send on it */
         }
+        const agent = String(a.agent ?? "");
         const input = {
           sessionId,
-          agent: String(a.agent ?? ""),
-          tier,
+          agent,
+          ...this.modelArg(agent),
           parts: [{ type: "text" as const, text: specContext + String(a.message ?? "") }],
           ...(a.correlationId ? { correlationId: String(a.correlationId) } : {}),
         };
@@ -1704,7 +1650,9 @@ export class ProjectContext {
       case "agents.list":
         return this.loadAgentImages(a.dir).map((img) => ({
           name: img.name,
-          tier: img.tier,
+          harness: img.executor.config.harness,
+          ...(img.executor.config.model ? { model: img.executor.config.model } : {}),
+          ...(img.executor.config.options?.reasoningEffort ? { reasoningEffort: img.executor.config.options.reasoningEffort } : {}),
           description: img.description,
           mode: img.interaction.mode,
         }));
@@ -1895,12 +1843,15 @@ export class ProjectContext {
 
   async runScaffold(rawPath: unknown, rawTiers: unknown, rawResumeFrom: unknown) {
     const path = InputValidator.canonicalisePath(String(rawPath ?? ""), this.root);
+    // The scaffold still writes a gateway-placeholder `.arke/config.json` for a greenfield project;
+    // any tier value the client supplies is honoured, else the scaffold's own gateway default fills
+    // it. Agents declare their real model per-image (SPEC-016 revised), edited after scaffolding.
     const supplied = (rawTiers ?? {}) as Record<string, unknown>;
     const tiers: ScaffoldTiers = {
-      capable: typeof supplied.capable === "string" ? supplied.capable : this.tierDefaults.capable,
-      mid: typeof supplied.mid === "string" ? supplied.mid : this.tierDefaults.mid,
-      fast: typeof supplied.fast === "string" ? supplied.fast : this.tierDefaults.fast,
-    };
+      ...(typeof supplied.capable === "string" ? { capable: supplied.capable } : {}),
+      ...(typeof supplied.mid === "string" ? { mid: supplied.mid } : {}),
+      ...(typeof supplied.fast === "string" ? { fast: supplied.fast } : {}),
+    } as ScaffoldTiers;
     const resumeFrom = typeof rawResumeFrom === "string" ? (rawResumeFrom as ScaffoldStep) : undefined;
     const runner = new ScaffoldRunner({
       root: path,
@@ -1931,7 +1882,7 @@ export class ProjectContext {
       await this.adapter.sendMessage({
         sessionId: session.sessionId,
         agent: "researcher",
-        tier: "mid",
+        ...this.modelArg("researcher"),
         parts: [
           {
             type: "text",

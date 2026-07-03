@@ -112,11 +112,42 @@ export interface RegistryWarning {
   detail?: string;
 }
 
-/** The full client-safe registry projection carried on the snapshot (SPEC-005). */
+/**
+ * One live harness endpoint on the snapshot (SPEC-016 revised, Omnigent-shaped). A harness is a
+ * host-side provider/auth profile the adapter talks to; the client sees its id, kind, endpoint,
+ * reachability, and capability flags — never a `credentialsRef`.
+ */
+export interface HarnessStatus {
+  id: string; // provider profile key (e.g. "opencode-local")
+  harness: string; // the harness kind ("opencode", "claude-code", …)
+  endpoint: string;
+  reachable: boolean;
+  caps: string[];
+}
+
+/**
+ * One agent on the roster (SPEC-016 revised). The agent DECLARES its own model+provider in its image
+ * `executor`, so the client shows the concrete `provider/model` and reasoning effort directly — the
+ * model id is public; only the credential (referenced by `authProfile`) is host-side.
+ */
+export interface AgentRosterEntry {
+  name: string;
+  description?: string;
+  harness: string;
+  model?: string;
+  reasoningEffort?: string;
+  mode: string;
+  authProfile?: string;
+}
+
+/**
+ * The client-safe registry projection carried on the snapshot (SPEC-016 revised). Agents declare
+ * their runtime, so this is now the live harness endpoints + the agent roster (each agent's declared
+ * model), plus config/health warnings — no logical-tier indirection.
+ */
 export interface RegistrySnapshot {
-  instances: RegistryInstanceStatus[];
-  tierResolution: { tier: ModelTier; label: string }[];
-  roster: RosterResolution[];
+  harnesses: HarnessStatus[];
+  agents: AgentRosterEntry[];
   /** Config/health warnings from the last refresh, so the opening client sees them on connect. */
   warnings: RegistryWarning[];
 }

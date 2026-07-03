@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  type AgentModel,
   type Capability,
   type CreateSessionInput,
   DomainEvent,
@@ -144,7 +145,10 @@ export class OmnigentAdapter implements HarnessAdapter {
       }
       this.openStream(input.sessionId);
     }
-    const override = this.config.modelForTier?.(input.tier);
+    // The agent declares its own model+provider (SPEC-016 revised); pass it through as Omnigent's
+    // `model_override`. Omnigent otherwise resolves the model from the agent image. A gateway model
+    // sends its bare name; a provider-qualified model sends `provider/name`.
+    const override = modelOverride(input.model);
     const body = {
       type: "message",
       ...(override ? { model_override: override } : {}),
@@ -218,4 +222,10 @@ export class OmnigentAdapter implements HarnessAdapter {
       this.streams.delete(sessionId);
     }
   }
+}
+
+/** Render an {@link AgentModel} as an Omnigent `model_override`: `provider/name`, or bare for gateway. */
+function modelOverride(m?: AgentModel): string | undefined {
+  if (!m) return undefined;
+  return m.provider === "gateway" ? m.name : `${m.provider}/${m.name}`;
 }

@@ -1,5 +1,3 @@
-import type { ModelTier } from "@arke/contracts";
-
 /**
  * Configuration for the Omnigent v1 HTTP adapter (ADR-0002 spike).
  *
@@ -22,11 +20,6 @@ export interface OmnigentConfig {
    * is the agent image; Arke selects one per project. Optional — the server may have a default.
    */
   agentId?: string;
-  /**
-   * Logical tier → Omnigent `model_override`. Omnigent resolves the concrete model from the agent
-   * image plus this override; unmapped tiers leave the agent's default model in place.
-   */
-  modelForTier?: (tier: ModelTier) => string | undefined;
   /** Per-request timeout (ms). */
   requestTimeoutMs?: number;
 }
