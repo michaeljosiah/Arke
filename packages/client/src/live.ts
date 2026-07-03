@@ -450,6 +450,25 @@ export async function reprobeRegistry(): Promise<void> {
   if (res?.ok && res.result) applyRegistrySnapshot(res.result);
 }
 
+/** The harness's live model catalog (SPEC-016 revised): `[{ id, provider, displayName? }]`, for the
+ *  agent-model editor. Empty when the harness exposes no catalog or is unreachable/offline. */
+export async function fetchModels(): Promise<Array<{ id: string; provider: string; displayName?: string }>> {
+  if (!isCoordinatorConnected()) return [];
+  const res = await liveRequest('models.list');
+  return res?.ok && Array.isArray(res.result) ? res.result : [];
+}
+
+/**
+ * Persist an agent's model choice (SPEC-016 revised): rewrites the agent's image on the host and
+ * refreshes the roster (the coordinator emits `registry.updated`, so the cockpit chip updates live).
+ * A governed write — refuse offline rather than queue-and-replay it later.
+ */
+export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string): Promise<{ ok: boolean; error?: string; model?: string }> {
+  if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to change an agent’s model' };
+  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
+  return res?.ok ? { ok: true, model: res.result?.model } : { ok: false, error: res?.error };
+}
+
 // The project this client INTENDS to be on (set by every successful project.open). A reconnect
 // binds the fresh server-side connection to the DEFAULT project, so without re-binding, prompts
 // silently dispatch against the wrong project's harness while the UI still shows the intended one.
