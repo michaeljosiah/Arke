@@ -247,15 +247,19 @@ export class ProjectContext {
   }
 
   /**
-   * Whether this project has work in flight (SPEC-022): a session mid-turn (streaming), an open
-   * permission/elicitation awaiting a human, or a queued fan-out task. The desktop shell aggregates
-   * this across contexts to gate quit-confirm and auto-update — computed host-side (authoritative),
-   * never trusted from a renderer signal that can go stale across a reconnect.
+   * Whether this project has work in flight (SPEC-022): a session that is running or blocked on a human
+   * (a permission OR an elicitation), or a queued fan-out task. Derived from the READ MODEL's card
+   * states — `status: running|waiting` and the sticky `needsHuman` gate — so it also catches a task
+   * that is running before its first `message.part` and an elicitation-gated session (which a
+   * `streaming`/`pendingPerms` check alone would miss — review D2). Computed host-side (authoritative),
+   * never trusted from a renderer signal that can go stale across a reconnect. The desktop shell
+   * aggregates this across contexts to gate quit-confirm and auto-update.
    */
   workInFlight(): boolean {
-    if (this.streaming.size > 0) return true;
-    if (this.pendingPerms.size > 0) return true;
-    for (const q of this.fanoutQueues.values()) if (q.length > 0) return true;
+    for (const card of this.read.snapshot()) {
+      if (card.status === "running" || card.status === "waiting" || card.needsHuman) return true;
+    }
+    for (const q of this.fanoutQueues.values()) if (q.length > 0) return true; // queued, not yet dispatched
     return false;
   }
 
