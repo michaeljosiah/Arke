@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, normalize, sep } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, shell } from "electron";
@@ -88,31 +89,61 @@ async function ensureCoordinator(): Promise<string> {
   return coordinator.url;
 }
 
+let opencodeWarm: ChildProcess | undefined;
+
+/**
+ * Pre-warm the opencode harness at launch (SPEC-022 follow-up). Spawns `opencode serve` in the
+ * background so, by the time the user opens a project, the binary/runtime is hot AND a MISSING install
+ * is surfaced here (not on first project open). Non-blocking — the window + loading screen show
+ * immediately while this warms in the background. Never fatal: a missing binary or a port already in use
+ * just logs (the client's harness-reachability gate then guides the user). Owned by the desktop and
+ * killed on quit; skipped in attach mode (an external coordinator already owns opencode).
+ */
+function startOpencodeWarm(): void {
+  if (attached || opencodeWarm) return;
+  try {
+    // `shell: true` so Windows resolves the `opencode.cmd` shim on PATH (mirrors the coordinator's own
+    // harness spawn). Serves the neutral userData root; ignore its stdio — the client sees the harness
+    // over the coordinator, not this process.
+    opencodeWarm = spawn("opencode", ["serve", "--hostname", "127.0.0.1", "--port", "4096"], {
+      cwd: app.getPath("userData"),
+      stdio: "ignore",
+      shell: true,
+      windowsHide: true,
+    });
+    opencodeWarm.on("error", (err) => console.error("[arke] could not start opencode (is it installed?):", err.message));
+    opencodeWarm.on("exit", () => { opencodeWarm = undefined; });
+  } catch (err) {
+    console.error("[arke] opencode warm-start failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+function stopOpencodeWarm(): void {
+  try {
+    opencodeWarm?.kill();
+  } catch {
+    /* already gone */
+  }
+  opencodeWarm = undefined;
+}
+
 function buildMenu(): void {
-  const send = (action: string) => win?.webContents.send("arke:menu", action);
-  const template: Electron.MenuItemConstructorOptions[] = [
-    ...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
-    {
-      label: "File",
-      submenu: [
-        { label: "Open project…", accelerator: "CmdOrCtrl+O", click: () => send("open-project") },
-        { label: "New specification", accelerator: "CmdOrCtrl+N", click: () => send("new-spec") },
-        { type: "separator" as const },
-        process.platform === "darwin" ? { role: "close" as const } : { role: "quit" as const },
-      ],
-    },
-    { role: "editMenu" },
-    {
-      label: "View",
-      submenu: [
-        { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => win?.webContents.reload() },
-        // Dev-tools only in a non-packaged (development) build (SPEC-022).
-        ...(app.isPackaged ? [] : [{ role: "toggleDevTools" as const }]),
-      ],
-    },
-    { role: "windowMenu" },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  // A deliberately minimal menu (no File / View / Window clutter). Project actions live in the app's own
+  // UI, not a native menu. macOS REQUIRES an application menu for Quit + the standard Edit shortcuts
+  // (copy / paste / select-all), so it keeps a lean [App, Edit]; Windows/Linux get no menu bar at all in
+  // production. Developer builds add a small View menu (reload + devtools) for ergonomics.
+  const dev = !app.isPackaged;
+  const viewMenu: Electron.MenuItemConstructorOptions = {
+    label: "View",
+    submenu: [{ role: "reload" }, { role: "toggleDevTools" }],
+  };
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, ...(dev ? [viewMenu] : [])]),
+    );
+    return;
+  }
+  Menu.setApplicationMenu(dev ? Menu.buildFromTemplate([viewMenu]) : null);
 }
 
 /** The Arke window/taskbar icon: bundled at `resources/icon.png` when packaged, else the build source. */
@@ -185,6 +216,7 @@ let updatePrompting = false;
 
 async function applyUpdateAndRestart(): Promise<void> {
   quitting = true; // let the before-quit handler pass through to the updater's restart
+  stopOpencodeWarm();
   try {
     if (!attached) await coordinator?.stop(); // drain the trace + stop the harness first (SPEC-015)
   } finally {
@@ -235,6 +267,7 @@ async function gracefulQuit(): Promise<void> {
     if (response === 1) return; // cancelled
   }
   quitting = true;
+  stopOpencodeWarm(); // kill the pre-warmed harness we started
   try {
     if (!attached) await coordinator?.stop(); // transitive Trace.drain + harness stop (SPEC-015)
   } finally {
@@ -275,6 +308,9 @@ async function main(): Promise<void> {
     return;
   }
   await createWindow(coordinatorUrl);
+  // Pre-warm opencode in the background NOW (the window + loading screen are already up), so it starts
+  // during the launch loading screen without blocking the UI (SPEC-022 follow-up).
+  startOpencodeWarm();
   setupAutoUpdate();
 
   app.on("activate", () => {
