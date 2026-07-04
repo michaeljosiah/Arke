@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml, parseDocument } from "yaml";
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { AgentImage, type SkillRef, type Tool, type Tools } from "@arke/contracts";
 
 /**
@@ -170,6 +170,142 @@ export function setAgentModel(dir: string, model: string, reasoningEffort?: stri
     }
   }
   writeFileSync(configPath, String(doc), "utf8");
+}
+
+/**
+ * Surgically rewrite an agent image's `permission` map in place (SPEC-021) — the write half of the
+ * capability-aware editor's permission grid. Replaces ONLY the top-level `permission:` block in the
+ * image's `config.yaml`, preserving the rest of the document (executor, tools, comments, formatting)
+ * via the YAML Document API. An empty map removes the `permission:` key entirely. Throws
+ * {@link AgentImageError} if the image or its config is missing.
+ */
+export function setAgentPermission(dir: string, permission: Record<string, string>): void {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) throw new AgentImageError(`missing required config.yaml in ${dir}`);
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  const entries = Object.entries(permission).filter(([, v]) => typeof v === "string" && v.trim() !== "");
+  if (entries.length === 0) {
+    if (doc.getIn(["permission"]) !== undefined) doc.deleteIn(["permission"]);
+  } else {
+    doc.setIn(["permission"], Object.fromEntries(entries));
+  }
+  writeFileSync(configPath, String(doc), "utf8");
+}
+
+/** A structured request to create a new agent image (SPEC-021) — the write half of the editor's create flow. */
+export interface NewAgentSpec {
+  name: string;
+  description?: string;
+  harness: string;
+  /** Full `provider/model` string (or a bare gateway name); omitted → the harness default. */
+  model?: string;
+  reasoningEffort?: string;
+  /** Host-side auth profile the executor references (never an inline credential — NFR-1). */
+  authProfile?: string;
+  mode?: string; // interaction.mode (primary | subagent | …)
+  conversational?: boolean;
+  /** Inline system prompt written as the config `prompt` (skills/instructions folders are separate). */
+  instructions?: string;
+  permission?: Record<string, string>;
+  /** Declared MCP / function tools; agent sub-tools use the `agents/<name>/` convention instead. */
+  tools?: Tools;
+}
+
+/**
+ * Create a NEW agent image directory `<agentsRoot>/<name>/config.yaml` from a structured spec
+ * (SPEC-021). Builds the Omnigent-shaped `config.yaml`, writes it, then round-trips it through
+ * {@link loadAgentImage} to validate — if the result is invalid (or would inline a secret), the
+ * partially-written file/dir this call created is removed and it throws {@link AgentImageError}, so a
+ * bad create never leaves a broken image on disk. Refuses to overwrite an existing agent.
+ */
+export function writeNewAgent(agentsRoot: string, spec: NewAgentSpec): string {
+  const name = String(spec.name ?? "").trim();
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new AgentImageError(`invalid agent name '${name}'`);
+  const dir = join(agentsRoot, name);
+  if (existsSync(join(dir, "config.yaml"))) throw new AgentImageError(`agent '${name}' already exists`);
+
+  const config: Record<string, unknown> = {
+    spec_version: 1,
+    name,
+    ...(spec.description ? { description: spec.description } : {}),
+    executor: {
+      type: "omnigent",
+      config: {
+        harness: spec.harness,
+        ...(spec.model ? { model: spec.model } : {}),
+        ...(spec.reasoningEffort ? { options: { reasoningEffort: spec.reasoningEffort } } : {}),
+        ...(spec.authProfile ? { auth: { profile: spec.authProfile } } : {}),
+      },
+    },
+    ...(spec.instructions ? { prompt: spec.instructions } : {}),
+    interaction: { conversational: spec.conversational ?? true, mode: spec.mode ?? "subagent" },
+    ...(spec.permission && Object.keys(spec.permission).length ? { permission: spec.permission } : {}),
+    ...(spec.tools && Object.keys(spec.tools).length ? { tools: Object.fromEntries(Object.entries(spec.tools).map(([n, t]) => [n, toolToRaw(t)])) } : {}),
+  };
+
+  const dirExisted = existsSync(dir);
+  mkdirSync(dir, { recursive: true });
+  const configPath = join(dir, "config.yaml");
+  writeFileSync(configPath, stringifyYaml(config), "utf8");
+  try {
+    loadAgentImage(dir); // validate the just-written image (executor, tools, no inline secrets — NFR-1)
+  } catch (err) {
+    // Clean up what we created so a rejected create leaves no broken image behind.
+    try {
+      if (dirExisted) rmSync(configPath, { force: true });
+      else rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err instanceof AgentImageError ? err : new AgentImageError(`could not create agent '${name}': ${reason(err)}`);
+  }
+  return dir;
+}
+
+/** Serialise a typed {@link Tool} back to its raw YAML shape (drops the Arke-internal `transport` tag). */
+function toolToRaw(t: Tool): Record<string, unknown> {
+  if (t.type === "mcp") {
+    if (t.transport === "local") {
+      return {
+        type: "mcp", command: t.command,
+        ...(t.args?.length ? { args: t.args } : {}),
+        ...(t.environment ? { environment: t.environment } : {}),
+        ...(t.tools ? { tools: t.tools } : {}),
+        ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+        ...(t.description ? { description: t.description } : {}),
+      };
+    }
+    return {
+      type: "mcp", url: t.url,
+      ...(t.headers ? { headers: t.headers } : {}),
+      ...(t.tools ? { tools: t.tools } : {}),
+      ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+      ...(t.description ? { description: t.description } : {}),
+    };
+  }
+  if (t.type === "function") {
+    return {
+      type: "function",
+      ...(t.callable ? { callable: t.callable } : {}),
+      ...(t.runtime ? { runtime: t.runtime } : {}),
+      ...(t.parameters ? { parameters: t.parameters } : {}),
+      ...(t.containerImage ? { container_image: t.containerImage } : {}),
+      ...(t.description ? { description: t.description } : {}),
+    };
+  }
+  // agent sub-tool: keep the executor block and its options (out of the common editor path).
+  return {
+    type: "agent", executor: t.executor,
+    ...(t.prompt ? { prompt: t.prompt } : {}),
+    ...(t.passHistory !== undefined ? { pass_history: t.passHistory } : {}),
+    ...(t.maxSessions !== undefined ? { max_sessions: t.maxSessions } : {}),
+    ...(t.description ? { description: t.description } : {}),
+  };
 }
 
 /**

@@ -143,3 +143,77 @@ test("agent.configure with a bare gateway provider stores an unqualified model +
   assert.equal(img.executor.config.options?.reasoningEffort, undefined); // effort dropped
   ws.close();
 });
+
+test("agent.configure also writes the permission grid when supplied (SPEC-021)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", { name: "implementer", provider: "github-copilot", model: "gpt-5.5", permission: { edit: "ask", bash: "deny" } });
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.result.permission, { edit: "ask", bash: "deny" });
+  const img = loadAgentImage(resolve(dir, "agents", "implementer"));
+  assert.equal(img.permission.edit, "ask");
+  assert.equal(img.permission.bash, "deny");
+  // the roster projection carries the new verbs
+  const snap = await request("registry.get");
+  const impl = snap.result.agents.find((a: any) => a.name === "implementer");
+  assert.equal(impl.permission.bash, "deny");
+  ws.close();
+});
+
+test("agent.create writes a new agent image and it appears on the roster with tools (SPEC-021)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.create", {
+    spec: {
+      name: "scout",
+      description: "recon",
+      harness: "opencode-native",
+      model: "github-copilot/gpt-5.5",
+      mode: "subagent",
+      permission: { read: "allow" },
+      tools: { github: { type: "mcp", transport: "local", command: "uv", args: ["run", "mcp"], environment: { GITHUB_TOKEN: "${GH_TOKEN}" } } },
+    },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.name, "scout");
+
+  // The image exists and is valid; the ${VAR} was kept unresolved (NFR-1).
+  const img = loadAgentImage(resolve(dir, "agents", "scout"));
+  assert.equal(img.executor.config.model, "github-copilot/gpt-5.5");
+  assert.equal((img.tools.github as any).environment.GITHUB_TOKEN, "${GH_TOKEN}");
+
+  // The roster refreshed to include the new agent with its declared tools.
+  const snap = await request("registry.get");
+  const scout = snap.result.agents.find((a: any) => a.name === "scout");
+  assert.ok(scout, "new agent on the roster");
+  assert.deepEqual(scout.tools, [{ name: "github", kind: "mcp" }]);
+  ws.close();
+});
+
+test("agent.create rejects a duplicate name and a path-traversal name", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const dup = await request("agent.create", { spec: { name: "implementer", harness: "opencode-native" } });
+  assert.equal(dup.ok, false);
+  assert.match(dup.error, /already exists/);
+
+  const bad = await request("agent.create", { spec: { name: "../evil", harness: "opencode-native" } });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /invalid agent name/);
+  ws.close();
+});

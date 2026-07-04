@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentImageError, loadAgentImage, setAgentModel } from "../src/index.js";
+import { AgentImageError, loadAgentImage, setAgentModel, setAgentPermission, writeNewAgent } from "../src/index.js";
 
 function imageDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "arke-image-"));
@@ -153,6 +153,82 @@ test("setAgentModel with no effort drops a previously-set reasoning effort", () 
   const image = loadAgentImage(dir);
   assert.equal(image.executor.config.model, "github-copilot/claude-opus-4.8");
   assert.equal(image.executor.config.options?.reasoningEffort, undefined);
+});
+
+test("setAgentPermission replaces the permission grid, preserving the rest (SPEC-021)", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: r\ndescription: keep me\nexecutor:\n  config:\n    harness: opencode-native\n    model: x/y\npermission:\n  edit: allow\n",
+  });
+  setAgentPermission(dir, { edit: "ask", bash: "deny", github_mcp_search: "allow" });
+  const image = loadAgentImage(dir);
+  assert.equal(image.permission.edit, "ask");
+  assert.equal(image.permission.bash, "deny");
+  assert.equal(image.permission.github_mcp_search, "allow");
+  assert.equal(image.description, "keep me"); // untouched
+  assert.equal(image.executor.config.model, "x/y");
+});
+
+test("setAgentPermission with an empty map removes the permission block", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: r\nexecutor:\n  config:\n    harness: opencode-native\npermission:\n  edit: allow\n" });
+  setAgentPermission(dir, {});
+  assert.deepEqual(loadAgentImage(dir).permission, {});
+});
+
+test("writeNewAgent creates a valid image directory from a structured spec (SPEC-021)", () => {
+  const agentsRoot = mkdtempSync(join(tmpdir(), "arke-agents-"));
+  const dir = writeNewAgent(agentsRoot, {
+    name: "scout",
+    description: "does recon",
+    harness: "opencode-native",
+    model: "github-copilot/gpt-5.5",
+    reasoningEffort: "high",
+    authProfile: "opencode-local",
+    mode: "subagent",
+    instructions: "You scout the codebase.",
+    permission: { read: "allow", edit: "ask" },
+    tools: {
+      github: { type: "mcp", transport: "local", command: "uv", args: ["run", "mcp"], environment: { GITHUB_TOKEN: "${GH_TOKEN}" } },
+    },
+  });
+  assert.equal(dir, join(agentsRoot, "scout"));
+  const image = loadAgentImage(dir);
+  assert.equal(image.name, "scout");
+  assert.equal(image.executor.config.harness, "opencode-native");
+  assert.equal(image.executor.config.model, "github-copilot/gpt-5.5");
+  assert.equal(image.executor.config.options?.reasoningEffort, "high");
+  assert.equal(image.executor.config.auth?.profile, "opencode-local");
+  assert.equal(image.interaction.mode, "subagent");
+  assert.equal(image.permission.read, "allow");
+  const gh = image.tools.github as any;
+  assert.equal(gh.transport, "local");
+  assert.equal(gh.environment.GITHUB_TOKEN, "${GH_TOKEN}"); // ${VAR} kept unresolved
+});
+
+test("writeNewAgent refuses to overwrite an existing agent", () => {
+  const agentsRoot = mkdtempSync(join(tmpdir(), "arke-agents-"));
+  writeNewAgent(agentsRoot, { name: "dup", harness: "opencode-native" });
+  assert.throws(() => writeNewAgent(agentsRoot, { name: "dup", harness: "opencode-native" }), /already exists/);
+});
+
+test("writeNewAgent rejects an inline secret and leaves no broken image behind (NFR-1)", () => {
+  const agentsRoot = mkdtempSync(join(tmpdir(), "arke-agents-"));
+  assert.throws(
+    () =>
+      writeNewAgent(agentsRoot, {
+        name: "leaky",
+        harness: "opencode-native",
+        tools: { d: { type: "mcp", transport: "remote", url: "https://x/mcp", headers: { Authorization: "Bearer sk-LITERAL" } } },
+      }),
+    /literal secret/,
+  );
+  // the rejected create must not leave a half-written config.yaml on disk
+  assert.equal(existsSync(join(agentsRoot, "leaky", "config.yaml")), false);
+});
+
+test("writeNewAgent rejects an invalid agent name (path guard)", () => {
+  const agentsRoot = mkdtempSync(join(tmpdir(), "arke-agents-"));
+  assert.throws(() => writeNewAgent(agentsRoot, { name: "../escape", harness: "opencode-native" }), /invalid agent name/);
 });
 
 test("a missing config.yaml is rejected whole", () => {

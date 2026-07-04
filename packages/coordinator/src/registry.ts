@@ -93,6 +93,9 @@ export interface AgentRosterEntry {
   reasoningEffort?: string;
   mode: string;
   authProfile?: string;
+  /** Declared tools by name + kind, and skills by name (SPEC-021); no secret values. */
+  tools?: { name: string; kind: string }[];
+  skills?: string[];
 }
 
 /**
