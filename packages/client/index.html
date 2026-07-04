@@ -4,9 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Arke · Specification Orchestrator</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <!-- Geist is self-hosted via @fontsource, imported in src/main.tsx (SPEC-022) — no remote font
+         request, so a strict Electron CSP (no remote content) holds and the app works offline. -->
   </head>
   <body>
     <div id="app"></div>

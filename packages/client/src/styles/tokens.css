@@ -141,7 +141,9 @@
    ============================================================ */
 :root {
   /* ---- Families ------------------------------------------- */
-  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* "Geist Sans" is the family name @fontsource/geist-sans registers (self-hosted, SPEC-022); "Geist"
+     is kept as a fallback for any environment that still has the old Google Fonts family. */
+  --font-sans: "Geist Sans", "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Back-compat aliases (display/body both map to sans) */
