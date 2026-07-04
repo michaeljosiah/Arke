@@ -470,9 +470,12 @@ export async function fetchModels(): Promise<Array<{ id: string; provider: strin
  * refreshes the roster (the coordinator emits `registry.updated`, so the cockpit chip updates live).
  * A governed write — refuse offline rather than queue-and-replay it later.
  */
-export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string, permission?: Record<string, string>): Promise<{ ok: boolean; error?: string; model?: string }> {
+export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string, permission?: Record<string, string>, mode?: string): Promise<{ ok: boolean; error?: string; model?: string }> {
   if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to change an agent’s model' };
-  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), ...(permission && Object.keys(permission).length ? { permission } : {}) });
+  // `permission` is sent whenever DEFINED (even `{}`) so the editor can clear all rules; `undefined`
+  // (the cockpit model chip) leaves the block untouched. `model` may be empty for a permission/mode-only
+  // save on a default-model agent — the coordinator then leaves the model as-is.
+  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), ...(permission !== undefined ? { permission } : {}), ...(mode ? { mode } : {}) });
   if (!res?.ok) return { ok: false, error: res?.error };
   // Refresh the roster from the authoritative snapshot: the live `registry.updated` event carries
   // only the harness endpoints, so the agent roster (which drives the model chip) is re-read here.

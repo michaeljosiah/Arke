@@ -104,6 +104,35 @@ test("materializeCapabilities merges into an existing opencode.json, preserving 
   assert.ok(oc.mcp.other && oc.mcp.github); // both servers present
 });
 
+test("materializeCapabilities REFUSES to overwrite a corrupt opencode.json (no silent config loss)", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
+  const { writeFileSync } = await import("node:fs");
+  // A JSONC comment / trailing comma makes this invalid JSON; the old code silently discarded it.
+  writeFileSync(join(root, "opencode.json"), '{ "theme": "dark", /* comment */ "mcp": {} , }', "utf8");
+  const before = readFileSync(join(root, "opencode.json"), "utf8");
+  await assert.rejects(
+    () => adapterIn(root).materializeCapabilities({ ...image, tools: { g: { type: "mcp", transport: "local", command: "uv" } } }),
+    /existing opencode.json is not valid JSON/,
+  );
+  // the corrupt file is left untouched for the user to repair — NOT overwritten
+  assert.equal(readFileSync(join(root, "opencode.json"), "utf8"), before);
+});
+
+test("re-materializeAgent preserves the existing instruction body when the image carries none (SPEC-021)", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-rematerialize-")));
+  const a = adapterIn(root);
+  // First materialise with a real body (from the image prompt).
+  await a.materializeAgent({ ...image, name: "keeper", prompt: "You are the keeper. Guard the gate.", instructions: "" });
+  const first = readFileSync(join(root, ".opencode", "agents", "keeper.md"), "utf8");
+  assert.match(first, /Guard the gate/);
+  // Now re-materialise the SAME name with a permission edit but NO instruction body (empty prompt):
+  // the frontmatter updates, the body is preserved (not clobbered to empty).
+  await a.materializeAgent({ ...image, name: "keeper", prompt: "", instructions: "", permission: { edit: "deny" } });
+  const second = readFileSync(join(root, ".opencode", "agents", "keeper.md"), "utf8");
+  assert.match(second, /edit: deny/); // frontmatter updated
+  assert.match(second, /Guard the gate/); // body preserved
+});
+
 test("materializeCapabilities records an unsupported function tool", async () => {
   const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
   const r = await adapterIn(root).materializeCapabilities({ ...image, tools: { calc: { type: "function", callable: "pkg.calc" } } });

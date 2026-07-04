@@ -182,6 +182,18 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
   }, [catalog, provider]);
   React.useEffect(() => { if (models.length && !models.includes(model)) setModel(models[0]); }, [provider]);
 
+  // Permission KEYS offered in the grid (SPEC-021): the six common built-ins, plus every built-in the
+  // harness manifest reports (glob, apply_patch, todowrite, …), plus a `<server>_*` wildcard gate for
+  // each declared/existing MCP tool — so an agent that adds an MCP server can actually gate it here.
+  const permKeyOptions = React.useMemo(() => {
+    const keys = new Set<string>(PERMISSION_KEYS);
+    (caps?.builtinTools || []).forEach((k: string) => keys.add(k));
+    (tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}*`); });
+    (existing?.tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}*`); });
+    perms.forEach((p: any) => { if (p.k) keys.add(p.k); });
+    return [...keys].sort();
+  }, [caps, tools, existing, perms]);
+
   const save = async () => {
     setError(null);
     if (!isEdit && !/^[a-z0-9][a-z0-9._-]*$/i.test(name)) { setError('name must be a slug (letters, digits, . _ -)'); return; }
@@ -190,7 +202,9 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
     const permission = Object.fromEntries(perms.filter((p) => p.k && p.v).map((p) => [p.k, p.v]));
     let res: any;
     if (isEdit) {
-      res = await configureAgent(name, provider, model, effort === 'default' ? undefined : effort, permission);
+      // Pass permission (even {}) so removing all rows clears the block, and mode so a primary/subagent
+      // change persists. An empty model = "leave as-is" (the coordinator keeps a default-model agent).
+      res = await configureAgent(name, provider, model, effort === 'default' ? undefined : effort, permission, mode);
     } else {
       const toolMap: any = {};
       for (const t of tools) {
@@ -245,7 +259,7 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
       e(EditorRow, { label: 'Permissions', hint: 'allow · ask · deny' },
         e('div', null,
           perms.map((p, i) => e('div', { key: i, style: { display: 'flex', gap: 6, marginBottom: 6 } },
-            e('div', { style: { flex: 1 } }, e(Sel, { value: p.k || '—', small: true, options: [...new Set([...PERMISSION_KEYS, ...perms.map((x) => x.k).filter(Boolean)])], onChange: (v: string) => setPerms(perms.map((x, j) => j === i ? { ...x, k: v } : x)) })),
+            e('div', { style: { flex: 1 } }, e(Sel, { value: p.k || '—', small: true, options: permKeyOptions, onChange: (v: string) => setPerms(perms.map((x, j) => j === i ? { ...x, k: v } : x)) })),
             e('div', { style: { width: 110 } }, e(Sel, { value: p.v || 'allow', small: true, options: VERBS, onChange: (v: string) => setPerms(perms.map((x, j) => j === i ? { ...x, v } : x)) })),
             e('button', { onClick: () => setPerms(perms.filter((_, j) => j !== i)), style: { display: 'flex', border: 'none', background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 2 } }, e(Icon, { name: 'x', size: 13 })))),
           e('button', { onClick: () => setPerms([...perms, { k: '', v: 'allow' }]), style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add permission'))),

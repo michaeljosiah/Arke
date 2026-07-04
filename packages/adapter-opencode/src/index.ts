@@ -64,6 +64,12 @@ function isOpenCodeSessionId(id: string): boolean {
   return /^ses_/.test(id);
 }
 
+/** Extract the instruction body of an agent markdown file (everything after the `---` frontmatter). */
+function markdownBody(md: string): string {
+  const m = /^---\n[\s\S]*?\n---\n?/.exec(md);
+  return (m ? md.slice(m[0].length) : md).replace(/^\n+/, "");
+}
+
 export interface OpenCodeAdapterDeps {
   /** Durable session ownership graph. Defaults to in-memory (durability needs a file store). */
   sessionStore?: SessionStore;
@@ -236,7 +242,16 @@ export class OpenCodeAdapter implements HarnessAdapter {
   async materializeAgent(image: AgentImage): Promise<void> {
     const dir = join(this.http.directory, ".opencode", "agents");
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, `${image.name}.md`), this.agentMarkdown(image), "utf8");
+    const file = join(dir, `${image.name}.md`);
+    // When the image carries no instruction body of its own (e.g. `instructions: AGENTS.md` that does
+    // not resolve per-agent), preserve the previously-materialised body instead of clobbering it with
+    // an empty one. This makes a re-materialise triggered by a model/permission/mode edit safe — it
+    // only rewrites the frontmatter (SPEC-021, so a permission edit actually reaches OpenCode).
+    let existingBody = "";
+    if (!(image.prompt ?? image.instructions) && existsSync(file)) {
+      existingBody = markdownBody(await readFile(file, "utf8"));
+    }
+    await writeFile(file, this.agentMarkdown(image, existingBody), "utf8");
     // Sub-agents become their own files (OpenCode links them by parentID at runtime).
     for (const sub of image.subAgents) await this.materializeAgent(sub);
   }
@@ -305,8 +320,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
     if (existsSync(path)) {
       try {
         doc = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-      } catch {
-        /* a corrupt/hand-broken opencode.json → start from a fresh doc rather than throwing */
+      } catch (err) {
+        // Refuse to overwrite: a corrupt/hand-broken opencode.json (a JSONC comment, a trailing comma,
+        // a syntax error) would otherwise be silently replaced by a fresh doc holding only `$schema` +
+        // this `mcp` block, dropping the user's other providers/agents/theme. Fail so they can repair it.
+        throw new Error(`refusing to materialise MCP: existing opencode.json is not valid JSON (${err instanceof Error ? err.message : String(err)}) — fix it and retry`);
       }
     }
     const existing = doc.mcp && typeof doc.mcp === "object" ? (doc.mcp as Record<string, unknown>) : {};
@@ -332,7 +350,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
    * the agent is self-describing to the harness — no tier indirection. A model with options
    * (e.g. reasoning effort) is emitted as the OpenCode `model: provider/id` + `options:` block.
    */
-  private agentMarkdown(image: AgentImage): string {
+  private agentMarkdown(image: AgentImage, bodyOverride?: string): string {
     const lines: string[] = ["---", `description: ${image.description ?? image.name}`, `mode: ${image.interaction.mode}`];
     const model = image.executor.config.model;
     // Omit a bare name or `gateway/…` placeholder: those are the "use the harness default" sentinel
@@ -349,7 +367,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
       lines.push("permission:");
       for (const [k, v] of perms) lines.push(`  ${k}: ${v}`);
     }
-    lines.push("---", "", image.prompt ?? image.instructions ?? "");
+    lines.push("---", "", bodyOverride || image.prompt || image.instructions || "");
     return lines.join("\n") + "\n";
   }
 

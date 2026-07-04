@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentImageError, loadAgentImage, setAgentModel, setAgentPermission, writeNewAgent } from "../src/index.js";
+import { AgentImageError, loadAgentImage, setAgentMode, setAgentModel, setAgentPermission, writeNewAgent } from "../src/index.js";
 
 function imageDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "arke-image-"));
@@ -103,6 +103,56 @@ test("an inline literal secret in a credential-named field is rejected; ${VAR} p
   const ok = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  d:\n    type: mcp\n    url: https://x/mcp\n    headers:\n      Authorization: \"Bearer ${T}\"\n      Content-Type: application/json\n" });
   const d = loadAgentImage(ok).tools.d as any;
   assert.equal(d.headers["Content-Type"], "application/json");
+});
+
+test("a credential value mixing a literal secret WITH a ${VAR} is still rejected (not just substring)", () => {
+  // Regression (PR #37 review P1): `HAS_VAR_REF.test` let a value THROUGH as long as it contained any
+  // ${VAR}, so `Bearer sk-live ${TOKEN}` leaked the literal `sk-live` into the tracked config. The
+  // whole value must reduce to interpolations + scheme keyword + separators — no literal residue.
+  const mixed = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  d:\n    type: mcp\n    url: https://x/mcp\n    headers:\n      Authorization: \"Bearer sk-live ${DOCS_TOKEN}\"\n" });
+  assert.throws(() => loadAgentImage(mixed), /literal secret in credential field 'Authorization'/);
+  // Legit composed forms still pass: `Basic ${CREDS}` and `${USER}:${PASS}`.
+  const ok = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  a:\n    type: mcp\n    url: https://x/mcp\n    headers:\n      Authorization: \"Basic ${CREDS}\"\n  b:\n    type: mcp\n    url: https://y/mcp\n    headers:\n      Authorization: \"${USER}:${PASS}\"\n" });
+  const a = loadAgentImage(ok).tools.a as any;
+  assert.equal(a.headers.Authorization, "Basic ${CREDS}");
+});
+
+test("an inline `type: agent` tool is folded into subAgents so it materialises (SPEC-021)", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: lead\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  helper:\n    type: agent\n    executor:\n      config:\n        harness: opencode-native\n        model: x/y\n    prompt: You assist the lead.\n",
+  });
+  const img = loadAgentImage(dir);
+  assert.equal((img.tools.helper as any).type, "agent"); // still documented in tools
+  const helper = img.subAgents.find((s) => s.name === "helper");
+  assert.ok(helper, "the agent-tool became an addressable sub-agent");
+  assert.equal(helper!.executor.config.harness, "opencode-native");
+  assert.equal(helper!.interaction.mode, "subagent");
+});
+
+test("a malformed discovered MCP file fails the image loudly (not silently dropped)", () => {
+  // Neither command nor url: parseMcpEntry's own AgentImageError propagates (fail loud), same as an
+  // equivalent inline entry — no longer silently swallowed (PR #37 review).
+  const invalid = imageDir({
+    "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\n",
+    "tools/mcp/broken.yaml": "description: has neither command nor url\n",
+  });
+  assert.throws(() => loadAgentImage(invalid), /MCP tool 'broken' must have exactly one of 'command'/);
+  // Unparseable YAML is wrapped with the file name so the author can find it.
+  const unparseable = imageDir({
+    "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\n",
+    "tools/mcp/bad.yaml": "command: [unclosed\n",
+  });
+  assert.throws(() => loadAgentImage(unparseable), /discovered MCP tool 'bad.yaml' is invalid/);
+});
+
+test("setAgentMode rewrites the interaction mode, preserving the rest (SPEC-021)", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: r\ndescription: keep\nexecutor:\n  config:\n    harness: opencode-native\n    model: x/y\ninteraction:\n  mode: subagent\n" });
+  setAgentMode(dir, "primary");
+  const img = loadAgentImage(dir);
+  assert.equal(img.interaction.mode, "primary");
+  assert.equal(img.description, "keep");
+  assert.equal(img.executor.config.model, "x/y");
 });
 
 test("an MCP entry with neither command nor url is rejected as malformed", () => {

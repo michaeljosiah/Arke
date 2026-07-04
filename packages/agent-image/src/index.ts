@@ -103,6 +103,13 @@ export function loadAgentImage(dir: string): AgentImage {
   const executor = parseExecutor(raw.executor, raw.name ?? dir);
   const osEnvRaw = raw.os_env ?? raw.osEnv;
 
+  const tools = { ...discoverTools(join(dir, "tools")), ...parseTools(raw.tools, raw.name ?? dir) };
+  // An inline `type: agent` tool is an addressable sub-agent — fold it into `subAgents` so the harness
+  // materialises it (a keyed agent-tool entry alone is never written to `.opencode/agents`) — SPEC-021.
+  const inlineAgentSubs = Object.entries(tools)
+    .filter(([, t]) => t.type === "agent")
+    .map(([name, t]) => agentToolAsSubImage(name, t as Extract<Tool, { type: "agent" }>));
+
   const candidate = {
     name: raw.name,
     description: raw.description,
@@ -113,7 +120,7 @@ export function loadAgentImage(dir: string): AgentImage {
       conversational: raw.interaction?.conversational ?? true,
       mode: raw.interaction?.mode ?? "primary",
     },
-    tools: { ...discoverTools(join(dir, "tools")), ...parseTools(raw.tools, raw.name ?? dir) },
+    tools,
     skills: discoverSkills(join(dir, "skills")),
     permission: raw.permission ?? {},
     ...(osEnvRaw
@@ -126,7 +133,7 @@ export function loadAgentImage(dir: string): AgentImage {
         }
       : {}),
     ...(typeof raw.spawn === "boolean" ? { spawn: raw.spawn } : {}),
-    subAgents: discoverSubAgents(join(dir, "agents")),
+    subAgents: [...discoverSubAgents(join(dir, "agents")), ...inlineAgentSubs],
   };
 
   const result = AgentImage.safeParse(candidate);
@@ -194,6 +201,24 @@ export function setAgentPermission(dir: string, permission: Record<string, strin
   } else {
     doc.setIn(["permission"], Object.fromEntries(entries));
   }
+  writeFileSync(configPath, String(doc), "utf8");
+}
+
+/**
+ * Surgically rewrite an agent image's interaction `mode` (`primary` | `subagent`) in place (SPEC-021).
+ * Edits ONLY `interaction.mode` in `config.yaml`, preserving the rest of the document via the YAML
+ * Document API. Throws {@link AgentImageError} if the image or its config is missing.
+ */
+export function setAgentMode(dir: string, mode: string): void {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) throw new AgentImageError(`missing required config.yaml in ${dir}`);
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  doc.setIn(["interaction", "mode"], mode);
   writeFileSync(configPath, String(doc), "utf8");
 }
 
@@ -361,15 +386,29 @@ function resolveInstructions(dir: string, instr: string | undefined): string | u
 
 /** A value in a credential-bearing field must be a `${VAR}`/profile reference, never an inline literal. */
 const CREDENTIAL_FIELD = /^(authorization|.*token.*|.*api[-_]?key.*|.*secret.*|.*password.*|.*credential.*|.*bearer.*)$/i;
-const HAS_VAR_REF = /\$\{[^}]+\}/;
+
+/**
+ * Whether a credential-field value contains an inline literal secret (NFR-1). A safe value is composed
+ * ONLY of `${VAR}` interpolations, an auth-scheme keyword (Bearer/Basic/…), and separators/whitespace —
+ * anything left over after stripping those is a literal. This rejects both a bare secret (`sk-live…`,
+ * no var at all) AND a var mixed with a literal (`Bearer sk-live ${TOKEN}`), which a substring `${…}`
+ * check would have let through, while still allowing the legitimate `Bearer ${TOKEN}` / `${U}:${P}` forms.
+ */
+function hasInlineLiteralSecret(v: string): boolean {
+  if (typeof v !== "string" || v.trim() === "") return false; // empty is not a secret
+  let residue = v.replace(/\$\{[^}]+\}/g, " "); // drop ${VAR} interpolations
+  residue = residue.replace(/\b(bearer|basic|token|digest|apikey|api[-_]?key)\b/gi, " "); // drop scheme keywords
+  residue = residue.replace(/[\s:;,=]+/g, ""); // drop separators + whitespace
+  return residue.length > 0; // any literal residue → an inline secret
+}
 
 /** Reject an inline literal secret in a credential-named `headers`/`environment` key (NFR-1, SPEC-021). */
 function assertNoInlineSecret(map: Record<string, string> | undefined, who: string, tool: string): void {
   if (!map) return;
   for (const [k, v] of Object.entries(map)) {
-    if (CREDENTIAL_FIELD.test(k) && typeof v === "string" && v.trim() !== "" && !HAS_VAR_REF.test(v)) {
+    if (CREDENTIAL_FIELD.test(k) && hasInlineLiteralSecret(v)) {
       throw new AgentImageError(
-        `agent image '${who}' tool '${tool}' inlines a literal secret in credential field '${k}' — use a \${VAR} reference or a host-side profile (NFR-1)`,
+        `agent image '${who}' tool '${tool}' inlines a literal secret in credential field '${k}' — the value may contain only \${VAR} references (NFR-1)`,
       );
     }
   }
@@ -449,6 +488,21 @@ function parseTools(raw: RawConfig["tools"], who: string): Tools {
   return out;
 }
 
+/** Synthesise a sub-agent {@link AgentImage} candidate from an inline `type: agent` tool (SPEC-021). */
+function agentToolAsSubImage(name: string, t: Extract<Tool, { type: "agent" }>): unknown {
+  return {
+    name,
+    ...(t.description ? { description: t.description } : {}),
+    executor: t.executor,
+    ...(t.prompt ? { prompt: t.prompt, instructions: t.prompt } : {}),
+    interaction: { conversational: true, mode: "subagent" },
+    tools: {},
+    skills: [],
+    permission: {},
+    subAgents: [],
+  };
+}
+
 /** Discover tools from the `tools/` directory into keyed entries (folded UNDER declared tools). */
 function discoverTools(toolsDir: string): Tools {
   if (!isDir(toolsDir)) return {};
@@ -466,11 +520,15 @@ function discoverTools(toolsDir: string): Tools {
     for (const f of readdirSync(mcp)) {
       if (!(f.endsWith(".yaml") || f.endsWith(".yml"))) continue;
       const name = stripExt(f);
+      // A malformed discovered MCP file fails the image loudly, exactly like an equivalent inline
+      // `tools:` entry — silently dropping it would leave the capability un-materialised with no error
+      // for the author to see (SPEC-021).
       try {
         const e = (parseYaml(readFileSync(join(mcp, f), "utf8")) ?? {}) as RawTool;
         out[name] = parseMcpEntry(name, e, name);
-      } catch {
-        /* an unreadable/invalid discovered MCP file is skipped rather than failing the whole image */
+      } catch (err) {
+        if (err instanceof AgentImageError) throw err;
+        throw new AgentImageError(`discovered MCP tool '${f}' is invalid: ${reason(err)}`);
       }
     }
   }

@@ -61,7 +61,7 @@ import {
   type ArtifactProposal,
 } from "./generation.js";
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
-import { loadAgentImage, setAgentModel, setAgentPermission, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
+import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
@@ -375,42 +375,55 @@ export class ProjectContext {
   }
 
   /**
-   * Rewrite an agent's declared model — and, optionally, its permission grid — in its image
+   * Rewrite an agent's declared model, permission grid, and/or interaction mode in its image
    * (SPEC-016 revised + SPEC-021) — the write half of the model + capability editor. Edits
-   * `agents/<name>/config.yaml` (`executor.config.model` + optional `options.reasoningEffort`, and the
-   * top-level `permission:` block when supplied), reloads the {@link AgentRegistry}, and refreshes the
-   * projection so the roster updates live. The write is confined to this project's root; the model id
-   * and permission verbs are public (only credentials are host-side).
+   * `agents/<name>/config.yaml` (`executor.config.model` + optional `options.reasoningEffort`, the
+   * `interaction.mode`, and the top-level `permission:` block), re-materialises the harness agent so
+   * a permission/mode edit actually reaches OpenCode, reloads the {@link AgentRegistry}, and refreshes
+   * the projection so the roster updates live. The write is confined to this project's root; the model
+   * id, mode, and permission verbs are public (only credentials are host-side).
+   *
+   * Each field is independent: an empty `model` leaves the model untouched (so a default-model agent
+   * can still have its permissions saved); `permission` undefined leaves the block, whereas an explicit
+   * empty map CLEARS it; an invalid permission verb (only `allow|ask|deny`) is rejected before any write.
    */
-  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown, rawPermission?: unknown): Promise<{ name: string; model: string; reasoningEffort?: string; permission?: Record<string, string> }> {
+  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown, rawPermission?: unknown, rawMode?: unknown): Promise<{ name: string; model?: string; reasoningEffort?: string; permission?: Record<string, string>; mode?: string }> {
     const name = String(rawName ?? "");
     // Guard the path segment: agent names index a directory, so only a safe slug is addressable.
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
     if (!this.agents.has(name)) throw new Error(`unknown agent '${name}'`);
     const provider = String(rawProvider ?? "").trim();
     const model = String(rawModel ?? "").trim();
-    if (!model) throw new Error("a model is required");
     const effort = rawEffort ? String(rawEffort).trim() : undefined;
-    // A concrete provider prefixes the model; the `gateway` sentinel (harness default) stays bare.
-    const full = provider && provider !== "gateway" ? `${provider}/${model}` : model;
-    const permission = sanitizePermission(rawPermission);
+    // A concrete provider prefixes the model; the `gateway` sentinel (harness default) stays bare. An
+    // empty model means "leave the model untouched" (a permission-only save on a default-model agent),
+    // NOT an error — so a gateway/default agent's permissions can still be edited.
+    const hasModel = model !== "";
+    const full = hasModel && provider && provider !== "gateway" ? `${provider}/${model}` : model;
+    const permission = sanitizePermission(rawPermission); // undefined = leave; {} = clear; {…} = set (verbs validated)
+    const mode = rawMode ? String(rawMode).trim() : undefined;
+    if (mode && mode !== "primary" && mode !== "subagent") throw new Error(`invalid mode '${mode}' (expected primary | subagent)`);
+    if (!hasModel && permission === undefined && !mode) throw new Error("nothing to update — provide a model, permission, or mode");
 
     const agentDir = resolve(this.root, "agents", name);
     if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
     if (!existsSync(resolve(agentDir, "config.yaml"))) throw new Error(`agent '${name}' has no config.yaml image`);
 
-    setAgentModel(agentDir, full, effort);
-    if (permission) setAgentPermission(agentDir, permission);
+    if (hasModel) setAgentModel(agentDir, full, effort);
+    if (mode) setAgentMode(agentDir, mode);
+    if (permission !== undefined) setAgentPermission(agentDir, permission);
     // Reload the roster from disk (keeping the same provider profiles) so modelFor()/list() are fresh.
     this.agents = loadAgentRegistry(this.root, this.agents.providers);
-    // NB: we deliberately do NOT re-materialise the `.opencode/agents/<name>.md` here. The source
-    // image's `instructions: AGENTS.md` may not resolve per-agent, so a re-materialise would rewrite
-    // the harness agent with an EMPTY instruction body — clobbering its system prompt. Correctness is
-    // preserved without it: every Arke dispatch sends the agent's declared model as a per-message
-    // override (`SendMessageInput.model`), so the harness uses the new model regardless of the `.md`.
-    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, model: full, ...(effort ? { reasoningEffort: effort } : {}), ...(permission ? { permission } : {}) });
+    // Re-materialise the harness agent: OpenCode reads permissions + mode from `.opencode/agents/<name>.md`,
+    // so without this a permission/mode edit would never take effect. The adapter preserves the existing
+    // instruction body when the image carries none, so this only rewrites the frontmatter and never
+    // clobbers the prompt (the reason an earlier version skipped it). A model edit also rides the
+    // per-message dispatch override, but rewriting it here keeps the materialised file consistent.
+    const img = this.agents.image(name);
+    if (img) await this.adapter.materializeAgent?.(img);
+    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) });
     await this.refreshRegistry(); // emit registry.updated + refresh the snapshot roster
-    return { name, model: full, ...(effort ? { reasoningEffort: effort } : {}), ...(permission ? { permission } : {}) };
+    return { name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) };
   }
 
   /**
@@ -440,7 +453,7 @@ export class ProjectContext {
       ...(spec.mode ? { mode: String(spec.mode) } : {}),
       ...(typeof spec.conversational === "boolean" ? { conversational: spec.conversational } : {}),
       ...(spec.instructions ? { instructions: String(spec.instructions) } : {}),
-      ...(permission ? { permission } : {}),
+      ...(permission && Object.keys(permission).length ? { permission } : {}),
       ...(spec.tools ? { tools: spec.tools } : {}),
     });
     this.agents = loadAgentRegistry(this.root, this.agents.providers);
@@ -1773,8 +1786,8 @@ export class ProjectContext {
         return this.adapter.capabilities().has("models") && this.adapter.listModels
           ? await this.adapter.listModels().catch(() => [])
           : [];
-      case "agent.configure": // SPEC-016 revised + SPEC-021: rewrite an agent's model+effort (+ permission) in its image
-        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort, a.permission);
+      case "agent.configure": // SPEC-016 revised + SPEC-021: rewrite an agent's model+effort (+ permission + mode)
+        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort, a.permission, a.mode);
       case "agent.create": // SPEC-021: create a new agent image from the editor's structured spec
         return this.createAgent(a.spec ?? a);
       case "registry.get":
@@ -2356,19 +2369,27 @@ export function gitHeadBranch(cwd: string): string | null {
   }
 }
 
+/** The permission verbs an agent image accepts — the harness gate (OpenCode: allow/ask/deny). */
+const PERMISSION_VERBS = new Set(["allow", "ask", "deny"]);
+
 /**
- * Coerce a client-supplied `permission` payload into a clean `Record<string,string>` (SPEC-021).
- * Returns undefined when nothing usable is present (so the caller leaves the block untouched). Keeps
- * only string→string entries with non-empty keys+values — the harness interprets the verbs, so this
- * intentionally does not enumerate them, but it will not persist non-string junk into the image.
+ * Coerce a client-supplied `permission` payload into a clean `Record<string,string>` (SPEC-021):
+ * - `undefined`/non-object → `undefined` ("not provided" — the caller leaves the block untouched).
+ * - an object → the sanitised map, which MAY be empty (an explicit "clear all permissions").
+ *
+ * Verbs are validated against `allow|ask|deny` and a bad verb THROWS before any write — otherwise a
+ * typo like `edit: always` would be written to `config.yaml` and then fail the image's schema on the
+ * next registry reload, silently dropping the agent from the roster.
  */
 function sanitizePermission(raw: unknown): Record<string, string> | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof k === "string" && k.trim() !== "" && typeof v === "string" && v.trim() !== "") out[k] = v;
+    if (typeof k !== "string" || k.trim() === "" || typeof v !== "string" || v.trim() === "") continue;
+    if (!PERMISSION_VERBS.has(v)) throw new Error(`invalid permission verb '${v}' for '${k}' (expected allow | ask | deny)`);
+    out[k] = v;
   }
-  return Object.keys(out).length ? out : undefined;
+  return out; // may be {} → an explicit clear
 }
 
 /** Bound git invocations so a hanging hook / credential or GPG prompt can't wedge the event loop. */

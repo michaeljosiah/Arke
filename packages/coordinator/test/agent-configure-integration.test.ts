@@ -35,9 +35,9 @@ function project(): string {
   return dir;
 }
 
-async function start(dir: string) {
+async function start(dir: string, adapter: any = new MockAdapter()) {
   const providers = { "opencode-local": { harness: "opencode", host: "localhost", port: 4096, credentialsRef: "opencode/gateway" } };
-  const c = new Coordinator(new MockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
+  const c = new Coordinator(adapter, new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
     projectRoot: dir,
     registry: new ProjectRegistry({ persist: false }),
     agents: loadAgentRegistry(dir, providers),
@@ -197,6 +197,85 @@ test("agent.create writes a new agent image and it appears on the roster with to
   const scout = snap.result.agents.find((a: any) => a.name === "scout");
   assert.ok(scout, "new agent on the roster");
   assert.deepEqual(scout.tools, [{ name: "github", kind: "mcp" }]);
+  ws.close();
+});
+
+test("agent.configure rejects an invalid permission verb before writing (PR #37 review)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", { name: "implementer", provider: "github-copilot", model: "gpt-5.5", permission: { edit: "always" } });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /invalid permission verb 'always'/);
+  // the image is untouched — the bad verb never reached config.yaml (so the agent stays on the roster)
+  const raw = readFileSync(resolve(dir, "agents", "implementer", "config.yaml"), "utf8");
+  assert.match(raw, /edit: allow/);
+  ws.close();
+});
+
+test("agent.configure saves permissions on a default-model agent without a model (PR #37 review)", async () => {
+  const dir = project(); // seed implementer declares `model: gateway/implementer` (a default sentinel)
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  // provider=gateway + empty model = a permission-only save; the coordinator must not reject it.
+  const res = await request("agent.configure", { name: "implementer", provider: "gateway", model: "", permission: { read: "allow", edit: "deny" } });
+  assert.equal(res.ok, true);
+  const img = loadAgentImage(resolve(dir, "agents", "implementer"));
+  assert.equal(img.permission.edit, "deny"); // permission written
+  assert.equal(img.executor.config.model, "gateway/implementer"); // model left untouched
+  ws.close();
+});
+
+test("agent.configure with an explicit empty permission map clears the block (PR #37 review)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", { name: "implementer", provider: "gateway", model: "", permission: {} });
+  assert.equal(res.ok, true);
+  const img = loadAgentImage(resolve(dir, "agents", "implementer"));
+  assert.deepEqual(img.permission, {}); // the seed's `edit: allow` was removed
+  ws.close();
+});
+
+test("agent.configure persists an interaction mode change (PR #37 review)", async () => {
+  const dir = project(); // seed implementer is `mode: subagent`
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", { name: "implementer", provider: "gateway", model: "", mode: "primary" });
+  assert.equal(res.ok, true);
+  assert.equal(loadAgentImage(resolve(dir, "agents", "implementer")).interaction.mode, "primary");
+  ws.close();
+});
+
+test("agent.configure re-materialises the harness agent so a permission edit reaches OpenCode (PR #37 review)", async () => {
+  const dir = project();
+  const calls: string[] = [];
+  const spy = new MockAdapter() as any;
+  spy.materializeAgent = async (img: any) => { calls.push(img.name); };
+  const { c, port } = await start(dir, spy);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  await request("agent.configure", { name: "implementer", provider: "gateway", model: "", permission: { edit: "deny" } });
+  assert.ok(calls.includes("implementer"), "materializeAgent was called for the edited agent");
   ws.close();
 });
 
