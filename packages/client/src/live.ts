@@ -435,6 +435,13 @@ function applyRegistrySnapshot(reg: any) {
       reasoningEffort: a.reasoningEffort,
       harness: a.harness,
       label: a.model ? `${a.harness} · ${a.model}` : a.harness,
+      // SPEC-021: the capability-aware roster + editor need the agent's declared mode, permission
+      // grid, tools (name+kind) and skills. All public — only credentials stay host-side.
+      mode: a.mode,
+      authProfile: a.authProfile,
+      permission: a.permission || {},
+      tools: a.tools || [],
+      skills: a.skills || [],
     })),
     registryWarnings: reg.warnings || [], // authoritative snapshot of warnings (replaces, not appends)
   });
@@ -463,15 +470,40 @@ export async function fetchModels(): Promise<Array<{ id: string; provider: strin
  * refreshes the roster (the coordinator emits `registry.updated`, so the cockpit chip updates live).
  * A governed write — refuse offline rather than queue-and-replay it later.
  */
-export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string): Promise<{ ok: boolean; error?: string; model?: string }> {
+export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string, permission?: Record<string, string>): Promise<{ ok: boolean; error?: string; model?: string }> {
   if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to change an agent’s model' };
-  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) });
+  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), ...(permission && Object.keys(permission).length ? { permission } : {}) });
   if (!res?.ok) return { ok: false, error: res?.error };
   // Refresh the roster from the authoritative snapshot: the live `registry.updated` event carries
   // only the harness endpoints, so the agent roster (which drives the model chip) is re-read here.
   const snap = await liveRequest('registry.get');
   if (snap?.ok && snap.result) applyRegistrySnapshot(snap.result);
   return { ok: true, model: res.result?.model };
+}
+
+/**
+ * What the connected harness natively supports (SPEC-021): MCP forms, skills locations, function
+ * tools, tool gating, built-in tools. The capability-aware agent editor validates against this so it
+ * only offers what the harness can materialise. Null when the adapter declares no manifest / offline.
+ */
+export async function fetchHarnessCapabilities(): Promise<any | null> {
+  if (!isCoordinatorConnected()) return null;
+  const res = await liveRequest('harness.capabilities');
+  return res?.ok ? res.result ?? null : null;
+}
+
+/**
+ * Create a NEW agent image from the editor's structured spec (SPEC-021): writes
+ * `agents/<name>/config.yaml` on the host (slug-guarded, root-confined; an inline secret is rejected —
+ * NFR-1) and refreshes the roster. A governed write — refuse offline rather than queue-and-replay it.
+ */
+export async function createAgent(spec: any): Promise<{ ok: boolean; error?: string; name?: string }> {
+  if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to create an agent' };
+  const res = await liveRequest('agent.create', { spec });
+  if (!res?.ok) return { ok: false, error: res?.error };
+  const snap = await liveRequest('registry.get');
+  if (snap?.ok && snap.result) applyRegistrySnapshot(snap.result);
+  return { ok: true, name: res.result?.name };
 }
 
 // The project this client INTENDS to be on (set by every successful project.open). A reconnect
