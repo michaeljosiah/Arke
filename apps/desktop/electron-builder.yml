@@ -14,7 +14,9 @@ electronVersion: 33.4.11
 
 directories:
   output: release
-  buildResources: build
+  # The brand icons (icon.svg source + generated icon.png/ico/icns) live here, committed — electron-builder
+  # picks up icon.ico (win), icon.icns (mac), icon.png (linux) automatically. Regenerate with `npm run icons`.
+  buildResources: build-resources
 
 # `dist/main.cjs` is a self-contained esbuild bundle (the coordinator + its deps are inlined), so only
 # the built artefacts + package.json are the app's own files; electron-builder additionally includes the
@@ -28,6 +30,9 @@ files:
 extraResources:
   - from: ../../packages/client/dist
     to: client
+  # The runtime window/taskbar icon (main.ts sets BrowserWindow.icon to resources/icon.png).
+  - from: build-resources/icon.png
+    to: icon.png
 
 # Auto-update feed (SPEC-022 Decision #9/#11). GitHub Releases by default; swap for a self-hosted feed
 # by changing `provider`. Publishing is gated on a token at build time (`--publish always` in CI).

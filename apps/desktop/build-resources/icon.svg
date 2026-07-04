@@ -1,0 +1,10 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Arke app icon (SPEC-022): the "//" brand mark in neutral-50 on a neutral-900 rounded tile,
+       matching the in-app logo tile. The slashes are stroked lines (not text) so the icon rasterises
+       identically without any font dependency. -->
+  <rect x="48" y="48" width="928" height="928" rx="216" fill="#171717"/>
+  <g stroke="#FAFAFA" stroke-width="104" stroke-linecap="round">
+    <line x1="399" y1="690" x2="489" y2="334"/>
+    <line x1="535" y1="690" x2="625" y2="334"/>
+  </g>
+</svg>

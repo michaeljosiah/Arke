@@ -115,11 +115,19 @@ function buildMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/** The Arke window/taskbar icon: bundled at `resources/icon.png` when packaged, else the build source. */
+function windowIcon(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "icon.png")
+    : join(__dirname, "..", "build-resources", "icon.png");
+}
+
 async function createWindow(coordinatorUrl: string): Promise<void> {
   win = new BrowserWindow({
     width: 1440,
     height: 900,
     show: false,
+    icon: windowIcon(), // macOS uses the app-bundle icon; Windows/Linux use this
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
