@@ -247,6 +247,19 @@ export class ProjectContext {
   }
 
   /**
+   * Whether this project has work in flight (SPEC-022): a session mid-turn (streaming), an open
+   * permission/elicitation awaiting a human, or a queued fan-out task. The desktop shell aggregates
+   * this across contexts to gate quit-confirm and auto-update — computed host-side (authoritative),
+   * never trusted from a renderer signal that can go stale across a reconnect.
+   */
+  workInFlight(): boolean {
+    if (this.streaming.size > 0) return true;
+    if (this.pendingPerms.size > 0) return true;
+    for (const q of this.fanoutQueues.values()) if (q.length > 0) return true;
+    return false;
+  }
+
+  /**
    * The dispatch `model` fragment for an agent (SPEC-016 revised): the concrete model+provider the
    * agent declares in its image `executor`, spread into a {@link SendMessageInput}. An agent that
    * pins no model (or is unknown) yields `{}` — the adapter then omits `model` and the harness uses

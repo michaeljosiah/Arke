@@ -181,6 +181,16 @@ export class Coordinator {
     this.contexts.clear();
   }
 
+  /**
+   * Whether ANY open project context has work in flight (SPEC-022) — a session mid-turn, an open
+   * permission/elicitation, or a queued fan-out task. The embedded desktop shell queries this
+   * in-process to gate quit-confirm and deferred auto-update (authoritative host-side signal).
+   */
+  workInFlight(): boolean {
+    for (const ctx of this.contexts.values()) if (ctx.workInFlight()) return true;
+    return false;
+  }
+
   // ---- HTTP (SPEC-008 webhooks) --------------------------------------------
 
   /**
