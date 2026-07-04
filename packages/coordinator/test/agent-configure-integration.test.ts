@@ -279,6 +279,40 @@ test("agent.configure re-materialises the harness agent so a permission edit rea
   ws.close();
 });
 
+test("agent.configure accepts the 'all' interaction mode (PR #37 re-review R4)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", { name: "implementer", provider: "gateway", model: "", mode: "all" });
+  assert.equal(res.ok, true); // 'all' is a valid AgentInteraction mode — must not be rejected
+  assert.equal(loadAgentImage(resolve(dir, "agents", "implementer")).interaction.mode, "all");
+  ws.close();
+});
+
+test("agent.create materialises the new agent into the harness (PR #37 re-review R1)", async () => {
+  const dir = project();
+  const materialized: string[] = [];
+  const capMaterialized: string[] = [];
+  const spy = new MockAdapter() as any;
+  spy.materializeAgent = async (img: any) => { materialized.push(img.name); };
+  spy.materializeCapabilities = async (img: any) => { capMaterialized.push(img.name); return { registered: [], unsupported: [] }; };
+  const { c, port } = await start(dir, spy);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.create", { spec: { name: "scout", harness: "opencode-native", mode: "subagent" } });
+  assert.equal(res.ok, true);
+  assert.ok(materialized.includes("scout"), "materializeAgent ran for the created agent");
+  assert.ok(capMaterialized.includes("scout"), "materializeCapabilities ran for the created agent");
+  ws.close();
+});
+
 test("agent.create rejects a duplicate name and a path-traversal name", async () => {
   const dir = project();
   const { c, port } = await start(dir);

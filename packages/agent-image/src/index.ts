@@ -106,8 +106,12 @@ export function loadAgentImage(dir: string): AgentImage {
   const tools = { ...discoverTools(join(dir, "tools")), ...parseTools(raw.tools, raw.name ?? dir) };
   // An inline `type: agent` tool is an addressable sub-agent — fold it into `subAgents` so the harness
   // materialises it (a keyed agent-tool entry alone is never written to `.opencode/agents`) — SPEC-021.
+  // The DIRECTORY form (`agents/<name>/`) is canonical and WINS a same-name conflict: skip an inline
+  // agent-tool whose name a discovered sub-agent already claims (else the inline one would overwrite it).
+  const directorySubs = discoverSubAgents(join(dir, "agents"));
+  const directoryNames = new Set(directorySubs.map((s) => s.name));
   const inlineAgentSubs = Object.entries(tools)
-    .filter(([, t]) => t.type === "agent")
+    .filter(([name, t]) => t.type === "agent" && !directoryNames.has(name))
     .map(([name, t]) => agentToolAsSubImage(name, t as Extract<Tool, { type: "agent" }>));
 
   const candidate = {
@@ -133,7 +137,7 @@ export function loadAgentImage(dir: string): AgentImage {
         }
       : {}),
     ...(typeof raw.spawn === "boolean" ? { spawn: raw.spawn } : {}),
-    subAgents: [...discoverSubAgents(join(dir, "agents")), ...inlineAgentSubs],
+    subAgents: [...directorySubs, ...inlineAgentSubs],
   };
 
   const result = AgentImage.safeParse(candidate);
@@ -242,6 +246,13 @@ export interface NewAgentSpec {
 }
 
 /**
+ * The governed default permission posture applied to a newly-created agent that declares no `permission`
+ * (SPEC-021). OpenCode defaults an unset operation to ALLOWED, so without this a fresh agent could edit
+ * files and run shell commands ungoverned; gate the mutating / exec / network operations by default.
+ */
+export const DEFAULT_AGENT_PERMISSION: Record<string, string> = { edit: "ask", bash: "ask", webfetch: "ask" };
+
+/**
  * Create a NEW agent image directory `<agentsRoot>/<name>/config.yaml` from a structured spec
  * (SPEC-021). Builds the Omnigent-shaped `config.yaml`, writes it, then round-trips it through
  * {@link loadAgentImage} to validate — if the result is invalid (or would inline a secret), the
@@ -269,7 +280,9 @@ export function writeNewAgent(agentsRoot: string, spec: NewAgentSpec): string {
     },
     ...(spec.instructions ? { prompt: spec.instructions } : {}),
     interaction: { conversational: spec.conversational ?? true, mode: spec.mode ?? "subagent" },
-    ...(spec.permission && Object.keys(spec.permission).length ? { permission: spec.permission } : {}),
+    // A create with no permission grid gets a GOVERNED default, not OpenCode's implicit allow-all
+    // (which would let a new agent edit/run shell ungoverned) — the editor can loosen it (SPEC-021).
+    permission: spec.permission && Object.keys(spec.permission).length ? spec.permission : DEFAULT_AGENT_PERMISSION,
     ...(spec.tools && Object.keys(spec.tools).length ? { tools: Object.fromEntries(Object.entries(spec.tools).map(([n, t]) => [n, toolToRaw(t)])) } : {}),
   };
 

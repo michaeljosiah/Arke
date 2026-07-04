@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parse as parseJsonc } from "jsonc-parser";
 import type { AgentImage } from "@arke/contracts";
 import { OpenCodeAdapter, canonicalizeRoot } from "../src/index.js";
 
@@ -74,7 +75,7 @@ test("capabilitiesManifest reports OpenCode's native support (docs-derived)", ()
   assert.ok(m.builtinTools.includes("bash") && m.builtinTools.includes("skill") && m.builtinTools.includes("webfetch"));
 });
 
-test("materializeCapabilities writes MCP servers into opencode.json, ${VAR} UNRESOLVED (NFR-1)", async () => {
+test("materializeCapabilities writes MCP servers, translating ${VAR} → {env:VAR} (usable + NFR-1)", async () => {
   const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
   const r = await adapterIn(root).materializeCapabilities({
     ...image,
@@ -85,13 +86,14 @@ test("materializeCapabilities writes MCP servers into opencode.json, ${VAR} UNRE
   });
   assert.deepEqual(r.registered.sort(), ["docs", "github"]);
   const oc = JSON.parse(readFileSync(join(root, "opencode.json"), "utf8"));
-  assert.deepEqual(oc.mcp.github, { type: "local", command: ["uv", "run", "python", "-m", "pkg.github_mcp"], environment: { GITHUB_TOKEN: "${GH_TOKEN}" } });
+  // ${VAR} is rewritten to OpenCode's {env:VAR} syntax so auth actually resolves at spawn (review R3).
+  assert.deepEqual(oc.mcp.github, { type: "local", command: ["uv", "run", "python", "-m", "pkg.github_mcp"], environment: { GITHUB_TOKEN: "{env:GH_TOKEN}" } });
   assert.equal(oc.mcp.docs.type, "remote");
-  assert.equal(oc.mcp.docs.url, "https://example.com/mcp");
-  // The resolved secret must NEVER appear — the file holds the ${VAR} reference only.
+  assert.equal(oc.mcp.docs.headers.Authorization, "Bearer {env:DOCS_TOKEN}"); // literal prefix preserved
+  // No resolved secret is written — only the {env:VAR} reference; and the raw ${VAR} form is gone.
   const raw = readFileSync(join(root, "opencode.json"), "utf8");
-  assert.match(raw, /\$\{GH_TOKEN\}/);
-  assert.match(raw, /\$\{DOCS_TOKEN\}/);
+  assert.match(raw, /\{env:GH_TOKEN\}/);
+  assert.doesNotMatch(raw, /\$\{GH_TOKEN\}/);
 });
 
 test("materializeCapabilities merges into an existing opencode.json, preserving other keys/servers", async () => {
@@ -104,15 +106,28 @@ test("materializeCapabilities merges into an existing opencode.json, preserving 
   assert.ok(oc.mcp.other && oc.mcp.github); // both servers present
 });
 
-test("materializeCapabilities REFUSES to overwrite a corrupt opencode.json (no silent config loss)", async () => {
+test("materializeCapabilities MERGES into a valid JSONC opencode.json, preserving comments (review R6)", async () => {
   const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
   const { writeFileSync } = await import("node:fs");
-  // A JSONC comment / trailing comma makes this invalid JSON; the old code silently discarded it.
-  writeFileSync(join(root, "opencode.json"), '{ "theme": "dark", /* comment */ "mcp": {} , }', "utf8");
+  // OpenCode config is JSONC — comments + trailing commas are VALID, not corruption.
+  writeFileSync(join(root, "opencode.json"), '{\n  // my config\n  "theme": "dark",\n  "mcp": {},\n}\n', "utf8");
+  await adapterIn(root).materializeCapabilities({ ...image, tools: { g: { type: "mcp", transport: "local", command: "uv" } } });
+  const raw = readFileSync(join(root, "opencode.json"), "utf8");
+  assert.match(raw, /\/\/ my config/); // the comment survives the in-place edit
+  const oc = parseJsonc(raw);
+  assert.equal(oc.theme, "dark");
+  assert.ok(oc.mcp.g); // the new server was merged in
+});
+
+test("materializeCapabilities REFUSES to overwrite a GENUINELY corrupt opencode.json (no silent loss)", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
+  const { writeFileSync } = await import("node:fs");
+  // Not JSONC — a real structural error (unclosed brace). The old code would silently discard it.
+  writeFileSync(join(root, "opencode.json"), '{ "theme": "dark", "mcp": { ', "utf8");
   const before = readFileSync(join(root, "opencode.json"), "utf8");
   await assert.rejects(
     () => adapterIn(root).materializeCapabilities({ ...image, tools: { g: { type: "mcp", transport: "local", command: "uv" } } }),
-    /existing opencode.json is not valid JSON/,
+    /not valid JSON\/JSONC/,
   );
   // the corrupt file is left untouched for the user to repair — NOT overwritten
   assert.equal(readFileSync(join(root, "opencode.json"), "utf8"), before);
@@ -131,6 +146,19 @@ test("re-materializeAgent preserves the existing instruction body when the image
   const second = readFileSync(join(root, ".opencode", "agents", "keeper.md"), "utf8");
   assert.match(second, /edit: deny/); // frontmatter updated
   assert.match(second, /Guard the gate/); // body preserved
+});
+
+test("materializeCapabilities surfaces an MCP tool whitelist as unsupported (review R2)", async () => {
+  const root = canonicalizeRoot(mkdtempSync(join(tmpdir(), "arke-caps-")));
+  const r = await adapterIn(root).materializeCapabilities({
+    ...image,
+    tools: { github: { type: "mcp", transport: "local", command: "uv", tools: ["search_issues"] } },
+  });
+  assert.ok(r.registered.includes("github")); // the server still registers
+  // ...but the exposed-tool whitelist can't be enforced in opencode.json — surfaced, not silently dropped.
+  const caveat = r.unsupported.find((u) => u.name === "github.tools");
+  assert.ok(caveat, "the tool whitelist is reported");
+  assert.match(caveat!.reason, /whitelist|github_\*/);
 });
 
 test("materializeCapabilities records an unsupported function tool", async () => {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { applyEdits as applyJsoncEdits, modify as jsoncModify, parse as parseJsonc, type ParseError } from "jsonc-parser";
 import { DomainEvent } from "@arke/contracts";
 import type {
   AgentImage,
@@ -68,6 +69,19 @@ function isOpenCodeSessionId(id: string): boolean {
 function markdownBody(md: string): string {
   const m = /^---\n[\s\S]*?\n---\n?/.exec(md);
   return (m ? md.slice(m[0].length) : md).replace(/^\n+/, "");
+}
+
+/**
+ * Translate Arke's `${VAR}` credential references to OpenCode's `{env:VAR}` substitution syntax
+ * (opencode.ai/docs/config #env-vars) in an MCP `environment`/`headers` map (SPEC-021). Both forms are
+ * UNRESOLVED references — no secret is written to the tracked config (NFR-1); OpenCode interpolates from
+ * the host env at spawn. Surrounding literal text (e.g. `Bearer `) is preserved: `Bearer ${DOCS_TOKEN}`
+ * → `Bearer {env:DOCS_TOKEN}`. Without this, OpenCode writes the literal `${VAR}` and MCP auth fails.
+ */
+function toOpenCodeEnvRefs(map: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) out[k] = v.replace(/\$\{([A-Za-z0-9_]+)\}/g, "{env:$1}");
+  return out;
 }
 
 export interface OpenCodeAdapterDeps {
@@ -273,9 +287,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
   /**
    * Materialise an image's tools/MCP/skills into OpenCode's native config (SPEC-021): merge each MCP
-   * server into the project `opencode.json` `mcp` block (writing any `${VAR}` UNRESOLVED — OpenCode
-   * interpolates it from the host env at spawn, so no secret lands in the tracked file, NFR-1), copy
-   * skills under a discovered path, and record anything OpenCode cannot express as `unsupported`.
+   * server into the project `opencode.json` `mcp` block — translating the image's `${VAR}` credential
+   * references to OpenCode's `{env:VAR}` substitution syntax so they actually resolve at spawn while
+   * still writing NO secret to the tracked file (both are unresolved references, NFR-1) — copy skills
+   * under a discovered path, and record anything OpenCode cannot express as `unsupported`.
    */
   async materializeCapabilities(image: AgentImage): Promise<CapabilityMaterialisation> {
     const registered: string[] = [];
@@ -286,9 +301,15 @@ export class OpenCodeAdapter implements HarnessAdapter {
       if (tool.type === "mcp") {
         mcpBlock[name] =
           tool.transport === "local"
-            ? { type: "local", command: [tool.command, ...(tool.args ?? [])], ...(tool.environment ? { environment: tool.environment } : {}), ...(tool.enabled === false ? { enabled: false } : {}) }
-            : { type: "remote", url: tool.url, ...(tool.headers ? { headers: tool.headers } : {}), ...(tool.enabled === false ? { enabled: false } : {}) };
+            ? { type: "local", command: [tool.command, ...(tool.args ?? [])], ...(tool.environment ? { environment: toOpenCodeEnvRefs(tool.environment) } : {}), ...(tool.enabled === false ? { enabled: false } : {}) }
+            : { type: "remote", url: tool.url, ...(tool.headers ? { headers: toOpenCodeEnvRefs(tool.headers) } : {}), ...(tool.enabled === false ? { enabled: false } : {}) };
         registered.push(name);
+        // OpenCode's `opencode.json` mcp block has no per-server tool whitelist, so a `tools:` exposed-
+        // list can't be enforced there — surface it rather than silently exposing the whole server; the
+        // author gates specific tools via the agent's `permission` (`<mcp>_*` wildcards).
+        if (tool.tools && tool.tools.length > 0) {
+          unsupported.push({ name: `${name}.tools`, reason: `OpenCode has no per-server tool whitelist in opencode.json — all of '${name}' tools are exposed; gate specific tools via permission (${name}_* wildcards)` });
+        }
       } else if (tool.type === "function") {
         unsupported.push({ name, reason: "OpenCode has no Omnigent-style function tool — use an MCP server or an OpenCode plugin tool" });
       }
@@ -313,23 +334,32 @@ export class OpenCodeAdapter implements HarnessAdapter {
     return { registered, unsupported };
   }
 
-  /** Create-or-merge the `mcp` block in the project `opencode.json`, preserving other servers + keys. */
+  /**
+   * Create-or-merge the `mcp` block in the project `opencode.json`, preserving other servers + keys —
+   * and other formatting. OpenCode config is **JSONC** (opencode.ai/docs/config), so this parses
+   * tolerantly (comments + trailing commas are valid, NOT corruption) and edits the file **in place**
+   * with `jsonc-parser` — inserting each `mcp.<name>` key while keeping the user's comments/layout. A
+   * genuinely un-parseable file throws rather than being overwritten (so nothing is silently lost).
+   */
   private async mergeOpencodeMcp(mcpBlock: Record<string, unknown>): Promise<void> {
     const path = join(this.http.directory, "opencode.json");
-    let doc: Record<string, unknown> = { $schema: "https://opencode.ai/config.json" };
+    let text = `{\n  "$schema": "https://opencode.ai/config.json"\n}\n`;
     if (existsSync(path)) {
-      try {
-        doc = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-      } catch (err) {
-        // Refuse to overwrite: a corrupt/hand-broken opencode.json (a JSONC comment, a trailing comma,
-        // a syntax error) would otherwise be silently replaced by a fresh doc holding only `$schema` +
-        // this `mcp` block, dropping the user's other providers/agents/theme. Fail so they can repair it.
-        throw new Error(`refusing to materialise MCP: existing opencode.json is not valid JSON (${err instanceof Error ? err.message : String(err)}) — fix it and retry`);
+      text = await readFile(path, "utf8");
+      const errors: ParseError[] = [];
+      parseJsonc(text, errors, { allowTrailingComma: true, disallowComments: false });
+      // Only a genuine structural error (not a comment/trailing comma) is fatal — refuse to overwrite.
+      if (errors.length > 0) {
+        throw new Error(`refusing to materialise MCP: existing opencode.json is not valid JSON/JSONC (offset ${errors[0]!.offset}) — fix it and retry`);
       }
     }
-    const existing = doc.mcp && typeof doc.mcp === "object" ? (doc.mcp as Record<string, unknown>) : {};
-    doc.mcp = { ...existing, ...mcpBlock };
-    await writeFile(path, JSON.stringify(doc, null, 2) + "\n", "utf8");
+    // Surgically set each `mcp.<name>` key, preserving the rest of the document verbatim (comments too).
+    const opts = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
+    for (const [name, value] of Object.entries(mcpBlock)) {
+      const edits = jsoncModify(text, ["mcp", name], value, opts);
+      text = applyJsoncEdits(text, edits);
+    }
+    await writeFile(path, text, "utf8");
   }
 
   /** Ensure a skill's `SKILL.md` sits under a path OpenCode discovers; copy it into `.opencode/skills/` if not. */

@@ -188,8 +188,10 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
   const permKeyOptions = React.useMemo(() => {
     const keys = new Set<string>(PERMISSION_KEYS);
     (caps?.builtinTools || []).forEach((k: string) => keys.add(k));
-    (tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}*`); });
-    (existing?.tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}*`); });
+    // OpenCode namespaces MCP tools as `<mcp>_<tool>` and gates them with a `<mcp>_*` wildcard — the
+    // underscore is required, or a `github*` gate would not match `github_search` (SPEC-021).
+    (tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}_*`); });
+    (existing?.tools || []).forEach((t: any) => { if (t.name) keys.add(`${t.name}_*`); });
     perms.forEach((p: any) => { if (p.k) keys.add(p.k); });
     return [...keys].sort();
   }, [caps, tools, existing, perms]);

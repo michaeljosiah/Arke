@@ -281,6 +281,27 @@ test("writeNewAgent rejects an invalid agent name (path guard)", () => {
   assert.throws(() => writeNewAgent(agentsRoot, { name: "../escape", harness: "opencode-native" }), /invalid agent name/);
 });
 
+test("writeNewAgent applies a governed default permission when none is given (review R8)", () => {
+  const agentsRoot = mkdtempSync(join(tmpdir(), "arke-agents-"));
+  const dir = writeNewAgent(agentsRoot, { name: "bare", harness: "opencode-native" });
+  const img = loadAgentImage(dir);
+  // OpenCode defaults unset ops to allow — a create with no grid must NOT leave edit/bash ungoverned.
+  assert.equal(img.permission.edit, "ask");
+  assert.equal(img.permission.bash, "ask");
+});
+
+test("a directory sub-agent WINS a same-name inline agent-tool conflict (review R7)", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: lead\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  helper:\n    type: agent\n    executor:\n      config:\n        harness: opencode-native\n        model: inline/model\n    prompt: inline helper\n",
+    "agents/helper/config.yaml": "spec_version: 1\nname: helper\nexecutor:\n  config:\n    harness: opencode-native\n    model: dir/model\n",
+  });
+  const img = loadAgentImage(dir);
+  const helpers = img.subAgents.filter((s) => s.name === "helper");
+  assert.equal(helpers.length, 1, "no duplicate helper");
+  assert.equal(helpers[0]!.executor.config.model, "dir/model"); // the directory one, not the inline one
+});
+
 test("a missing config.yaml is rejected whole", () => {
   const dir = imageDir({ "AGENTS.md": "no config" });
   assert.throws(() => loadAgentImage(dir), AgentImageError);

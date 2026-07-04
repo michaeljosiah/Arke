@@ -402,7 +402,7 @@ export class ProjectContext {
     const full = hasModel && provider && provider !== "gateway" ? `${provider}/${model}` : model;
     const permission = sanitizePermission(rawPermission); // undefined = leave; {} = clear; {…} = set (verbs validated)
     const mode = rawMode ? String(rawMode).trim() : undefined;
-    if (mode && mode !== "primary" && mode !== "subagent") throw new Error(`invalid mode '${mode}' (expected primary | subagent)`);
+    if (mode && mode !== "primary" && mode !== "subagent" && mode !== "all") throw new Error(`invalid mode '${mode}' (expected primary | subagent | all)`);
     if (!hasModel && permission === undefined && !mode) throw new Error("nothing to update — provide a model, permission, or mode");
 
     const agentDir = resolve(this.root, "agents", name);
@@ -457,7 +457,18 @@ export class ProjectContext {
       ...(spec.tools ? { tools: spec.tools } : {}),
     });
     this.agents = loadAgentRegistry(this.root, this.agents.providers);
-    await this.trace.write({ kind: "agent.created", projectId: this.projectId, name, harness: String(spec.harness), ...(spec.model ? { model: String(spec.model) } : {}) });
+    // Materialise the new agent into the harness immediately (like `agents.materialize`): OpenCode
+    // reads the agent from `.opencode/agents/<name>.md` and its MCP servers from `opencode.json`, so
+    // without this a just-created agent (especially one with MCP tools) shows on the roster but is not
+    // yet usable until a separate materialise. Best-effort per capability; the trace records the result.
+    const img = this.agents.image(name);
+    if (img) {
+      await this.adapter.materializeAgent?.(img);
+      const cap = this.adapter.materializeCapabilities ? await this.adapter.materializeCapabilities(img) : undefined;
+      await this.trace.write({ kind: "agent.created", projectId: this.projectId, name, harness: String(spec.harness), ...(spec.model ? { model: String(spec.model) } : {}), ...(cap ? { registered: cap.registered, unsupported: cap.unsupported } : {}) });
+    } else {
+      await this.trace.write({ kind: "agent.created", projectId: this.projectId, name, harness: String(spec.harness), ...(spec.model ? { model: String(spec.model) } : {}) });
+    }
     await this.refreshRegistry();
     return { name };
   }
