@@ -601,10 +601,23 @@ export async function openProjectLive(target: { projectId?: string; path?: strin
   return res;
 }
 
+/**
+ * Forward an attention-relevant domain event to the Electron shell's NotificationRouter (SPEC-022),
+ * which de-dups + raises an OS notification. Browser-safe: a no-op when `window.arke` is absent, and
+ * scoped to the trigger/resolve events so the bridge stays quiet.
+ */
+function forwardEventToDesktop(ev: any): void {
+  const notify = (globalThis as { arke?: { notify?: (e: unknown) => void } }).arke?.notify;
+  if (!notify || !ev?.type) return;
+  if (/^(permission\.(asked|replied)|elicitation\.(asked|replied|rejected)|session\.status|panel\.(complete|config-error|reviewer-error))$/.test(ev.type)) {
+    notify(ev);
+  }
+}
+
 function onFrame(frame: any) {
   if (!frame || typeof frame !== 'object') return;
   if (frame.type === 'snapshot' && Array.isArray(frame.cards)) applySnapshot(frame);
-  else if (frame.type === 'event' && frame.event) applyEvent(frame.event);
+  else if (frame.type === 'event' && frame.event) { applyEvent(frame.event); forwardEventToDesktop(frame.event); }
   else if (frame.type === 'response' && pending.has(frame.id)) {
     pending.get(frame.id)!(frame);
     pending.delete(frame.id);

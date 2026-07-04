@@ -1,6 +1,7 @@
 import React from 'react';
 import { store, useStore, engine } from './store';
 import { startLive } from './live';
+import { initDesktopBridge } from './desktop';
 import { Shell } from './shell';
 import { Picker, Initialisation, Library } from './screens/picker-init-library';
 import { Cockpit } from './screens/cockpit';
@@ -67,7 +68,7 @@ export function Root() {
 
   // Attempt a live coordinator link once on boot. If a coordinator is up, its snapshot
   // takes over the board (live mode); otherwise the app stays on mock data (SPEC-003).
-  React.useEffect(() => { startLive(); }, []);
+  React.useEffect(() => { startLive(); initDesktopBridge(); }, []);
 
   // Start the live event engine once a project is open
   React.useEffect(() => {
