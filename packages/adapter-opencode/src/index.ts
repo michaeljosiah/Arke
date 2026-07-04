@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { applyEdits as applyJsoncEdits, modify as jsoncModify, parse as parseJsonc, type ParseError } from "jsonc-parser";
 import { DomainEvent } from "@arke/contracts";
 import type {
   AgentImage,
   Capability,
+  CapabilityMaterialisation,
   CreateSessionInput,
   DiffSummary,
   HarnessAdapter,
+  HarnessCapabilities,
   ModelInfo,
   PermissionAck,
   PermissionDecision,
@@ -15,6 +19,7 @@ import type {
   SendMessageInput,
   SendReceipt,
   SessionRef,
+  SkillRef,
   TodoItem,
 } from "@arke/contracts";
 import {
@@ -58,6 +63,25 @@ interface OpenCodeProvidersDoc {
 /** True for a genuine OpenCode session ref (e.g. "ses_0de6…"); false for our logical spec ids. */
 function isOpenCodeSessionId(id: string): boolean {
   return /^ses_/.test(id);
+}
+
+/** Extract the instruction body of an agent markdown file (everything after the `---` frontmatter). */
+function markdownBody(md: string): string {
+  const m = /^---\n[\s\S]*?\n---\n?/.exec(md);
+  return (m ? md.slice(m[0].length) : md).replace(/^\n+/, "");
+}
+
+/**
+ * Translate Arke's `${VAR}` credential references to OpenCode's `{env:VAR}` substitution syntax
+ * (opencode.ai/docs/config #env-vars) in an MCP `environment`/`headers` map (SPEC-021). Both forms are
+ * UNRESOLVED references — no secret is written to the tracked config (NFR-1); OpenCode interpolates from
+ * the host env at spawn. Surrounding literal text (e.g. `Bearer `) is preserved: `Bearer ${DOCS_TOKEN}`
+ * → `Bearer {env:DOCS_TOKEN}`. Without this, OpenCode writes the literal `${VAR}` and MCP auth fails.
+ */
+function toOpenCodeEnvRefs(map: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) out[k] = v.replace(/\$\{([A-Za-z0-9_]+)\}/g, "{env:$1}");
+  return out;
 }
 
 export interface OpenCodeAdapterDeps {
@@ -232,9 +256,122 @@ export class OpenCodeAdapter implements HarnessAdapter {
   async materializeAgent(image: AgentImage): Promise<void> {
     const dir = join(this.http.directory, ".opencode", "agents");
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, `${image.name}.md`), this.agentMarkdown(image), "utf8");
+    const file = join(dir, `${image.name}.md`);
+    // When the image carries no instruction body of its own (e.g. `instructions: AGENTS.md` that does
+    // not resolve per-agent), preserve the previously-materialised body instead of clobbering it with
+    // an empty one. This makes a re-materialise triggered by a model/permission/mode edit safe — it
+    // only rewrites the frontmatter (SPEC-021, so a permission edit actually reaches OpenCode).
+    let existingBody = "";
+    if (!(image.prompt ?? image.instructions) && existsSync(file)) {
+      existingBody = markdownBody(await readFile(file, "utf8"));
+    }
+    await writeFile(file, this.agentMarkdown(image, existingBody), "utf8");
     // Sub-agents become their own files (OpenCode links them by parentID at runtime).
     for (const sub of image.subAgents) await this.materializeAgent(sub);
+  }
+
+  /** What OpenCode natively supports (SPEC-021) — docs-derived (opencode.ai/docs), versioned. */
+  capabilitiesManifest(): HarnessCapabilities {
+    return {
+      harness: "opencode",
+      version: "1.17",
+      mcp: { local: true, remote: true },
+      skills: { supported: true, locations: [".opencode/skills", ".claude/skills", ".agents/skills"] },
+      // OpenCode has no Omnigent-style `type: function` python callable (it has MCP + built-ins + plugin tools).
+      functionTools: false,
+      sandbox: false, // advisory today
+      toolGating: "permission", // per-agent `permission` field, incl. `<mcp>_*` wildcards
+      builtinTools: ["bash", "edit", "write", "read", "grep", "glob", "lsp", "apply_patch", "skill", "todowrite", "webfetch", "websearch", "question"],
+    };
+  }
+
+  /**
+   * Materialise an image's tools/MCP/skills into OpenCode's native config (SPEC-021): merge each MCP
+   * server into the project `opencode.json` `mcp` block — translating the image's `${VAR}` credential
+   * references to OpenCode's `{env:VAR}` substitution syntax so they actually resolve at spawn while
+   * still writing NO secret to the tracked file (both are unresolved references, NFR-1) — copy skills
+   * under a discovered path, and record anything OpenCode cannot express as `unsupported`.
+   */
+  async materializeCapabilities(image: AgentImage): Promise<CapabilityMaterialisation> {
+    const registered: string[] = [];
+    const unsupported: { name: string; reason: string }[] = [];
+    const mcpBlock: Record<string, unknown> = {};
+
+    for (const [name, tool] of Object.entries(image.tools)) {
+      if (tool.type === "mcp") {
+        mcpBlock[name] =
+          tool.transport === "local"
+            ? { type: "local", command: [tool.command, ...(tool.args ?? [])], ...(tool.environment ? { environment: toOpenCodeEnvRefs(tool.environment) } : {}), ...(tool.enabled === false ? { enabled: false } : {}) }
+            : { type: "remote", url: tool.url, ...(tool.headers ? { headers: toOpenCodeEnvRefs(tool.headers) } : {}), ...(tool.enabled === false ? { enabled: false } : {}) };
+        registered.push(name);
+        // OpenCode's `opencode.json` mcp block has no per-server tool whitelist, so a `tools:` exposed-
+        // list can't be enforced there — surface it rather than silently exposing the whole server; the
+        // author gates specific tools via the agent's `permission` (`<mcp>_*` wildcards).
+        if (tool.tools && tool.tools.length > 0) {
+          unsupported.push({ name: `${name}.tools`, reason: `OpenCode has no per-server tool whitelist in opencode.json — all of '${name}' tools are exposed; gate specific tools via permission (${name}_* wildcards)` });
+        }
+      } else if (tool.type === "function") {
+        unsupported.push({ name, reason: "OpenCode has no Omnigent-style function tool — use an MCP server or an OpenCode plugin tool" });
+      }
+      // `type: agent` tools are materialised via materializeAgent(subAgents), not here.
+    }
+    if (Object.keys(mcpBlock).length > 0) await this.mergeOpencodeMcp(mcpBlock);
+
+    for (const skill of image.skills) {
+      try {
+        await this.ensureSkillDiscoverable(skill);
+        registered.push(`skill:${skill.name}`);
+      } catch (err) {
+        unsupported.push({ name: `skill:${skill.name}`, reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    for (const sub of image.subAgents) {
+      const r = await this.materializeCapabilities(sub);
+      registered.push(...r.registered);
+      unsupported.push(...r.unsupported);
+    }
+    return { registered, unsupported };
+  }
+
+  /**
+   * Create-or-merge the `mcp` block in the project `opencode.json`, preserving other servers + keys —
+   * and other formatting. OpenCode config is **JSONC** (opencode.ai/docs/config), so this parses
+   * tolerantly (comments + trailing commas are valid, NOT corruption) and edits the file **in place**
+   * with `jsonc-parser` — inserting each `mcp.<name>` key while keeping the user's comments/layout. A
+   * genuinely un-parseable file throws rather than being overwritten (so nothing is silently lost).
+   */
+  private async mergeOpencodeMcp(mcpBlock: Record<string, unknown>): Promise<void> {
+    const path = join(this.http.directory, "opencode.json");
+    let text = `{\n  "$schema": "https://opencode.ai/config.json"\n}\n`;
+    if (existsSync(path)) {
+      text = await readFile(path, "utf8");
+      const errors: ParseError[] = [];
+      parseJsonc(text, errors, { allowTrailingComma: true, disallowComments: false });
+      // Only a genuine structural error (not a comment/trailing comma) is fatal — refuse to overwrite.
+      if (errors.length > 0) {
+        throw new Error(`refusing to materialise MCP: existing opencode.json is not valid JSON/JSONC (offset ${errors[0]!.offset}) — fix it and retry`);
+      }
+    }
+    // Surgically set each `mcp.<name>` key, preserving the rest of the document verbatim (comments too).
+    const opts = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
+    for (const [name, value] of Object.entries(mcpBlock)) {
+      const edits = jsoncModify(text, ["mcp", name], value, opts);
+      text = applyJsoncEdits(text, edits);
+    }
+    await writeFile(path, text, "utf8");
+  }
+
+  /** Ensure a skill's `SKILL.md` sits under a path OpenCode discovers; copy it into `.opencode/skills/` if not. */
+  private async ensureSkillDiscoverable(skill: SkillRef): Promise<void> {
+    if (!skill.path) return;
+    const p = skill.path.replace(/\\/g, "/");
+    const alreadyDiscovered = [".opencode/skills/", ".claude/skills/", ".agents/skills/"].some((loc) => p.includes(loc));
+    if (alreadyDiscovered) return;
+    const src = dirname(skill.path); // the `skills/<name>/` folder holding SKILL.md
+    const dest = join(this.http.directory, ".opencode", "skills", skill.name);
+    await mkdir(dirname(dest), { recursive: true });
+    await cp(src, dest, { recursive: true });
   }
 
   /**
@@ -243,7 +380,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
    * the agent is self-describing to the harness — no tier indirection. A model with options
    * (e.g. reasoning effort) is emitted as the OpenCode `model: provider/id` + `options:` block.
    */
-  private agentMarkdown(image: AgentImage): string {
+  private agentMarkdown(image: AgentImage, bodyOverride?: string): string {
     const lines: string[] = ["---", `description: ${image.description ?? image.name}`, `mode: ${image.interaction.mode}`];
     const model = image.executor.config.model;
     // Omit a bare name or `gateway/…` placeholder: those are the "use the harness default" sentinel
@@ -260,7 +397,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
       lines.push("permission:");
       for (const [k, v] of perms) lines.push(`  ${k}: ${v}`);
     }
-    lines.push("---", "", image.prompt ?? image.instructions ?? "");
+    lines.push("---", "", bodyOverride || image.prompt || image.instructions || "");
     return lines.join("\n") + "\n";
   }
 
