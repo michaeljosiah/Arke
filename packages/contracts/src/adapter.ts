@@ -158,6 +158,36 @@ export interface ModelInfo {
 }
 
 /**
+ * What a harness natively supports (SPEC-021) — the source of truth `materializeCapabilities` and the
+ * agent editor validate against. Authored from the harness's docs, versioned to the harness, and
+ * usable without the harness running. An adapter with no manifest is treated as supporting nothing.
+ */
+export interface HarnessCapabilities {
+  /** The harness kind, e.g. "opencode". */
+  harness: string;
+  /** The harness release this manifest was authored against. */
+  version?: string;
+  /** MCP support and forms. */
+  mcp: { local: boolean; remote: boolean };
+  /** Skills support + the directory locations the harness discovers `SKILL.md` in. */
+  skills: { supported: boolean; locations: string[] };
+  /** Local code/function tools. */
+  functionTools: boolean;
+  /** Whether the harness confines a spawned tool process to a sandbox (advisory today). */
+  sandbox: boolean;
+  /** How per-agent tool access is gated (OpenCode: the `permission` field with `<mcp>_*` wildcards). */
+  toolGating: "permission" | "none";
+  /** The harness's built-in tool names (for permission mapping + roster display). */
+  builtinTools: string[];
+}
+
+/** The outcome of materialising an image's capabilities into a harness (SPEC-021). */
+export interface CapabilityMaterialisation {
+  registered: string[];
+  unsupported: { name: string; reason: string }[];
+}
+
+/**
  * One interface, many harnesses, honest about differences. Methods beyond the `core`
  * set are gated by the capabilities the adapter reports from {@link capabilities}.
  */
@@ -185,6 +215,10 @@ export interface HarnessAdapter {
   stopServer?(): Promise<void>;
   /** Materialise a portable agent image into the harness's native agent convention (SPEC-016). */
   materializeAgent?(image: AgentImage): Promise<void>;
+  /** What this harness natively supports (SPEC-021); absent → treated as supporting nothing. */
+  capabilitiesManifest?(): HarnessCapabilities;
+  /** Materialise an image's tools/MCP/skills into the harness's native config (SPEC-021). */
+  materializeCapabilities?(image: AgentImage): Promise<CapabilityMaterialisation>;
 
   // ---- core ----
   createSession(input: CreateSessionInput): Promise<SessionRef>;

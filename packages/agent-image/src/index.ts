@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml, parseDocument } from "yaml";
-import { AgentImage, type SkillRef, type ToolDecl } from "@arke/contracts";
+import { AgentImage, type SkillRef, type Tool, type Tools } from "@arke/contracts";
 
 /**
  * Loads a portable agent image directory into a typed {@link AgentImage} (SPEC-016).
@@ -56,7 +56,36 @@ interface RawConfig {
   os_env?: { type?: string; cwd?: string; sandbox?: { type?: string } };
   osEnv?: { type?: string; cwd?: string; sandbox?: { type?: string } };
   spawn?: boolean;
-  tools?: Array<{ name?: string; kind?: string; description?: string }>;
+  /** Omnigent-shaped keyed tools map (SPEC-021): name → { type: mcp|function|agent, … }. */
+  tools?: Record<string, RawTool>;
+}
+
+interface RawTool {
+  type?: string;
+  // mcp
+  command?: string | string[];
+  args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  environment?: Record<string, string>;
+  tools?: string[];
+  enabled?: boolean;
+  // function
+  callable?: string;
+  runtime?: string;
+  parameters?: Record<string, unknown>;
+  container_image?: string;
+  containerImage?: string;
+  // agent
+  executor?: RawExecutor;
+  prompt?: string;
+  os_env?: unknown;
+  osEnv?: unknown;
+  pass_history?: boolean;
+  passHistory?: boolean;
+  max_sessions?: number;
+  maxSessions?: number;
+  description?: string;
 }
 
 export function loadAgentImage(dir: string): AgentImage {
@@ -84,7 +113,7 @@ export function loadAgentImage(dir: string): AgentImage {
       conversational: raw.interaction?.conversational ?? true,
       mode: raw.interaction?.mode ?? "primary",
     },
-    tools: [...declaredTools(raw.tools), ...discoverTools(join(dir, "tools"))],
+    tools: { ...discoverTools(join(dir, "tools")), ...parseTools(raw.tools, raw.name ?? dir) },
     skills: discoverSkills(join(dir, "skills")),
     permission: raw.permission ?? {},
     ...(osEnvRaw
@@ -194,32 +223,119 @@ function resolveInstructions(dir: string, instr: string | undefined): string | u
   return existsSync(agentsMd) ? readFileSync(agentsMd, "utf8") : undefined;
 }
 
-function declaredTools(tools: RawConfig["tools"]): ToolDecl[] {
-  if (!Array.isArray(tools)) return [];
-  const out: ToolDecl[] = [];
-  for (const t of tools) {
-    if (!t?.name) continue;
-    const kind = t.kind === "mcp" || t.kind === "agent" ? t.kind : "function";
-    out.push({ name: t.name, kind, ...(t.description ? { description: t.description } : {}) });
+/** A value in a credential-bearing field must be a `${VAR}`/profile reference, never an inline literal. */
+const CREDENTIAL_FIELD = /^(authorization|.*token.*|.*api[-_]?key.*|.*secret.*|.*password.*|.*credential.*|.*bearer.*)$/i;
+const HAS_VAR_REF = /\$\{[^}]+\}/;
+
+/** Reject an inline literal secret in a credential-named `headers`/`environment` key (NFR-1, SPEC-021). */
+function assertNoInlineSecret(map: Record<string, string> | undefined, who: string, tool: string): void {
+  if (!map) return;
+  for (const [k, v] of Object.entries(map)) {
+    if (CREDENTIAL_FIELD.test(k) && typeof v === "string" && v.trim() !== "" && !HAS_VAR_REF.test(v)) {
+      throw new AgentImageError(
+        `agent image '${who}' tool '${tool}' inlines a literal secret in credential field '${k}' — use a \${VAR} reference or a host-side profile (NFR-1)`,
+      );
+    }
+  }
+}
+
+/** Parse one MCP entry into the discriminated {@link Tool}, inferring `transport` from `command` vs `url`. */
+function parseMcpEntry(name: string, e: RawTool, who: string): Tool {
+  const hasCommand = e.command !== undefined;
+  const hasUrl = typeof e.url === "string";
+  if (hasCommand === hasUrl) {
+    throw new AgentImageError(`agent image '${who}' MCP tool '${name}' must have exactly one of 'command' (local) or 'url' (remote)`);
+  }
+  if (hasCommand) {
+    // Omnigent form is `command: <exe>` + `args: [...]`; an OpenCode-style single `command: [...]`
+    // array flattens to the same shape (first element is the exe, the rest are args).
+    let command: string;
+    let args = Array.isArray(e.args) ? e.args : undefined;
+    if (Array.isArray(e.command)) { command = String(e.command[0] ?? ""); args = [...e.command.slice(1), ...(args ?? [])]; }
+    else command = String(e.command);
+    assertNoInlineSecret(e.environment, who, name);
+    return {
+      type: "mcp", transport: "local", command,
+      ...(args && args.length ? { args } : {}),
+      ...(e.environment ? { environment: e.environment } : {}),
+      ...(Array.isArray(e.tools) ? { tools: e.tools } : {}),
+      ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}),
+      ...(e.description ? { description: e.description } : {}),
+    };
+  }
+  assertNoInlineSecret(e.headers, who, name);
+  return {
+    type: "mcp", transport: "remote", url: e.url!,
+    ...(e.headers ? { headers: e.headers } : {}),
+    ...(Array.isArray(e.tools) ? { tools: e.tools } : {}),
+    ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}),
+    ...(e.description ? { description: e.description } : {}),
+  };
+}
+
+/** Parse the Omnigent-shaped keyed `tools` map (SPEC-021). `agents` is handled via the `agents/` dir. */
+function parseTools(raw: RawConfig["tools"], who: string): Tools {
+  const out: Tools = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out; // keyed map only
+  for (const [name, e] of Object.entries(raw)) {
+    if (name === "agents" || !e || typeof e !== "object") continue; // sub-agents come from agents/<name>/
+    const type = e.type
+      ?? (e.command !== undefined || e.url !== undefined ? "mcp"
+        : e.callable !== undefined || e.runtime !== undefined ? "function"
+        : e.executor !== undefined ? "agent" : undefined);
+    if (type === "mcp") out[name] = parseMcpEntry(name, e, who);
+    else if (type === "function") {
+      if (e.callable === undefined && e.runtime !== "client") {
+        throw new AgentImageError(`agent image '${who}' function tool '${name}' needs a 'callable' (or 'runtime: client')`);
+      }
+      out[name] = {
+        type: "function",
+        ...(e.callable ? { callable: e.callable } : {}),
+        ...(e.runtime === "client" ? { runtime: "client" as const } : {}),
+        ...(e.parameters ? { parameters: e.parameters } : {}),
+        ...(e.container_image ?? e.containerImage ? { containerImage: (e.container_image ?? e.containerImage)! } : {}),
+        ...(e.description ? { description: e.description } : {}),
+      };
+    } else if (type === "agent") {
+      if (!e.executor) throw new AgentImageError(`agent image '${who}' sub-agent tool '${name}' needs an 'executor'`);
+      out[name] = {
+        type: "agent",
+        executor: parseExecutor(e.executor, `${who}.${name}`) as never,
+        ...(e.prompt ? { prompt: e.prompt } : {}),
+        ...(typeof (e.pass_history ?? e.passHistory) === "boolean" ? { passHistory: (e.pass_history ?? e.passHistory)! } : {}),
+        ...(typeof (e.max_sessions ?? e.maxSessions) === "number" ? { maxSessions: (e.max_sessions ?? e.maxSessions)! } : {}),
+        ...(e.description ? { description: e.description } : {}),
+      };
+    } else {
+      throw new AgentImageError(`agent image '${who}' tool '${name}' has no recognised type (mcp / function / agent)`);
+    }
   }
   return out;
 }
 
-function discoverTools(toolsDir: string): ToolDecl[] {
-  if (!isDir(toolsDir)) return [];
-  const out: ToolDecl[] = [];
+/** Discover tools from the `tools/` directory into keyed entries (folded UNDER declared tools). */
+function discoverTools(toolsDir: string): Tools {
+  if (!isDir(toolsDir)) return {};
+  const out: Tools = {};
   for (const lang of ["python", "typescript"]) {
     const d = join(toolsDir, lang);
     if (isDir(d)) {
       for (const f of readdirSync(d)) {
-        if (f.endsWith(".py") || f.endsWith(".ts")) out.push({ name: stripExt(f), kind: "function" });
+        if (f.endsWith(".py") || f.endsWith(".ts")) out[stripExt(f)] = { type: "function" };
       }
     }
   }
   const mcp = join(toolsDir, "mcp");
   if (isDir(mcp)) {
     for (const f of readdirSync(mcp)) {
-      if (f.endsWith(".yaml") || f.endsWith(".yml")) out.push({ name: stripExt(f), kind: "mcp" });
+      if (!(f.endsWith(".yaml") || f.endsWith(".yml"))) continue;
+      const name = stripExt(f);
+      try {
+        const e = (parseYaml(readFileSync(join(mcp, f), "utf8")) ?? {}) as RawTool;
+        out[name] = parseMcpEntry(name, e, name);
+      } catch {
+        /* an unreadable/invalid discovered MCP file is skipped rather than failing the whole image */
+      }
     }
   }
   return out;

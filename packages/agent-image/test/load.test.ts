@@ -65,6 +65,56 @@ test("sub-agents load recursively", () => {
   assert.equal(image.subAgents[0]!.executor.config.harness, "opencode-native");
 });
 
+test("a keyed tools map parses MCP (local + remote) and function tools with full wiring", () => {
+  const dir = imageDir({
+    "config.yaml":
+      "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n" +
+      "  github:\n    type: mcp\n    command: uv\n    args: [run, python, -m, pkg.github_mcp]\n    tools: [search_issues]\n" +
+      "  docs:\n    type: mcp\n    url: https://example.com/mcp\n    headers:\n      Authorization: \"Bearer ${DOCS_TOKEN}\"\n" +
+      "  summarize:\n    type: function\n    callable: pkg.tools.summarize\n",
+  });
+  const img = loadAgentImage(dir);
+  const gh = img.tools.github as any;
+  assert.equal(gh.type, "mcp");
+  assert.equal(gh.transport, "local");
+  assert.equal(gh.command, "uv");
+  assert.deepEqual(gh.args, ["run", "python", "-m", "pkg.github_mcp"]);
+  assert.deepEqual(gh.tools, ["search_issues"]);
+  const docs = img.tools.docs as any;
+  assert.equal(docs.transport, "remote");
+  assert.equal(docs.url, "https://example.com/mcp");
+  assert.equal(docs.headers.Authorization, "Bearer ${DOCS_TOKEN}"); // ${VAR} kept unresolved
+  const sum = img.tools.summarize as any;
+  assert.equal(sum.type, "function");
+  assert.equal(sum.callable, "pkg.tools.summarize");
+});
+
+test("an OpenCode-style single command array flattens to command + args", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  x:\n    type: mcp\n    command: [npx, -y, some-mcp]\n" });
+  const x = loadAgentImage(dir).tools.x as any;
+  assert.equal(x.command, "npx");
+  assert.deepEqual(x.args, ["-y", "some-mcp"]);
+});
+
+test("an inline literal secret in a credential-named field is rejected; ${VAR} passes", () => {
+  const bad = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  d:\n    type: mcp\n    url: https://x/mcp\n    headers:\n      Authorization: \"Bearer sk-LITERAL\"\n" });
+  assert.throws(() => loadAgentImage(bad), /literal secret in credential field 'Authorization'/);
+  // A benign literal in a non-credential field is fine; a ${VAR} in the credential field passes.
+  const ok = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  d:\n    type: mcp\n    url: https://x/mcp\n    headers:\n      Authorization: \"Bearer ${T}\"\n      Content-Type: application/json\n" });
+  const d = loadAgentImage(ok).tools.d as any;
+  assert.equal(d.headers["Content-Type"], "application/json");
+});
+
+test("an MCP entry with neither command nor url is rejected as malformed", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  x:\n    type: mcp\n    description: broken\n" });
+  assert.throws(() => loadAgentImage(dir), /must have exactly one of 'command' .* or 'url'/);
+});
+
+test("an inline environment secret in an MCP local server is rejected", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  g:\n    type: mcp\n    command: mcp-server\n    environment:\n      GITHUB_TOKEN: ghp_LITERALVALUE\n" });
+  assert.throws(() => loadAgentImage(dir), /literal secret in credential field 'GITHUB_TOKEN'/);
+});
+
 test("setAgentModel rewrites the declared model + reasoning effort, preserving the rest", () => {
   const dir = imageDir({
     "config.yaml":
