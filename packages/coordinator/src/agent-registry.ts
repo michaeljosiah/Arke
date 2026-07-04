@@ -35,6 +35,10 @@ export interface AgentSummary {
   mode: string;
   authProfile?: string;
   permission: Record<string, string>;
+  /** Declared tools by name + kind (mcp/function/agent) — SPEC-021; no secret values. */
+  tools?: { name: string; kind: string }[];
+  /** Declared skills by name — SPEC-021. */
+  skills?: string[];
 }
 
 /** Split a `provider/model` string into an {@link AgentModel}; a bare name uses the gateway sentinel. */
@@ -94,6 +98,8 @@ export class AgentRegistry {
       mode: img.interaction.mode,
       ...(img.executor.config.auth?.profile ? { authProfile: img.executor.config.auth.profile } : {}),
       permission: img.permission,
+      ...(Object.keys(img.tools).length ? { tools: Object.entries(img.tools).map(([name, t]) => ({ name, kind: t.type })) } : {}),
+      ...(img.skills.length ? { skills: img.skills.map((s) => s.name) } : {}),
     }));
   }
 }

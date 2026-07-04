@@ -58,13 +58,69 @@ export const Executor = z.object({
 });
 export type Executor = z.infer<typeof Executor>;
 
-/** A declared tool the agent may use. `kind` distinguishes local code, an MCP server, or a sub-agent. */
-export const ToolDecl = z.object({
-  name: z.string(),
-  kind: z.enum(["function", "mcp", "agent"]),
+/**
+ * A tool an agent may use (SPEC-021, Omnigent-shaped) — a keyed `tools` map, not an array. One entry
+ * is an MCP server, a local function tool, or a sub-agent tool.
+ */
+
+/**
+ * An MCP server tool — a **discriminated union** on `transport` (the loader infers it from `command`
+ * vs `url`, so `command` XOR `url` is a type invariant, not a runtime check). Credential-bearing
+ * fields carry a `${VAR}` reference resolved by the harness at spawn, never an inline literal (NFR-1).
+ */
+export const McpTool = z.discriminatedUnion("transport", [
+  z.object({
+    type: z.literal("mcp"),
+    transport: z.literal("local"),
+    command: z.string(),
+    args: z.array(z.string()).optional(),
+    environment: z.record(z.string(), z.string()).optional(),
+    tools: z.array(z.string()).optional(), // exposed-tool whitelist
+    enabled: z.boolean().optional(),
+    description: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("mcp"),
+    transport: z.literal("remote"),
+    url: z.string(),
+    headers: z.record(z.string(), z.string()).optional(),
+    tools: z.array(z.string()).optional(),
+    enabled: z.boolean().optional(),
+    description: z.string().optional(),
+  }),
+]);
+export type McpTool = z.infer<typeof McpTool>;
+
+/** A local code/function tool. A `callable` unless `runtime: client` (the orchestrator supplies it). */
+export const FunctionTool = z.object({
+  type: z.literal("function"),
+  callable: z.string().optional(),
+  runtime: z.literal("client").optional(),
+  parameters: z.record(z.string(), z.unknown()).optional(), // JSON Schema
+  containerImage: z.string().optional(),
   description: z.string().optional(),
 });
-export type ToolDecl = z.infer<typeof ToolDecl>;
+export type FunctionTool = z.infer<typeof FunctionTool>;
+
+/** A sub-agent tool — declares its own executor. The canonical sub-agent source is the `agents/` dir. */
+export const AgentTool = z.object({
+  type: z.literal("agent"),
+  executor: z.lazy(() => Executor),
+  prompt: z.string().optional(),
+  osEnv: z.union([z.literal("inherit"), z.lazy(() => OsEnv)]).optional(),
+  passHistory: z.boolean().optional(),
+  maxSessions: z.number().optional(),
+  description: z.string().optional(),
+});
+export type AgentTool = z.infer<typeof AgentTool>;
+
+/** One entry in the `tools` map. */
+export const Tool = z.union([McpTool, FunctionTool, AgentTool]);
+export type Tool = z.infer<typeof Tool>;
+
+/** The keyed `tools` map on an agent image (name → tool). Replaces the old `ToolDecl[]` array. */
+export const Tools = z.record(z.string(), Tool);
+export type Tools = z.infer<typeof Tools>;
 
 export const SkillRef = z.object({
   name: z.string(),
@@ -102,7 +158,8 @@ export interface AgentImage {
   /** Instruction body from a file (AGENTS.md) or inline; complements/overrides `prompt`. */
   instructions?: string;
   interaction: AgentInteraction;
-  tools: ToolDecl[];
+  /** Keyed tools map (SPEC-021): name → MCP server / function tool / sub-agent tool. */
+  tools: Tools;
   skills: SkillRef[];
   /** Per-capability permission posture (edit/bash/webfetch…) carried to the harness. */
   permission: Record<string, AgentPermission>;
@@ -121,7 +178,7 @@ export const AgentImage: z.ZodType<AgentImage, z.ZodTypeDef, unknown> = z.lazy((
     prompt: z.string().optional(),
     instructions: z.string().optional(),
     interaction: AgentInteraction,
-    tools: z.array(ToolDecl).default([]),
+    tools: Tools.default({}),
     skills: z.array(SkillRef).default([]),
     permission: z.record(z.string(), AgentPermission).default({}),
     osEnv: OsEnv.optional(),

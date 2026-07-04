@@ -10,6 +10,7 @@ import {
   setFrontmatterStatus,
   type AgentImage,
   type AgentModel,
+  type CapabilityMaterialisation,
   type HarnessAdapter,
   type PermissionAck,
   type PermissionDecision,
@@ -60,7 +61,7 @@ import {
   type ArtifactProposal,
 } from "./generation.js";
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
-import { loadAgentImage, setAgentModel } from "@arke/agent-image";
+import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
@@ -374,39 +375,102 @@ export class ProjectContext {
   }
 
   /**
-   * Rewrite an agent's declared model in its image (SPEC-016 revised) — the write half of the
-   * model-selection UX. Edits `agents/<name>/config.yaml` (`executor.config.model` + optional
-   * `options.reasoningEffort`), re-materialises the harness agent (`.opencode/agents/<name>.md`),
-   * reloads the {@link AgentRegistry}, and refreshes the projection so the roster updates live. The
-   * write is confined to this project's root; the model id is public (only credentials are host-side).
+   * Rewrite an agent's declared model, permission grid, and/or interaction mode in its image
+   * (SPEC-016 revised + SPEC-021) — the write half of the model + capability editor. Edits
+   * `agents/<name>/config.yaml` (`executor.config.model` + optional `options.reasoningEffort`, the
+   * `interaction.mode`, and the top-level `permission:` block), re-materialises the harness agent so
+   * a permission/mode edit actually reaches OpenCode, reloads the {@link AgentRegistry}, and refreshes
+   * the projection so the roster updates live. The write is confined to this project's root; the model
+   * id, mode, and permission verbs are public (only credentials are host-side).
+   *
+   * Each field is independent: an empty `model` leaves the model untouched (so a default-model agent
+   * can still have its permissions saved); `permission` undefined leaves the block, whereas an explicit
+   * empty map CLEARS it; an invalid permission verb (only `allow|ask|deny`) is rejected before any write.
    */
-  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown): Promise<{ name: string; model: string; reasoningEffort?: string }> {
+  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown, rawPermission?: unknown, rawMode?: unknown): Promise<{ name: string; model?: string; reasoningEffort?: string; permission?: Record<string, string>; mode?: string }> {
     const name = String(rawName ?? "");
     // Guard the path segment: agent names index a directory, so only a safe slug is addressable.
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
     if (!this.agents.has(name)) throw new Error(`unknown agent '${name}'`);
     const provider = String(rawProvider ?? "").trim();
     const model = String(rawModel ?? "").trim();
-    if (!model) throw new Error("a model is required");
     const effort = rawEffort ? String(rawEffort).trim() : undefined;
-    // A concrete provider prefixes the model; the `gateway` sentinel (harness default) stays bare.
-    const full = provider && provider !== "gateway" ? `${provider}/${model}` : model;
+    // A concrete provider prefixes the model; the `gateway` sentinel (harness default) stays bare. An
+    // empty model means "leave the model untouched" (a permission-only save on a default-model agent),
+    // NOT an error — so a gateway/default agent's permissions can still be edited.
+    const hasModel = model !== "";
+    const full = hasModel && provider && provider !== "gateway" ? `${provider}/${model}` : model;
+    const permission = sanitizePermission(rawPermission); // undefined = leave; {} = clear; {…} = set (verbs validated)
+    const mode = rawMode ? String(rawMode).trim() : undefined;
+    if (mode && mode !== "primary" && mode !== "subagent" && mode !== "all") throw new Error(`invalid mode '${mode}' (expected primary | subagent | all)`);
+    if (!hasModel && permission === undefined && !mode) throw new Error("nothing to update — provide a model, permission, or mode");
 
     const agentDir = resolve(this.root, "agents", name);
     if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
     if (!existsSync(resolve(agentDir, "config.yaml"))) throw new Error(`agent '${name}' has no config.yaml image`);
 
-    setAgentModel(agentDir, full, effort);
+    if (hasModel) setAgentModel(agentDir, full, effort);
+    if (mode) setAgentMode(agentDir, mode);
+    if (permission !== undefined) setAgentPermission(agentDir, permission);
     // Reload the roster from disk (keeping the same provider profiles) so modelFor()/list() are fresh.
     this.agents = loadAgentRegistry(this.root, this.agents.providers);
-    // NB: we deliberately do NOT re-materialise the `.opencode/agents/<name>.md` here. The source
-    // image's `instructions: AGENTS.md` may not resolve per-agent, so a re-materialise would rewrite
-    // the harness agent with an EMPTY instruction body — clobbering its system prompt. Correctness is
-    // preserved without it: every Arke dispatch sends the agent's declared model as a per-message
-    // override (`SendMessageInput.model`), so the harness uses the new model regardless of the `.md`.
-    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, model: full, ...(effort ? { reasoningEffort: effort } : {}) });
+    // Re-materialise the harness agent: OpenCode reads permissions + mode from `.opencode/agents/<name>.md`,
+    // so without this a permission/mode edit would never take effect. The adapter preserves the existing
+    // instruction body when the image carries none, so this only rewrites the frontmatter and never
+    // clobbers the prompt (the reason an earlier version skipped it). A model edit also rides the
+    // per-message dispatch override, but rewriting it here keeps the materialised file consistent.
+    const img = this.agents.image(name);
+    if (img) await this.adapter.materializeAgent?.(img);
+    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) });
     await this.refreshRegistry(); // emit registry.updated + refresh the snapshot roster
-    return { name, model: full, ...(effort ? { reasoningEffort: effort } : {}) };
+    return { name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) };
+  }
+
+  /**
+   * Create a NEW agent image (`agents/<name>/config.yaml`) from the editor's structured spec
+   * (SPEC-021). The name is slug-guarded and the write is confined to this project's `agents/` dir;
+   * the underlying writer round-trips the image through the loader (rejecting an inline secret — NFR-1,
+   * or an overwrite of an existing agent) so a bad create never lands on disk. On success the registry
+   * reloads and the projection refreshes so the new agent appears on the roster at once.
+   */
+  async createAgent(raw: unknown): Promise<{ name: string }> {
+    const spec = raw as Partial<NewAgentSpec> | undefined;
+    const name = String(spec?.name ?? "").trim();
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
+    if (!spec?.harness) throw new Error("a harness is required");
+    const agentsRoot = resolve(this.root, "agents");
+    const agentDir = resolve(agentsRoot, name);
+    if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
+
+    const permission = sanitizePermission(spec.permission);
+    writeNewAgent(agentsRoot, {
+      name,
+      ...(spec.description ? { description: String(spec.description) } : {}),
+      harness: String(spec.harness),
+      ...(spec.model ? { model: String(spec.model) } : {}),
+      ...(spec.reasoningEffort ? { reasoningEffort: String(spec.reasoningEffort) } : {}),
+      ...(spec.authProfile ? { authProfile: String(spec.authProfile) } : {}),
+      ...(spec.mode ? { mode: String(spec.mode) } : {}),
+      ...(typeof spec.conversational === "boolean" ? { conversational: spec.conversational } : {}),
+      ...(spec.instructions ? { instructions: String(spec.instructions) } : {}),
+      ...(permission && Object.keys(permission).length ? { permission } : {}),
+      ...(spec.tools ? { tools: spec.tools } : {}),
+    });
+    this.agents = loadAgentRegistry(this.root, this.agents.providers);
+    // Materialise the new agent into the harness immediately (like `agents.materialize`): OpenCode
+    // reads the agent from `.opencode/agents/<name>.md` and its MCP servers from `opencode.json`, so
+    // without this a just-created agent (especially one with MCP tools) shows on the roster but is not
+    // yet usable until a separate materialise. Best-effort per capability; the trace records the result.
+    const img = this.agents.image(name);
+    if (img) {
+      await this.adapter.materializeAgent?.(img);
+      const cap = this.adapter.materializeCapabilities ? await this.adapter.materializeCapabilities(img) : undefined;
+      await this.trace.write({ kind: "agent.created", projectId: this.projectId, name, harness: String(spec.harness), ...(spec.model ? { model: String(spec.model) } : {}), ...(cap ? { registered: cap.registered, unsupported: cap.unsupported } : {}) });
+    } else {
+      await this.trace.write({ kind: "agent.created", projectId: this.projectId, name, harness: String(spec.harness), ...(spec.model ? { model: String(spec.model) } : {}) });
+    }
+    await this.refreshRegistry();
+    return { name };
   }
 
   // ---- authoring cockpit (SPEC-006) ---------------------------------------
@@ -1704,9 +1768,26 @@ export class ProjectContext {
       case "agents.materialize": {
         if (!this.adapter.materializeAgent) throw new Error("harness does not support agent materialisation");
         const images = this.loadAgentImages(a.dir);
-        for (const img of images) await this.adapter.materializeAgent(img);
-        return { materialized: images.map((i) => i.name) };
+        // SPEC-021: materialise each image's agent frontmatter AND its declared tools/MCP/skills into
+        // the harness's native config. An adapter with no capability support skips the latter; whatever
+        // it can't register (e.g. a function tool on a harness without them) is surfaced, not silently
+        // dropped, so the caller/editor can warn.
+        const capabilities: Record<string, CapabilityMaterialisation> = {};
+        for (const img of images) {
+          await this.adapter.materializeAgent(img);
+          if (this.adapter.materializeCapabilities) {
+            const cap = await this.adapter.materializeCapabilities(img);
+            capabilities[img.name] = cap;
+            await this.trace.write({ kind: "agent.capabilities-materialized", projectId: this.projectId, name: img.name, registered: cap.registered, unsupported: cap.unsupported });
+          }
+        }
+        return { materialized: images.map((i) => i.name), capabilities };
       }
+      case "harness.capabilities":
+        // SPEC-021: what this harness natively supports (MCP forms, skills locations, function tools,
+        // tool gating, built-in tools) — the manifest the capability-aware agent editor validates
+        // against. Absent → the adapter declares no manifest (treated as supporting nothing).
+        return this.adapter.capabilitiesManifest?.() ?? null;
       case "harness.probe":
         await this.refreshReachability();
         return this.reachableSummary();
@@ -1716,8 +1797,10 @@ export class ProjectContext {
         return this.adapter.capabilities().has("models") && this.adapter.listModels
           ? await this.adapter.listModels().catch(() => [])
           : [];
-      case "agent.configure": // SPEC-016 revised: rewrite an agent's declared model+effort in its image
-        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort);
+      case "agent.configure": // SPEC-016 revised + SPEC-021: rewrite an agent's model+effort (+ permission + mode)
+        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort, a.permission, a.mode);
+      case "agent.create": // SPEC-021: create a new agent image from the editor's structured spec
+        return this.createAgent(a.spec ?? a);
       case "registry.get":
         return this.registrySnapshot; // current projection, no re-probe (read-only)
       case "registry.probe":
@@ -2295,6 +2378,29 @@ export function gitHeadBranch(cwd: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** The permission verbs an agent image accepts — the harness gate (OpenCode: allow/ask/deny). */
+const PERMISSION_VERBS = new Set(["allow", "ask", "deny"]);
+
+/**
+ * Coerce a client-supplied `permission` payload into a clean `Record<string,string>` (SPEC-021):
+ * - `undefined`/non-object → `undefined` ("not provided" — the caller leaves the block untouched).
+ * - an object → the sanitised map, which MAY be empty (an explicit "clear all permissions").
+ *
+ * Verbs are validated against `allow|ask|deny` and a bad verb THROWS before any write — otherwise a
+ * typo like `edit: always` would be written to `config.yaml` and then fail the image's schema on the
+ * next registry reload, silently dropping the agent from the roster.
+ */
+function sanitizePermission(raw: unknown): Record<string, string> | undefined {
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k !== "string" || k.trim() === "" || typeof v !== "string" || v.trim() === "") continue;
+    if (!PERMISSION_VERBS.has(v)) throw new Error(`invalid permission verb '${v}' for '${k}' (expected allow | ask | deny)`);
+    out[k] = v;
+  }
+  return out; // may be {} → an explicit clear
 }
 
 /** Bound git invocations so a hanging hook / credential or GPG prompt can't wedge the event loop. */

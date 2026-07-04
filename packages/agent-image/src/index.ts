@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml, parseDocument } from "yaml";
-import { AgentImage, type SkillRef, type ToolDecl } from "@arke/contracts";
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
+import { AgentImage, type SkillRef, type Tool, type Tools } from "@arke/contracts";
 
 /**
  * Loads a portable agent image directory into a typed {@link AgentImage} (SPEC-016).
@@ -56,7 +56,36 @@ interface RawConfig {
   os_env?: { type?: string; cwd?: string; sandbox?: { type?: string } };
   osEnv?: { type?: string; cwd?: string; sandbox?: { type?: string } };
   spawn?: boolean;
-  tools?: Array<{ name?: string; kind?: string; description?: string }>;
+  /** Omnigent-shaped keyed tools map (SPEC-021): name → { type: mcp|function|agent, … }. */
+  tools?: Record<string, RawTool>;
+}
+
+interface RawTool {
+  type?: string;
+  // mcp
+  command?: string | string[];
+  args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  environment?: Record<string, string>;
+  tools?: string[];
+  enabled?: boolean;
+  // function
+  callable?: string;
+  runtime?: string;
+  parameters?: Record<string, unknown>;
+  container_image?: string;
+  containerImage?: string;
+  // agent
+  executor?: RawExecutor;
+  prompt?: string;
+  os_env?: unknown;
+  osEnv?: unknown;
+  pass_history?: boolean;
+  passHistory?: boolean;
+  max_sessions?: number;
+  maxSessions?: number;
+  description?: string;
 }
 
 export function loadAgentImage(dir: string): AgentImage {
@@ -74,6 +103,17 @@ export function loadAgentImage(dir: string): AgentImage {
   const executor = parseExecutor(raw.executor, raw.name ?? dir);
   const osEnvRaw = raw.os_env ?? raw.osEnv;
 
+  const tools = { ...discoverTools(join(dir, "tools")), ...parseTools(raw.tools, raw.name ?? dir) };
+  // An inline `type: agent` tool is an addressable sub-agent — fold it into `subAgents` so the harness
+  // materialises it (a keyed agent-tool entry alone is never written to `.opencode/agents`) — SPEC-021.
+  // The DIRECTORY form (`agents/<name>/`) is canonical and WINS a same-name conflict: skip an inline
+  // agent-tool whose name a discovered sub-agent already claims (else the inline one would overwrite it).
+  const directorySubs = discoverSubAgents(join(dir, "agents"));
+  const directoryNames = new Set(directorySubs.map((s) => s.name));
+  const inlineAgentSubs = Object.entries(tools)
+    .filter(([name, t]) => t.type === "agent" && !directoryNames.has(name))
+    .map(([name, t]) => agentToolAsSubImage(name, t as Extract<Tool, { type: "agent" }>));
+
   const candidate = {
     name: raw.name,
     description: raw.description,
@@ -84,7 +124,7 @@ export function loadAgentImage(dir: string): AgentImage {
       conversational: raw.interaction?.conversational ?? true,
       mode: raw.interaction?.mode ?? "primary",
     },
-    tools: [...declaredTools(raw.tools), ...discoverTools(join(dir, "tools"))],
+    tools,
     skills: discoverSkills(join(dir, "skills")),
     permission: raw.permission ?? {},
     ...(osEnvRaw
@@ -97,7 +137,7 @@ export function loadAgentImage(dir: string): AgentImage {
         }
       : {}),
     ...(typeof raw.spawn === "boolean" ? { spawn: raw.spawn } : {}),
-    subAgents: discoverSubAgents(join(dir, "agents")),
+    subAgents: [...directorySubs, ...inlineAgentSubs],
   };
 
   const result = AgentImage.safeParse(candidate);
@@ -141,6 +181,169 @@ export function setAgentModel(dir: string, model: string, reasoningEffort?: stri
     }
   }
   writeFileSync(configPath, String(doc), "utf8");
+}
+
+/**
+ * Surgically rewrite an agent image's `permission` map in place (SPEC-021) — the write half of the
+ * capability-aware editor's permission grid. Replaces ONLY the top-level `permission:` block in the
+ * image's `config.yaml`, preserving the rest of the document (executor, tools, comments, formatting)
+ * via the YAML Document API. An empty map removes the `permission:` key entirely. Throws
+ * {@link AgentImageError} if the image or its config is missing.
+ */
+export function setAgentPermission(dir: string, permission: Record<string, string>): void {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) throw new AgentImageError(`missing required config.yaml in ${dir}`);
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  const entries = Object.entries(permission).filter(([, v]) => typeof v === "string" && v.trim() !== "");
+  if (entries.length === 0) {
+    if (doc.getIn(["permission"]) !== undefined) doc.deleteIn(["permission"]);
+  } else {
+    doc.setIn(["permission"], Object.fromEntries(entries));
+  }
+  writeFileSync(configPath, String(doc), "utf8");
+}
+
+/**
+ * Surgically rewrite an agent image's interaction `mode` (`primary` | `subagent`) in place (SPEC-021).
+ * Edits ONLY `interaction.mode` in `config.yaml`, preserving the rest of the document via the YAML
+ * Document API. Throws {@link AgentImageError} if the image or its config is missing.
+ */
+export function setAgentMode(dir: string, mode: string): void {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) throw new AgentImageError(`missing required config.yaml in ${dir}`);
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    doc = parseDocument(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  doc.setIn(["interaction", "mode"], mode);
+  writeFileSync(configPath, String(doc), "utf8");
+}
+
+/** A structured request to create a new agent image (SPEC-021) — the write half of the editor's create flow. */
+export interface NewAgentSpec {
+  name: string;
+  description?: string;
+  harness: string;
+  /** Full `provider/model` string (or a bare gateway name); omitted → the harness default. */
+  model?: string;
+  reasoningEffort?: string;
+  /** Host-side auth profile the executor references (never an inline credential — NFR-1). */
+  authProfile?: string;
+  mode?: string; // interaction.mode (primary | subagent | …)
+  conversational?: boolean;
+  /** Inline system prompt written as the config `prompt` (skills/instructions folders are separate). */
+  instructions?: string;
+  permission?: Record<string, string>;
+  /** Declared MCP / function tools; agent sub-tools use the `agents/<name>/` convention instead. */
+  tools?: Tools;
+}
+
+/**
+ * The governed default permission posture applied to a newly-created agent that declares no `permission`
+ * (SPEC-021). OpenCode defaults an unset operation to ALLOWED, so without this a fresh agent could edit
+ * files and run shell commands ungoverned; gate the mutating / exec / network operations by default.
+ */
+export const DEFAULT_AGENT_PERMISSION: Record<string, string> = { edit: "ask", bash: "ask", webfetch: "ask" };
+
+/**
+ * Create a NEW agent image directory `<agentsRoot>/<name>/config.yaml` from a structured spec
+ * (SPEC-021). Builds the Omnigent-shaped `config.yaml`, writes it, then round-trips it through
+ * {@link loadAgentImage} to validate — if the result is invalid (or would inline a secret), the
+ * partially-written file/dir this call created is removed and it throws {@link AgentImageError}, so a
+ * bad create never leaves a broken image on disk. Refuses to overwrite an existing agent.
+ */
+export function writeNewAgent(agentsRoot: string, spec: NewAgentSpec): string {
+  const name = String(spec.name ?? "").trim();
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new AgentImageError(`invalid agent name '${name}'`);
+  const dir = join(agentsRoot, name);
+  if (existsSync(join(dir, "config.yaml"))) throw new AgentImageError(`agent '${name}' already exists`);
+
+  const config: Record<string, unknown> = {
+    spec_version: 1,
+    name,
+    ...(spec.description ? { description: spec.description } : {}),
+    executor: {
+      type: "omnigent",
+      config: {
+        harness: spec.harness,
+        ...(spec.model ? { model: spec.model } : {}),
+        ...(spec.reasoningEffort ? { options: { reasoningEffort: spec.reasoningEffort } } : {}),
+        ...(spec.authProfile ? { auth: { profile: spec.authProfile } } : {}),
+      },
+    },
+    ...(spec.instructions ? { prompt: spec.instructions } : {}),
+    interaction: { conversational: spec.conversational ?? true, mode: spec.mode ?? "subagent" },
+    // A create with no permission grid gets a GOVERNED default, not OpenCode's implicit allow-all
+    // (which would let a new agent edit/run shell ungoverned) — the editor can loosen it (SPEC-021).
+    permission: spec.permission && Object.keys(spec.permission).length ? spec.permission : DEFAULT_AGENT_PERMISSION,
+    ...(spec.tools && Object.keys(spec.tools).length ? { tools: Object.fromEntries(Object.entries(spec.tools).map(([n, t]) => [n, toolToRaw(t)])) } : {}),
+  };
+
+  const dirExisted = existsSync(dir);
+  mkdirSync(dir, { recursive: true });
+  const configPath = join(dir, "config.yaml");
+  writeFileSync(configPath, stringifyYaml(config), "utf8");
+  try {
+    loadAgentImage(dir); // validate the just-written image (executor, tools, no inline secrets — NFR-1)
+  } catch (err) {
+    // Clean up what we created so a rejected create leaves no broken image behind.
+    try {
+      if (dirExisted) rmSync(configPath, { force: true });
+      else rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err instanceof AgentImageError ? err : new AgentImageError(`could not create agent '${name}': ${reason(err)}`);
+  }
+  return dir;
+}
+
+/** Serialise a typed {@link Tool} back to its raw YAML shape (drops the Arke-internal `transport` tag). */
+function toolToRaw(t: Tool): Record<string, unknown> {
+  if (t.type === "mcp") {
+    if (t.transport === "local") {
+      return {
+        type: "mcp", command: t.command,
+        ...(t.args?.length ? { args: t.args } : {}),
+        ...(t.environment ? { environment: t.environment } : {}),
+        ...(t.tools ? { tools: t.tools } : {}),
+        ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+        ...(t.description ? { description: t.description } : {}),
+      };
+    }
+    return {
+      type: "mcp", url: t.url,
+      ...(t.headers ? { headers: t.headers } : {}),
+      ...(t.tools ? { tools: t.tools } : {}),
+      ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+      ...(t.description ? { description: t.description } : {}),
+    };
+  }
+  if (t.type === "function") {
+    return {
+      type: "function",
+      ...(t.callable ? { callable: t.callable } : {}),
+      ...(t.runtime ? { runtime: t.runtime } : {}),
+      ...(t.parameters ? { parameters: t.parameters } : {}),
+      ...(t.containerImage ? { container_image: t.containerImage } : {}),
+      ...(t.description ? { description: t.description } : {}),
+    };
+  }
+  // agent sub-tool: keep the executor block and its options (out of the common editor path).
+  return {
+    type: "agent", executor: t.executor,
+    ...(t.prompt ? { prompt: t.prompt } : {}),
+    ...(t.passHistory !== undefined ? { pass_history: t.passHistory } : {}),
+    ...(t.maxSessions !== undefined ? { max_sessions: t.maxSessions } : {}),
+    ...(t.description ? { description: t.description } : {}),
+  };
 }
 
 /**
@@ -194,32 +397,152 @@ function resolveInstructions(dir: string, instr: string | undefined): string | u
   return existsSync(agentsMd) ? readFileSync(agentsMd, "utf8") : undefined;
 }
 
-function declaredTools(tools: RawConfig["tools"]): ToolDecl[] {
-  if (!Array.isArray(tools)) return [];
-  const out: ToolDecl[] = [];
-  for (const t of tools) {
-    if (!t?.name) continue;
-    const kind = t.kind === "mcp" || t.kind === "agent" ? t.kind : "function";
-    out.push({ name: t.name, kind, ...(t.description ? { description: t.description } : {}) });
+/** A value in a credential-bearing field must be a `${VAR}`/profile reference, never an inline literal. */
+const CREDENTIAL_FIELD = /^(authorization|.*token.*|.*api[-_]?key.*|.*secret.*|.*password.*|.*credential.*|.*bearer.*)$/i;
+
+/**
+ * Whether a credential-field value contains an inline literal secret (NFR-1). A safe value is composed
+ * ONLY of `${VAR}` interpolations, an auth-scheme keyword (Bearer/Basic/…), and separators/whitespace —
+ * anything left over after stripping those is a literal. This rejects both a bare secret (`sk-live…`,
+ * no var at all) AND a var mixed with a literal (`Bearer sk-live ${TOKEN}`), which a substring `${…}`
+ * check would have let through, while still allowing the legitimate `Bearer ${TOKEN}` / `${U}:${P}` forms.
+ */
+function hasInlineLiteralSecret(v: string): boolean {
+  if (typeof v !== "string" || v.trim() === "") return false; // empty is not a secret
+  let residue = v.replace(/\$\{[^}]+\}/g, " "); // drop ${VAR} interpolations
+  residue = residue.replace(/\b(bearer|basic|token|digest|apikey|api[-_]?key)\b/gi, " "); // drop scheme keywords
+  residue = residue.replace(/[\s:;,=]+/g, ""); // drop separators + whitespace
+  return residue.length > 0; // any literal residue → an inline secret
+}
+
+/** Reject an inline literal secret in a credential-named `headers`/`environment` key (NFR-1, SPEC-021). */
+function assertNoInlineSecret(map: Record<string, string> | undefined, who: string, tool: string): void {
+  if (!map) return;
+  for (const [k, v] of Object.entries(map)) {
+    if (CREDENTIAL_FIELD.test(k) && hasInlineLiteralSecret(v)) {
+      throw new AgentImageError(
+        `agent image '${who}' tool '${tool}' inlines a literal secret in credential field '${k}' — the value may contain only \${VAR} references (NFR-1)`,
+      );
+    }
+  }
+}
+
+/** Parse one MCP entry into the discriminated {@link Tool}, inferring `transport` from `command` vs `url`. */
+function parseMcpEntry(name: string, e: RawTool, who: string): Tool {
+  const hasCommand = e.command !== undefined;
+  const hasUrl = typeof e.url === "string";
+  if (hasCommand === hasUrl) {
+    throw new AgentImageError(`agent image '${who}' MCP tool '${name}' must have exactly one of 'command' (local) or 'url' (remote)`);
+  }
+  if (hasCommand) {
+    // Omnigent form is `command: <exe>` + `args: [...]`; an OpenCode-style single `command: [...]`
+    // array flattens to the same shape (first element is the exe, the rest are args).
+    let command: string;
+    let args = Array.isArray(e.args) ? e.args : undefined;
+    if (Array.isArray(e.command)) { command = String(e.command[0] ?? ""); args = [...e.command.slice(1), ...(args ?? [])]; }
+    else command = String(e.command);
+    assertNoInlineSecret(e.environment, who, name);
+    return {
+      type: "mcp", transport: "local", command,
+      ...(args && args.length ? { args } : {}),
+      ...(e.environment ? { environment: e.environment } : {}),
+      ...(Array.isArray(e.tools) ? { tools: e.tools } : {}),
+      ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}),
+      ...(e.description ? { description: e.description } : {}),
+    };
+  }
+  assertNoInlineSecret(e.headers, who, name);
+  return {
+    type: "mcp", transport: "remote", url: e.url!,
+    ...(e.headers ? { headers: e.headers } : {}),
+    ...(Array.isArray(e.tools) ? { tools: e.tools } : {}),
+    ...(typeof e.enabled === "boolean" ? { enabled: e.enabled } : {}),
+    ...(e.description ? { description: e.description } : {}),
+  };
+}
+
+/** Parse the Omnigent-shaped keyed `tools` map (SPEC-021). `agents` is handled via the `agents/` dir. */
+function parseTools(raw: RawConfig["tools"], who: string): Tools {
+  const out: Tools = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out; // keyed map only
+  for (const [name, e] of Object.entries(raw)) {
+    if (name === "agents" || !e || typeof e !== "object") continue; // sub-agents come from agents/<name>/
+    const type = e.type
+      ?? (e.command !== undefined || e.url !== undefined ? "mcp"
+        : e.callable !== undefined || e.runtime !== undefined ? "function"
+        : e.executor !== undefined ? "agent" : undefined);
+    if (type === "mcp") out[name] = parseMcpEntry(name, e, who);
+    else if (type === "function") {
+      if (e.callable === undefined && e.runtime !== "client") {
+        throw new AgentImageError(`agent image '${who}' function tool '${name}' needs a 'callable' (or 'runtime: client')`);
+      }
+      out[name] = {
+        type: "function",
+        ...(e.callable ? { callable: e.callable } : {}),
+        ...(e.runtime === "client" ? { runtime: "client" as const } : {}),
+        ...(e.parameters ? { parameters: e.parameters } : {}),
+        ...(e.container_image ?? e.containerImage ? { containerImage: (e.container_image ?? e.containerImage)! } : {}),
+        ...(e.description ? { description: e.description } : {}),
+      };
+    } else if (type === "agent") {
+      if (!e.executor) throw new AgentImageError(`agent image '${who}' sub-agent tool '${name}' needs an 'executor'`);
+      out[name] = {
+        type: "agent",
+        executor: parseExecutor(e.executor, `${who}.${name}`) as never,
+        ...(e.prompt ? { prompt: e.prompt } : {}),
+        ...(typeof (e.pass_history ?? e.passHistory) === "boolean" ? { passHistory: (e.pass_history ?? e.passHistory)! } : {}),
+        ...(typeof (e.max_sessions ?? e.maxSessions) === "number" ? { maxSessions: (e.max_sessions ?? e.maxSessions)! } : {}),
+        ...(e.description ? { description: e.description } : {}),
+      };
+    } else {
+      throw new AgentImageError(`agent image '${who}' tool '${name}' has no recognised type (mcp / function / agent)`);
+    }
   }
   return out;
 }
 
-function discoverTools(toolsDir: string): ToolDecl[] {
-  if (!isDir(toolsDir)) return [];
-  const out: ToolDecl[] = [];
+/** Synthesise a sub-agent {@link AgentImage} candidate from an inline `type: agent` tool (SPEC-021). */
+function agentToolAsSubImage(name: string, t: Extract<Tool, { type: "agent" }>): unknown {
+  return {
+    name,
+    ...(t.description ? { description: t.description } : {}),
+    executor: t.executor,
+    ...(t.prompt ? { prompt: t.prompt, instructions: t.prompt } : {}),
+    interaction: { conversational: true, mode: "subagent" },
+    tools: {},
+    skills: [],
+    permission: {},
+    subAgents: [],
+  };
+}
+
+/** Discover tools from the `tools/` directory into keyed entries (folded UNDER declared tools). */
+function discoverTools(toolsDir: string): Tools {
+  if (!isDir(toolsDir)) return {};
+  const out: Tools = {};
   for (const lang of ["python", "typescript"]) {
     const d = join(toolsDir, lang);
     if (isDir(d)) {
       for (const f of readdirSync(d)) {
-        if (f.endsWith(".py") || f.endsWith(".ts")) out.push({ name: stripExt(f), kind: "function" });
+        if (f.endsWith(".py") || f.endsWith(".ts")) out[stripExt(f)] = { type: "function" };
       }
     }
   }
   const mcp = join(toolsDir, "mcp");
   if (isDir(mcp)) {
     for (const f of readdirSync(mcp)) {
-      if (f.endsWith(".yaml") || f.endsWith(".yml")) out.push({ name: stripExt(f), kind: "mcp" });
+      if (!(f.endsWith(".yaml") || f.endsWith(".yml"))) continue;
+      const name = stripExt(f);
+      // A malformed discovered MCP file fails the image loudly, exactly like an equivalent inline
+      // `tools:` entry — silently dropping it would leave the capability un-materialised with no error
+      // for the author to see (SPEC-021).
+      try {
+        const e = (parseYaml(readFileSync(join(mcp, f), "utf8")) ?? {}) as RawTool;
+        out[name] = parseMcpEntry(name, e, name);
+      } catch (err) {
+        if (err instanceof AgentImageError) throw err;
+        throw new AgentImageError(`discovered MCP tool '${f}' is invalid: ${reason(err)}`);
+      }
     }
   }
   return out;
