@@ -2,11 +2,31 @@
   "name": "@arke/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Electron desktop shell that embeds the coordinator and serves the React client as one signed app (PRD §8.6, D16). Skeleton — Electron dependency and packaging are added when the desktop phase begins.",
+  "description": "Electron desktop shell that embeds the coordinator and serves the React client as one signed app (PRD §8.6, D16; SPEC-022).",
+  "author": "Arke",
   "type": "module",
-  "main": "src/main.js",
+  "main": "dist/main.cjs",
   "scripts": {
-    "start": "echo \"(skeleton) install electron first: npm i -D electron -w @arke/desktop, then: electron .\"",
-    "build": "echo \"(skeleton) electron packaging not yet configured\""
+    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node20 --external:electron --external:electron-updater --outdir=dist --out-extension:.js=.cjs",
+    "icons": "node scripts/gen-icons.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "start": "npm run build && electron dist/main.cjs",
+    "package": "npm run build && electron-builder --publish never",
+    "publish": "npm run build && electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@arke/coordinator": "*",
+    "@types/node": "^22.0.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2",
+    "icon-gen": "^5.0.0",
+    "sharp": "^0.33.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   }
 }

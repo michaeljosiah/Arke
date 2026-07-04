@@ -69,3 +69,38 @@ jobs:
             arke-source-*.zip
             arke-cli-win-x64-*.zip
             arke-cli-linux-x64-*.zip
+
+  # SPEC-022: build the Arke Desktop installers on each native OS (dmg / nsis / AppImage) and publish
+  # them + the electron-updater feed to the same tagged Release. Signing/notarisation happen only when
+  # the corresponding secrets are configured (Decision #11) — the build still succeeds (unsigned)
+  # without them, so the pipeline is validated on every tag.
+  desktop:
+    needs: release # attach installers to the Release the first job created
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Build client + desktop
+        run: |
+          npm run build --workspace @arke/client
+          npm run build --workspace @arke/desktop
+      - name: Package + publish installers (signed/notarised when creds are configured)
+        run: npm run publish --workspace @arke/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

@@ -50,6 +50,10 @@ import type { InstanceConfig } from "./registry.js";
 const REPO_ROOT = process.env.ARKE_PROJECT_ROOT ?? process.cwd();
 const CONFIG_PATH = process.env.ARKE_CONFIG_PATH ?? resolve(REPO_ROOT, ".arke/config.json");
 const PORT = Number(process.env.ARKE_COORDINATOR_PORT ?? 4319);
+// Bind to LOOPBACK by default (NFR-1/5): the client is always local, so the coordinator must NOT be
+// reachable from other machines — otherwise a packaged desktop app (or `arke up`) would expose an
+// unauthenticated control plane on the network. Override only for a deliberately-shared deployment.
+const HOST = process.env.ARKE_COORDINATOR_HOST ?? "127.0.0.1";
 const TRACE_PATH = process.env.ARKE_TRACE_PATH ?? resolve(REPO_ROOT, ".arke/trace.ndjson");
 const SESSION_STORE_PATH =
   process.env.ARKE_SESSION_STORE_PATH ?? resolve(REPO_ROOT, ".arke/sessions.ndjson");
@@ -107,9 +111,12 @@ export class Coordinator {
       contextFactory?: ContextFactory;
       maxProjects?: number;
       idleTtlMs?: number;
+      /** Interface to bind (default `127.0.0.1` — loopback only; see HOST). */
+      host?: string;
     } = {},
   ) {
     this.port = port;
+    this.host = opts.host ?? HOST;
     this.defaultRoot = resolve(opts.projectRoot ?? REPO_ROOT);
     this.defaultDeps = {
       adapter,
@@ -128,6 +135,7 @@ export class Coordinator {
   }
 
   private readonly port: number;
+  private readonly host: string;
 
   /** Start the WS server + the default project context; resolves with the actual bound port. */
   async start(): Promise<number> {
@@ -138,7 +146,7 @@ export class Coordinator {
     const wss = new WebSocketServer({ server });
     this.wss = wss;
     wss.on("connection", (ws) => void this.onConnection(ws));
-    await new Promise<void>((res) => server.listen(this.port, () => res()));
+    await new Promise<void>((res) => server.listen(this.port, this.host, () => res()));
     const addr = server.address();
     const actual = typeof addr === "object" && addr ? addr.port : this.port;
     console.log(`[coordinator] listening on ws://127.0.0.1:${actual} (webhooks: POST /webhooks/github)`);
@@ -179,6 +187,16 @@ export class Coordinator {
     });
     for (const ctx of this.contexts.values()) await ctx.stop();
     this.contexts.clear();
+  }
+
+  /**
+   * Whether ANY open project context has work in flight (SPEC-022) — a session mid-turn, an open
+   * permission/elicitation, or a queued fan-out task. The embedded desktop shell queries this
+   * in-process to gate quit-confirm and deferred auto-update (authoritative host-side signal).
+   */
+  workInFlight(): boolean {
+    for (const ctx of this.contexts.values()) if (ctx.workInFlight()) return true;
+    return false;
   }
 
   // ---- HTTP (SPEC-008 webhooks) --------------------------------------------

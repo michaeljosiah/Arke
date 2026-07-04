@@ -248,6 +248,23 @@ export class ProjectContext {
   }
 
   /**
+   * Whether this project has work in flight (SPEC-022): a session that is running or blocked on a human
+   * (a permission OR an elicitation), or a queued fan-out task. Derived from the READ MODEL's card
+   * states — `status: running|waiting` and the sticky `needsHuman` gate — so it also catches a task
+   * that is running before its first `message.part` and an elicitation-gated session (which a
+   * `streaming`/`pendingPerms` check alone would miss — review D2). Computed host-side (authoritative),
+   * never trusted from a renderer signal that can go stale across a reconnect. The desktop shell
+   * aggregates this across contexts to gate quit-confirm and auto-update.
+   */
+  workInFlight(): boolean {
+    for (const card of this.read.snapshot()) {
+      if (card.status === "running" || card.status === "waiting" || card.needsHuman) return true;
+    }
+    for (const q of this.fanoutQueues.values()) if (q.length > 0) return true; // queued, not yet dispatched
+    return false;
+  }
+
+  /**
    * The dispatch `model` fragment for an agent (SPEC-016 revised): the concrete model+provider the
    * agent declares in its image `executor`, spread into a {@link SendMessageInput}. An agent that
    * pins no model (or is unknown) yields `{}` — the adapter then omits `model` and the harness uses

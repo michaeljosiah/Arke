@@ -11,9 +11,19 @@ import { OutboundQueue } from './outbound-queue';
  * moved — never set by hand).
  */
 
-const COORDINATOR_URL =
-  (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ARKE_COORDINATOR_URL ??
-  'ws://127.0.0.1:4319';
+/**
+ * Resolve the coordinator URL at connect time (SPEC-022) — NOT as a module-level constant evaluated
+ * once at import. The Electron desktop preload injects `window.arke.coordinator.url` (the coordinator's
+ * actual bound, possibly ephemeral, port); a plain browser has no `window.arke` and falls back to the
+ * build-time env / default. Resolving lazily (inside {@link startLive}) means the bridged URL is used
+ * and a reconnect can never silently revert to the `4319` default. Browser-safe: a no-op fallback when
+ * `window.arke` is absent.
+ */
+function resolveCoordinatorUrl(): string {
+  const bridged = (globalThis as { arke?: { coordinator?: { url?: string } } }).arke?.coordinator?.url;
+  if (typeof bridged === 'string' && bridged) return bridged;
+  return (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ARKE_COORDINATOR_URL ?? 'ws://127.0.0.1:4319';
+}
 
 type Col = 'authoring' | 'review' | 'approved' | 'implementing' | 'needs-human' | 'diff' | 'merged';
 
@@ -626,10 +636,23 @@ export async function openProjectLive(target: { projectId?: string; path?: strin
   return res;
 }
 
+/**
+ * Forward an attention-relevant domain event to the Electron shell's NotificationRouter (SPEC-022),
+ * which de-dups + raises an OS notification. Browser-safe: a no-op when `window.arke` is absent, and
+ * scoped to the trigger/resolve events so the bridge stays quiet.
+ */
+function forwardEventToDesktop(ev: any): void {
+  const notify = (globalThis as { arke?: { notify?: (e: unknown) => void } }).arke?.notify;
+  if (!notify || !ev?.type) return;
+  if (/^(permission\.(asked|replied)|elicitation\.(asked|replied|rejected)|session\.status|panel\.(complete|config-error|reviewer-error))$/.test(ev.type)) {
+    notify(ev);
+  }
+}
+
 function onFrame(frame: any) {
   if (!frame || typeof frame !== 'object') return;
   if (frame.type === 'snapshot' && Array.isArray(frame.cards)) applySnapshot(frame);
-  else if (frame.type === 'event' && frame.event) applyEvent(frame.event);
+  else if (frame.type === 'event' && frame.event) { applyEvent(frame.event); forwardEventToDesktop(frame.event); }
   else if (frame.type === 'response' && pending.has(frame.id)) {
     pending.get(frame.id)!(frame);
     pending.delete(frame.id);
@@ -649,7 +672,7 @@ function onFrame(frame: any) {
 export function startLive(): ArkeTransport {
   if (transport) return transport;
   transport = new ArkeTransport({
-    url: COORDINATOR_URL,
+    url: resolveCoordinatorUrl(),
     onMessage: onFrame,
     baseDelayMs: 600,
     maxDelayMs: 8000,

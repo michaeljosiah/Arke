@@ -7,6 +7,7 @@ export { ClientConnection, type OutboundSocket, type ClientConnectionOptions } f
 export { CoordinatorSessionStore, type OwnershipRecord } from "./session-store.js";
 export { GrantStore } from "./grant-store.js";
 export { Coordinator } from "./server.js";
+export { startCoordinator, type StartCoordinatorOptions, type RunningCoordinator } from "./start.js";
 export { InputValidator, ValidationError } from "./input-validator.js";
 export { FolderInspector, METHOD_READY_SENTINELS, type FolderState, type FolderClassification } from "./folder-inspector.js";
 export { HarnessReachabilityProbe, DEFAULT_PROBE_TIMEOUT_MS, type ReachabilityResult } from "./reachability.js";
