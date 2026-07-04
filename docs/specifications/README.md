@@ -52,6 +52,7 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 018 | [Multi-project workspaces — one coordinator, per-project runners](018.multi-project-workspaces.md) | FR-3/20 (multi-project); NFR-1/4/7 | 2 | 8 |
 | 019 | [Global + project configuration merge and first-run harness setup](019.global-and-project-config-merge.md) | FR-3/4/19; NFR-1; [ADR-0004](../decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md) | 2 | 8 |
 | 020 | [Blank-slate specification authoring & file grounding](020.blank-slate-authoring-and-grounding.md) | FR-1/14/15 (MVP authoring loop) | 1 | 5 |
+| 021 | [Portable agent capabilities — tools, MCP & skills, materialised per harness](021.agent-capabilities-tools-mcp-skills.md) | FR-4; NFR-1; extends SPEC-016 (agent images) + Omnigent `AGENT_YAML_SPEC.md` | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
