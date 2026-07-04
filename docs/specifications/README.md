@@ -52,6 +52,7 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 018 | [Multi-project workspaces — one coordinator, per-project runners](018.multi-project-workspaces.md) | FR-3/20 (multi-project); NFR-1/4/7 | 2 | 8 |
 | 019 | [Global + project configuration merge and first-run harness setup](019.global-and-project-config-merge.md) | FR-3/4/19; NFR-1; [ADR-0004](../decisions/0004-agent-model-vs-omnigent-and-the-substrate-mapping.md) | 2 | 8 |
 | 020 | [Blank-slate specification authoring & file grounding](020.blank-slate-authoring-and-grounding.md) | FR-1/14/15 (MVP authoring loop) | 1 | 5 |
+| 022 | [Arke Desktop — a one-click, native Electron app](022.electron-desktop-app.md) | FR-3 (open project), FR-9/10 (attention); NFR-1/5; packages SPEC-003 + SPEC-016 + SPEC-018; sibling of SPEC-017 (CLI) | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
