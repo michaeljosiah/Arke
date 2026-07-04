@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { DomainEvent } from "@arke/contracts";
 import type {
   AgentImage,
   Capability,
+  CapabilityMaterialisation,
   CreateSessionInput,
   DiffSummary,
   HarnessAdapter,
+  HarnessCapabilities,
   ModelInfo,
   PermissionAck,
   PermissionDecision,
@@ -15,6 +18,7 @@ import type {
   SendMessageInput,
   SendReceipt,
   SessionRef,
+  SkillRef,
   TodoItem,
 } from "@arke/contracts";
 import {
@@ -235,6 +239,91 @@ export class OpenCodeAdapter implements HarnessAdapter {
     await writeFile(join(dir, `${image.name}.md`), this.agentMarkdown(image), "utf8");
     // Sub-agents become their own files (OpenCode links them by parentID at runtime).
     for (const sub of image.subAgents) await this.materializeAgent(sub);
+  }
+
+  /** What OpenCode natively supports (SPEC-021) — docs-derived (opencode.ai/docs), versioned. */
+  capabilitiesManifest(): HarnessCapabilities {
+    return {
+      harness: "opencode",
+      version: "1.17",
+      mcp: { local: true, remote: true },
+      skills: { supported: true, locations: [".opencode/skills", ".claude/skills", ".agents/skills"] },
+      // OpenCode has no Omnigent-style `type: function` python callable (it has MCP + built-ins + plugin tools).
+      functionTools: false,
+      sandbox: false, // advisory today
+      toolGating: "permission", // per-agent `permission` field, incl. `<mcp>_*` wildcards
+      builtinTools: ["bash", "edit", "write", "read", "grep", "glob", "lsp", "apply_patch", "skill", "todowrite", "webfetch", "websearch", "question"],
+    };
+  }
+
+  /**
+   * Materialise an image's tools/MCP/skills into OpenCode's native config (SPEC-021): merge each MCP
+   * server into the project `opencode.json` `mcp` block (writing any `${VAR}` UNRESOLVED — OpenCode
+   * interpolates it from the host env at spawn, so no secret lands in the tracked file, NFR-1), copy
+   * skills under a discovered path, and record anything OpenCode cannot express as `unsupported`.
+   */
+  async materializeCapabilities(image: AgentImage): Promise<CapabilityMaterialisation> {
+    const registered: string[] = [];
+    const unsupported: { name: string; reason: string }[] = [];
+    const mcpBlock: Record<string, unknown> = {};
+
+    for (const [name, tool] of Object.entries(image.tools)) {
+      if (tool.type === "mcp") {
+        mcpBlock[name] =
+          tool.transport === "local"
+            ? { type: "local", command: [tool.command, ...(tool.args ?? [])], ...(tool.environment ? { environment: tool.environment } : {}), ...(tool.enabled === false ? { enabled: false } : {}) }
+            : { type: "remote", url: tool.url, ...(tool.headers ? { headers: tool.headers } : {}), ...(tool.enabled === false ? { enabled: false } : {}) };
+        registered.push(name);
+      } else if (tool.type === "function") {
+        unsupported.push({ name, reason: "OpenCode has no Omnigent-style function tool — use an MCP server or an OpenCode plugin tool" });
+      }
+      // `type: agent` tools are materialised via materializeAgent(subAgents), not here.
+    }
+    if (Object.keys(mcpBlock).length > 0) await this.mergeOpencodeMcp(mcpBlock);
+
+    for (const skill of image.skills) {
+      try {
+        await this.ensureSkillDiscoverable(skill);
+        registered.push(`skill:${skill.name}`);
+      } catch (err) {
+        unsupported.push({ name: `skill:${skill.name}`, reason: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    for (const sub of image.subAgents) {
+      const r = await this.materializeCapabilities(sub);
+      registered.push(...r.registered);
+      unsupported.push(...r.unsupported);
+    }
+    return { registered, unsupported };
+  }
+
+  /** Create-or-merge the `mcp` block in the project `opencode.json`, preserving other servers + keys. */
+  private async mergeOpencodeMcp(mcpBlock: Record<string, unknown>): Promise<void> {
+    const path = join(this.http.directory, "opencode.json");
+    let doc: Record<string, unknown> = { $schema: "https://opencode.ai/config.json" };
+    if (existsSync(path)) {
+      try {
+        doc = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      } catch {
+        /* a corrupt/hand-broken opencode.json → start from a fresh doc rather than throwing */
+      }
+    }
+    const existing = doc.mcp && typeof doc.mcp === "object" ? (doc.mcp as Record<string, unknown>) : {};
+    doc.mcp = { ...existing, ...mcpBlock };
+    await writeFile(path, JSON.stringify(doc, null, 2) + "\n", "utf8");
+  }
+
+  /** Ensure a skill's `SKILL.md` sits under a path OpenCode discovers; copy it into `.opencode/skills/` if not. */
+  private async ensureSkillDiscoverable(skill: SkillRef): Promise<void> {
+    if (!skill.path) return;
+    const p = skill.path.replace(/\\/g, "/");
+    const alreadyDiscovered = [".opencode/skills/", ".claude/skills/", ".agents/skills/"].some((loc) => p.includes(loc));
+    if (alreadyDiscovered) return;
+    const src = dirname(skill.path); // the `skills/<name>/` folder holding SKILL.md
+    const dest = join(this.http.directory, ".opencode", "skills", skill.name);
+    await mkdir(dirname(dest), { recursive: true });
+    await cp(src, dest, { recursive: true });
   }
 
   /**
