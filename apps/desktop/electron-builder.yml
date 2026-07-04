@@ -1,0 +1,57 @@
+# electron-builder config for Arke Desktop (SPEC-022). Produces per-OS installers and (when a GitHub
+# token is present) publishes them as the electron-updater feed.
+#
+# Prerequisite: the React client must be built first (`npm run build -w @arke/client`) so
+# `extraResources` can bundle `packages/client/dist` — the root `npm run build` does this for all
+# workspaces before `npm run package -w @arke/desktop`.
+appId: ai.arke.desktop
+productName: Arke
+copyright: © Arke
+# In this npm workspace `electron` is hoisted to the ROOT node_modules, so electron-builder cannot
+# infer the version from apps/desktop's own node_modules — pin it explicitly (keep in step with the
+# devDependency).
+electronVersion: 33.4.11
+
+directories:
+  output: release
+  buildResources: build
+
+# `dist/main.cjs` is a self-contained esbuild bundle (the coordinator + its deps are inlined), so only
+# the built artefacts + package.json are the app's own files; electron-builder additionally includes the
+# production `node_modules` (electron-updater, the one un-bundled runtime dep).
+files:
+  - dist/**/*
+  - package.json
+
+# Bundle the built React client into the app resources; `main.ts` serves it from
+# `process.resourcesPath/client` over the `app://` protocol (SPEC-022).
+extraResources:
+  - from: ../../packages/client/dist
+    to: client
+
+# Auto-update feed (SPEC-022 Decision #9/#11). GitHub Releases by default; swap for a self-hosted feed
+# by changing `provider`. Publishing is gated on a token at build time (`--publish always` in CI).
+publish:
+  provider: github
+
+# Code-signing + notarisation happen AUTOMATICALLY when the credentials are configured in the build
+# environment (SPEC-022 Decision #11) — with none present the build still produces (unsigned) installers,
+# so CI can validate the pipeline without secrets:
+#   - Windows: CSC_LINK + CSC_KEY_PASSWORD (or an Azure Trusted Signing / EV token)
+#   - macOS:   CSC_LINK + CSC_KEY_PASSWORD to sign; APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID to notarise
+mac:
+  target: [dmg]
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+
+win:
+  target: [nsis]
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target: [AppImage]
+  category: Development

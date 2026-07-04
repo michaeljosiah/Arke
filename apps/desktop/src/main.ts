@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, normalize, sep } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, shell } from "electron";
+import { autoUpdater } from "electron-updater";
 import { startCoordinator, type RunningCoordinator } from "@arke/coordinator";
 import { NotificationRouter, type RouterEvent } from "./notifications.js";
 
@@ -166,6 +167,51 @@ function workInFlight(): boolean {
   }
 }
 
+// ---- auto-update (SPEC-022, electron-updater) ----------------------------------
+// An update may DOWNLOAD in the background any time, but applying it restarts the app — which tears
+// down the embedded coordinator + managed harness — so in managed mode the APPLY is deferred until no
+// work is in flight (attach mode is exempt: the external coordinator survives the restart). Signatures
+// are verified by electron-updater before an update is ever offered.
+let updateReady = false;
+let updatePrompting = false;
+
+async function applyUpdateAndRestart(): Promise<void> {
+  quitting = true; // let the before-quit handler pass through to the updater's restart
+  try {
+    if (!attached) await coordinator?.stop(); // drain the trace + stop the harness first (SPEC-015)
+  } finally {
+    autoUpdater.quitAndInstall(false, true);
+  }
+}
+
+async function maybeApplyUpdate(): Promise<void> {
+  if (!updateReady || updatePrompting || !win) return;
+  if (workInFlight()) return; // defer: re-checked on the interval / when work finishes
+  updatePrompting = true;
+  const { response } = await dialog.showMessageBox(win, {
+    type: "info",
+    buttons: ["Restart & update", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+    message: "A new version of Arke is ready",
+    detail: "Restart to apply the update. Your work is saved.",
+  });
+  updatePrompting = false;
+  if (response === 0) await applyUpdateAndRestart();
+}
+
+function setupAutoUpdate(): void {
+  if (!app.isPackaged) return; // dev runs never self-update
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = false; // we control the apply (defer while busy)
+  autoUpdater.on("update-downloaded", () => { updateReady = true; void maybeApplyUpdate(); });
+  autoUpdater.on("error", (err) => console.error("[arke] auto-update error:", err?.message ?? err));
+  void autoUpdater.checkForUpdates().catch(() => undefined);
+  // Catch an update that was deferred while busy: prompt once work goes quiescent.
+  const timer = setInterval(() => void maybeApplyUpdate(), 60_000);
+  timer.unref?.();
+}
+
 let quitting = false;
 async function gracefulQuit(): Promise<void> {
   if (quitting) return;
@@ -221,6 +267,7 @@ async function main(): Promise<void> {
     return;
   }
   await createWindow(coordinatorUrl);
+  setupAutoUpdate();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0 && coordinatorUrl) void createWindow(coordinatorUrl);
