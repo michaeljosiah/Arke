@@ -15,7 +15,33 @@ permissions:
   contents: write # create the GitHub Release + upload assets
 
 jobs:
+  # Guard: the version tag MUST equal the package versions. The desktop's electron-updater feed
+  # (latest.yml) takes its version from apps/desktop/package.json, NOT the tag — so a drifted tag would
+  # publish an update manifest advertising the wrong version (clients would never see, or wrongly see, the
+  # release). Fail fast here, before anything is built, released, or published.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match package versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          DESKTOP="$(node -p "require('./apps/desktop/package.json').version")"
+          ROOT="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG  desktop=$DESKTOP  root=$ROOT"
+          fail=0
+          if [ "$TAG" != "$DESKTOP" ]; then
+            echo "::error::Tag v$TAG does not match apps/desktop/package.json version $DESKTOP — the electron-updater feed (latest.yml) would advertise the wrong version. Bump the package version or fix the tag."
+            fail=1
+          fi
+          if [ "$TAG" != "$ROOT" ]; then
+            echo "::error::Tag v$TAG does not match root package.json version $ROOT — keep the workspace version in sync with the release tag."
+            fail=1
+          fi
+          [ "$fail" = 0 ] || exit 1
+
   release:
+    needs: verify-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

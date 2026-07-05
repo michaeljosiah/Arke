@@ -4,10 +4,14 @@
   "private": true,
   "description": "Electron desktop shell that embeds the coordinator and serves the React client as one signed app (PRD §8.6, D16; SPEC-022).",
   "author": "Arke",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michaeljosiah/Arke.git"
+  },
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
-    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node20 --external:electron --external:electron-updater --outdir=dist --out-extension:.js=.cjs",
+    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --target=node20 --main-fields=module,main --external:electron --external:electron-updater --outdir=dist --out-extension:.js=.cjs",
     "icons": "node scripts/gen-icons.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
