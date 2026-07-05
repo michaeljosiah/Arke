@@ -127,14 +127,29 @@ export function normalize(
         | undefined;
       if (!s?.id) return { kind: "dead-letter", reason: `${e.type} without session.id` };
       const kind: SessionKind = s.parentID ? "task" : "spec";
+      // Resolve the owning specification WITHOUT the raw-session-id fallback (SPEC-023). The old
+      // `s.title ?? s.id` made a session self-referential (specId === its own `ses_…`), which the read
+      // model then rendered as a duplicate/orphan card. Resolve, in order:
+      //   (1) an identity the adapter already recorded at createSession (authoritative for live work);
+      //   (2) a spec_id encoded in the title (the documented REST-resync recovery — index.ts:414);
+      //   (3) the parent session's specification (a task inherits its authoring parent's spec);
+      // else dead-letter — an unlinkable session is contained, never turned into its own card.
+      const existing = lookup(s.id);
+      // A spec_id is a slug (`SPEC-…` or `untitled-NNN`) — no whitespace and not a `ses_…` ref. A task
+      // description or an auto-generated summary title has spaces, so it is NOT treated as a spec_id and
+      // resolution falls through to the parent authoring session.
+      const fromTitle = s.title && !/^ses_/.test(s.title) && !/\s/.test(s.title) ? s.title : undefined;
+      const fromParent = s.parentID ? lookup(s.parentID)?.specId : undefined;
+      const specId = existing?.specId ?? fromTitle ?? fromParent;
+      if (!specId) {
+        return {
+          kind: "dead-letter",
+          reason: `${e.type} '${s.id}': no spec_id in title and no linkable parent — cannot resolve owning specification`,
+        };
+      }
       return {
         kind: "graph",
-        record: {
-          sessionId: s.id,
-          kind,
-          specId: s.title ?? s.id, // title encodes the spec_id at creation
-          parentSessionId: s.parentID,
-        },
+        record: { sessionId: s.id, kind: existing?.kind ?? kind, specId, parentSessionId: s.parentID },
       };
     }
 

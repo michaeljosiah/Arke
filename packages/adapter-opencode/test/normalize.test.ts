@@ -29,6 +29,41 @@ test("session.idle emits session.status idle + a turn.quiescent receipt (with re
   assert.ok(out.events.some((e) => e.type === "turn.quiescent"), "expected a turn.quiescent receipt");
 });
 
+test("SPEC-023: a task title (with a spec_id) links via the title", () => {
+  const out = normalize(
+    { type: "session.created", properties: { session: { id: "ses_new", parentID: "ses_spec", title: "SPEC-2026-06-28-x" } } },
+    lookup,
+    HARNESS,
+  );
+  assert.equal(out.kind, "graph");
+  if (out.kind !== "graph") return;
+  assert.equal(out.record.specId, "SPEC-2026-06-28-x");
+  assert.equal(out.record.kind, "task");
+});
+
+test("SPEC-023: a session whose title is NOT a spec_id links via its parent authoring session", () => {
+  const out = normalize(
+    { type: "session.created", properties: { session: { id: "ses_new", parentID: "ses_spec", title: "Guard the retry handler" } } },
+    lookup, // ses_spec → SPEC-2026-06-28-x
+    HARNESS,
+  );
+  assert.equal(out.kind, "graph");
+  if (out.kind !== "graph") return;
+  assert.equal(out.record.specId, "SPEC-2026-06-28-x", "resolved from the parent, not the descriptive title");
+  assert.notEqual(out.record.specId, "ses_new", "never the session's own id");
+});
+
+test("SPEC-023: an unlinkable session is dead-lettered, never keyed by its own id", () => {
+  const out = normalize(
+    { type: "session.created", properties: { session: { id: "ses_orphan", title: "some free-form summary" } } },
+    () => undefined, // no identity, no parent
+    HARNESS,
+  );
+  assert.equal(out.kind, "dead-letter");
+  if (out.kind !== "dead-letter") return;
+  assert.match(out.reason, /cannot resolve owning specification/);
+});
+
 test("session.error maps to session.status error", () => {
   const out = normalize(
     { type: "session.error", properties: { sessionID: "ses_task" } },
