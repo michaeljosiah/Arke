@@ -54,6 +54,8 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 020 | [Blank-slate specification authoring & file grounding](020.blank-slate-authoring-and-grounding.md) | FR-1/14/15 (MVP authoring loop) | 1 | 5 |
 | 021 | [Portable agent capabilities — tools, MCP & skills, materialised per harness + UI editor](021.agent-capabilities-tools-mcp-skills.md) | FR-4; NFR-1; extends SPEC-016 (agent images) + Omnigent `AGENT_YAML_SPEC.md` + OpenCode docs | 2 | 13 |
 | 022 | [Arke Desktop — a one-click, native Electron app](022.electron-desktop-app.md) | FR-3 (open project), FR-9/10 (attention); NFR-1/5; packages SPEC-003 + SPEC-016 + SPEC-018; sibling of SPEC-017 (CLI) | 2 | 8 |
+| 023 | [One card per specification — board fold & faithful session linkage](023.one-card-per-spec-board-fold.md) | FR-9; NFR-7; the urgent board fix — supersedes SPEC-010 Decision #4 (`sessionId` card key); amends SPEC-002/010/011 | 2 | 5 |
+| 024 | [Specification lifecycle gating — delivered, decoupled delivery, host-optional governance](024.specification-lifecycle-gating.md) | FR-5/12/16; NFR-1/7; implements the lifecycle governance contract ([`../specification-lifecycle-and-delivery.html`](../specification-lifecycle-and-delivery.html)); amends SPEC-008; depends on SPEC-023 | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
