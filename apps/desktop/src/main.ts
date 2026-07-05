@@ -201,10 +201,12 @@ function wireIpc(): void {
   ipcMain.handle("arke:update-status", () => lastUpdate);
   ipcMain.handle("arke:update-check", async () => {
     if (!app.isPackaged) return (lastUpdate = { state: "dev" }); // no feed in a dev run
+    manualCheck = true; // this check came from About — let its button, not the native modal, be the surface
     broadcastUpdate({ state: "checking" });
     try {
       await autoUpdater.checkForUpdates(); // the events above drive the real state transitions
     } catch (err) {
+      manualCheck = false;
       broadcastUpdate({ state: "error", message: err instanceof Error ? err.message : String(err) });
     }
     return lastUpdate;
@@ -256,6 +258,10 @@ export interface UpdateStatus {
   message?: string;
 }
 let lastUpdate: UpdateStatus = { state: "idle" };
+// True while a check that the user kicked off from Settings › About is in flight. If it results in a
+// download, the About "Restart to update" button is the surface — we suppress the native modal so a single
+// user intent isn't answered by two overlapping prompts. Cleared when the check concludes.
+let manualCheck = false;
 
 function broadcastUpdate(s: UpdateStatus): void {
   lastUpdate = s;
@@ -294,14 +300,19 @@ function setupAutoUpdate(): void {
   autoUpdater.autoInstallOnAppQuit = false; // we control the apply (defer while busy)
   autoUpdater.on("checking-for-update", () => broadcastUpdate({ state: "checking" }));
   autoUpdater.on("update-available", (info) => broadcastUpdate({ state: "available", version: info?.version }));
-  autoUpdater.on("update-not-available", () => broadcastUpdate({ state: "none" }));
+  autoUpdater.on("update-not-available", () => { manualCheck = false; broadcastUpdate({ state: "none" }); });
   autoUpdater.on("download-progress", (p) => broadcastUpdate({ state: "downloading", percent: Math.round(p?.percent ?? 0) }));
   autoUpdater.on("update-downloaded", (info) => {
     updateReady = true;
     broadcastUpdate({ state: "downloaded", version: info?.version });
-    void maybeApplyUpdate();
+    // A background download prompts natively; one the user kicked off from About does NOT — the About
+    // "Restart to update" button is already the surface. The 60s interval still re-offers it later if
+    // it's left unapplied, so a manually-surfaced update is never silently forgotten.
+    const fromAbout = manualCheck;
+    manualCheck = false;
+    if (!fromAbout) void maybeApplyUpdate();
   });
-  autoUpdater.on("error", (err) => broadcastUpdate({ state: "error", message: err?.message ?? String(err) }));
+  autoUpdater.on("error", (err) => { manualCheck = false; broadcastUpdate({ state: "error", message: err?.message ?? String(err) }); });
   void autoUpdater.checkForUpdates().catch(() => undefined);
   // Catch an update that was deferred while busy: prompt once work goes quiescent.
   const timer = setInterval(() => void maybeApplyUpdate(), 60_000);

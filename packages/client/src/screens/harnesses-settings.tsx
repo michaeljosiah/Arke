@@ -98,6 +98,7 @@ function updateLabel(s: DesktopUpdateStatus | null): { text: string; tone: 'mute
     case 'none': return { text: 'Arke is up to date.', tone: 'success' };
     case 'error': return { text: `Update check failed${s.message ? `: ${s.message}` : '.'}`, tone: 'destructive' };
     case 'dev': return { text: 'Development build — self-update is disabled.', tone: 'muted' };
+    case 'idle': return { text: 'Arke checks for updates automatically.', tone: 'muted' };
     default: return { text: '', tone: 'muted' };
   }
 }
