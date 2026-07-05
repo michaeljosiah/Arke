@@ -430,10 +430,10 @@
       <table>
         <thead><tr><th>State</th><th>Home</th><th>Why</th></tr></thead>
         <tbody>
-          <tr><td>The specification</td><td><code>docs/specifications</code> in the repo</td><td>Source of truth; versioned and reviewed as code</td></tr>
-          <tr><td>Code changes</td><td>Git branches / worktrees</td><td>Produced by implementation agents in the harness</td></tr>
+          <tr><td>Specification governance</td><td><code>status:</code> in the spec frontmatter (<code>docs/specifications</code>)</td><td>Source of truth. Governed status — <code>draft → in-review → approved → delivered</code> — moved only by gated ops. Arke-owned; works with no git host</td></tr>
+          <tr><td>Code changes</td><td>Git branches / worktrees</td><td>Produced by implementation agents in the harness, during delivery</td></tr>
           <tr><td>Tickets, work items</td><td>Jira / Azure DevOps</td><td>Projections written by the host's CLIs / MCPs</td></tr>
-          <tr><td>Delivery state</td><td>Coordinator read model, from harness events + VCS</td><td>Computed, never hand-maintained</td></tr>
+          <tr><td>Delivery state</td><td>Coordinator read model, from harness events + VCS</td><td>A <em>projection</em> over an approved spec (git-optional), never hand-maintained; a human move triggers the same gated op a webhook would</td></tr>
           <tr><td>Audit trace</td><td><code>.arke/trace.ndjson</code> (per project)</td><td>Append-only record of every governed action; the audit source of truth (NFR-7)</td></tr>
           <tr><td>Project &amp; tool config</td><td><code>.arke/config.json</code> (project) merged under <code>ARKE_HOME/config.json</code> (machine)</td><td>Committed, non-secret; roster + integrations per project, harness instances per machine (§12.2)</td></tr>
           <tr><td>Project registry &amp; recents</td><td><code>ARKE_HOME</code>, global per machine</td><td>One coordinator supervises many projects; recents span them (SPEC-018)</td></tr>
@@ -442,6 +442,12 @@
         </tbody>
       </table>
     </div>
+
+    <h3>8.4.1 The specification lifecycle: Arke governs, git delivers</h3>
+    <p>The lifecycle is two linked but separable tracks. <strong>Arke governs the specification</strong>: its status — <code>draft → in-review → approved → delivered</code> — lives in the frontmatter and moves only through gated coordinator operations. <strong>Git delivers the code</strong>: once a spec is <code>approved</code>, git and agent activity are the live telemetry of turning it into code — implementing, in PR, merged — which the board projects but never treats as spec status. The <code>merge</code> is the one handshake that writes back to governance, flipping <code>approved → delivered</code> and flattening the deltas into current truth.</p>
+    <p>A card therefore moves only when a governed operation runs and passes its gate; the <em>trigger</em> may be a git-host webhook <strong>or</strong> a human, and neither bypasses the gate. This makes the git host an <strong>optional accelerator</strong>, not a prerequisite: with GitHub or Azure DevOps configured, PR and review events drive the transitions automatically and branch protection hardens the "second, non-author human" rule; without a host, the human triggers the same gated operations from the board and the coordinator performs local merges, so the board still moves. A governance-level badge makes the assurance level explicit (host-enforced, team, or audited solo).</p>
+    <p>Approval agrees the change but does not schedule it: <code>approved</code> is a <strong>resting state</strong> — the backlog — and delivery is an explicit, separately-initiated act that can happen later, on any branch. The full contract, including the per-transition gates, the safe manual-move rules, and the current implementation gaps, is the canonical governance document, <a href="specification-lifecycle-and-delivery.html"><em>Specification Lifecycle &amp; Delivery</em></a>.</p>
+    <div class="callout truth"><div class="lbl">The load-bearing rule</div><p>The specification's markdown is the single source of truth for its governed state. The board, the tickets, and every downstream artifact are read-only projections of that state plus live delivery telemetry. Nothing is written to state by a client, and no governed transition requires a git host to exist.</p></div>
 
     <h3>8.5 The coordinator: one control plane, per-project runners</h3>
     <p>"No backend on the hot path" means no <em>cloud</em> backend, not no process at all. The client talks over a WebSocket to a local coordinator on the harness host, because a browser cannot speak some agents’ native transports and you need one place to normalise heterogeneous provider events, gate startup, order the event stream, and survive reconnects. The coordinator, the agents and the credentials all run on the host; the browser only renders.</p>
@@ -764,7 +770,7 @@
 
     <div class="req"><span class="pri">must</span><div class="id">FR-8</div><div class="ttl">Parallel task execution</div><p>Fan an approved specification into tasks dispatched as asynchronous child sessions, each in its own git worktree or branch, executed concurrently by implementation agents. The orchestrator must not block while they run.</p></div>
 
-    <div class="req"><span class="pri">must</span><div class="id">FR-9</div><div class="ttl">Delivery board as a projection</div><p>Present a kanban board where each specification is exactly one card that walks seven computed lanes — <em>Authoring, In review, Approved, Implementing, Needs human, Diff review, Merged</em> — placed by precedence: an open human gate wins, else a running or finished task session, else the spec's frontmatter status. Task sessions fold into their spec's card; a session is never a card of its own. The column is computed from frontmatter status, session status and pull-request / CI state, updated from the event stream. A card moves because the work moved, not because a person dragged it; no column is ever written from the client.</p></div>
+    <div class="req"><span class="pri">must</span><div class="id">FR-9</div><div class="ttl">Delivery board as a projection</div><p>Present a kanban board where each specification is exactly one card that walks seven computed lanes — <em>Authoring, In review, Approved, Implementing, Needs human, Diff review, Delivered</em> — placed by precedence: an open human gate wins, else a running or finished delivery session, else the spec's frontmatter status. <em>Approved</em> is a resting lane (the backlog): reaching it does not start delivery, which is a separate, explicit action. Task sessions fold into their spec's card; a session is never a card of its own. The column is computed from frontmatter status, session status and pull-request / CI state, updated from the event stream. A card moves only when a gated transition operation runs and passes its gate — the trigger may be a git-host event <em>or</em> a human action — and never because a column was written from the client. Where no git host is configured, the human triggers the same gated operations, so the board still moves; a governance-level indicator makes the assurance level explicit.</p></div>
 
     <div class="req"><span class="pri">must</span><div class="id">FR-10</div><div class="ttl">Human-in-the-loop permissions</div><p>Surface agent permission requests and elicitations in the client and let the Product Engineer decide with <code>once</code> / <code>always</code> / <code>reject</code> (an <code>always</code> is remembered as a durable grant that auto-resolves matching future requests). Couple the gate to the action's risk tier: low-risk runs in-band, medium-risk asks for confirmation, and high-risk — for example money movement — never auto-executes, but is marshalled into a durable proposal executed only by the dispatcher. Confirm decisions by event, send the response back to the harness, and log every decision to the trace.</p></div>
 
@@ -971,7 +977,7 @@
             <rect x="30" y="176" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="197">task session: running</text>
             <rect x="30" y="220" width="240" height="34" rx="7" fill="#FCEEE8" stroke="#DB5430"/><text x="46" y="241">permission / elicitation asked</text>
             <rect x="30" y="264" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="285">session done · diff awaits</text>
-            <rect x="30" y="308" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="329">PR merged webhook</text>
+            <rect x="30" y="308" width="240" height="34" rx="7" fill="#FFFFFF" stroke="#0E4F56"/><text x="46" y="329">merge (PR or local)</text>
           </g>
           <text x="720" y="28" text-anchor="middle" font-size="11" font-weight="600" fill="#2BA1A8">BOARD LANES</text>
           <g font-size="12" fill="#0B2A2F">
@@ -981,7 +987,7 @@
             <rect x="560" y="176" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="197">Implementing</text>
             <rect x="560" y="220" width="320" height="34" rx="7" fill="#FCEEE8" stroke="#DB5430"/><text x="576" y="241">Needs human</text>
             <rect x="560" y="264" width="320" height="34" rx="7" fill="#E5F4F3" stroke="#0E4F56"/><text x="576" y="285">Diff review</text>
-            <rect x="560" y="308" width="320" height="34" rx="7" fill="#0E4F56"/><text x="576" y="329" fill="#fff">Merged</text>
+            <rect x="560" y="308" width="320" height="34" rx="7" fill="#0E4F56"/><text x="576" y="329" fill="#fff">Delivered</text>
           </g>
           <g stroke="#2BA1A8" stroke-width="1.5">
             <line x1="270" y1="61" x2="558" y2="61" marker-end="url(#a4)"/>
