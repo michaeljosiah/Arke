@@ -10,13 +10,21 @@ const e = React.createElement;
 
 /**
  * The supported coding agents for first-run quick setup (SPEC-019). Only OpenCode and Omnigent are
- * supported in this build. OpenCode can be **started** for you (Arke spawns `opencode serve` —
- * managed, SPEC-016) or attached to an existing host. Omnigent is a substrate choice: it prompts for
+ * actually connectable in this build. OpenCode can be **started** for you (Arke spawns `opencode serve`
+ * — managed, SPEC-016) or attached to an existing host. Omnigent is a substrate choice: it prompts for
  * an Omnigent URL the coordinator validates. `driver` is sent verbatim to `harness.connect`.
+ *
+ * Claude Code and Codex are listed for roster visibility (design parity) but are `comingSoon: true` —
+ * there is no harness adapter for either yet (that's a build on the scale of the OpenCode adapter,
+ * SPEC-002, not a UI change), so their tiles are inert and never selectable.
  */
 const HARNESS_SETUP = [
-  { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', recommended: true, note: 'open source · self-hostable · the reference harness', install: 'curl -fsSL https://opencode.ai/install | sh', start: 'opencode serve --port 4096' },
-  { id: 'omnigent', name: 'Omnigent', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
+  { id: 'opencode', name: 'OpenCode', icon: 'server', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', recommended: true, note: 'open source · self-hostable · the reference harness', install: 'curl -fsSL https://opencode.ai/install | sh', start: 'opencode serve --port 4096' },
+  // comingSoon entries are never selectable, so `driver`/`scheme`/`host`/`note` are unused filler kept
+  // only so the union shape matches the other entries (avoids `as any` at every shared-field access site).
+  { id: 'claude-code', name: 'Claude Code', icon: 'sparkle', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
+  { id: 'codex', name: 'Codex', icon: 'cpu', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
+  { id: 'omnigent', name: 'Omnigent', icon: 'layers', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
 ] as const;
 
 /**
@@ -53,13 +61,21 @@ function HarnessSetup() {
     e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
     e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
   return e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
-    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 8 } }, 'Choose your coding agent'),
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 8 } }, 'Coding agents on this host'),
     e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 } },
-      HARNESS_SETUP.map((x) => e('button', { key: x.id, onClick: () => setSel(x.id),
-        style: { display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px', borderRadius: 'var(--radius-md)', cursor: 'pointer', border: '1px solid ' + (sel === x.id ? 'var(--foreground)' : 'var(--border)'), background: sel === x.id ? 'var(--accent)' : 'var(--card)', fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--foreground)' } },
-        e('span', { style: { display: 'flex', color: sel === x.id ? 'var(--foreground)' : 'var(--muted-foreground)' } }, e(Icon, { name: 'server', size: 14 })),
-        x.name,
-        (x as any).recommended ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 5px' } }, 'recommended') : null))),
+      HARNESS_SETUP.map((x) => {
+        const selected = sel === x.id;
+        const disabled = !!(x as any).comingSoon;
+        const caption = disabled ? 'Coming soon' : (x as any).recommended ? 'recommended' : (x as any).substrate ? 'substrate' : '';
+        return e('button', { key: x.id, onClick: disabled ? undefined : () => setSel(x.id), disabled,
+          style: { display: 'flex', flexDirection: 'column', gap: 8, width: 118, padding: '11px 12px', borderRadius: 'var(--radius-lg)', border: '1px solid ' + (selected ? 'var(--foreground)' : 'var(--border)'), background: disabled ? 'var(--muted)' : 'var(--card)', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 } },
+          e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' } },
+            e('span', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 'var(--radius-md)', background: 'var(--secondary)', color: 'var(--muted-foreground)' } }, e(Icon, { name: (x as any).icon, size: 15 })),
+            selected ? e('span', { style: { display: 'flex', color: 'var(--foreground)' } }, e(Icon, { name: 'check', size: 14 })) : null),
+          e('div', { style: { textAlign: 'left' } },
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' } }, x.name),
+            caption ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 } }, caption) : null));
+      })),
     e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note),
     // OpenCode: install/start reference + a primary "Start OpenCode" (managed) + a secondary attach row.
     (h as any).substrate
@@ -253,7 +269,7 @@ export function Picker() {
                 e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
                 e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'No coding agent is running'),
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Arke runs on a coding agent on the host. Install it, start it, or point at an existing host.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
+                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Start an installed agent below, or connect to a known URL.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
         showQuickSetup
           ? e(HarnessSetup)
           : (probe === 'unreachable') || setup
