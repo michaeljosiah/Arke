@@ -7,12 +7,16 @@ const e = React.createElement;
 
 export function LaunchScreen({ onDone }: { onDone: () => void }) {
   const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // In the desktop shell the loading screen is held for at least 5s while opencode pre-warms in the
+  // background (SPEC-022); a plain browser keeps the shorter splash. Browser-safe: `window.arke` is only
+  // present inside Electron.
+  const desktop = typeof window !== 'undefined' && !!(window as unknown as { arke?: unknown }).arke;
 
   React.useEffect(() => {
-    const delay = reduced ? 0 : 2200;
+    const delay = desktop ? 5000 : reduced ? 0 : 2200;
     const t = setTimeout(onDone, delay);
     return () => clearTimeout(t);
-  }, [onDone, reduced]);
+  }, [onDone, reduced, desktop]);
 
   return e('div', { className: 'arke-launch-stage', 'data-screen-label': 'Arke launch screen' },
     e('div', { className: 'arke-launch-grid' }),
