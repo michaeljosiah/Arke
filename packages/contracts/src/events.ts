@@ -47,6 +47,9 @@ export const SpecStatusEvent = base.extend({
   status: SpecStatus,
   // SPEC-008: why the status changed (pr-closed | pr-reopened | material-change | approved | merged …).
   reason: z.string().optional(),
+  // SPEC-024: for a human-triggered (manual) transition, the in-app actor who moved it. Absent for a
+  // webhook-triggered transition. Recorded so a manual move is attributable (`reason: "manual"`).
+  actor: z.string().optional(),
 });
 
 /**
@@ -423,6 +426,15 @@ export const ReviewGateFailedEvent = base.extend({
   reason: z.string(),
 });
 
+/** The well-formedness gate rejected a promotion of a malformed draft (SPEC-024). `missing` names each
+ *  absent element ("requirements section" | "normative statements" | "scenarios") so the cockpit can
+ *  tell the author exactly what to add before the draft can advance out of `draft`. */
+export const SpecMalformedEvent = base.extend({
+  type: z.literal("spec.malformed"),
+  specId: z.string(),
+  missing: z.array(z.string()),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -460,6 +472,7 @@ export const DomainEvent = z.discriminatedUnion("type", [
   PanelConfigErrorEvent,
   PanelStaleFileWarningEvent,
   ReviewGateFailedEvent,
+  SpecMalformedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
@@ -483,6 +496,6 @@ export const BoardColumn = z.enum([
   "implementing",
   "needs-human",
   "diff",
-  "merged",
+  "delivered", // terminal (SPEC-024); renamed from `merged` — names the outcome, not the git verb
 ]);
 export type BoardColumn = z.infer<typeof BoardColumn>;

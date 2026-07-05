@@ -472,17 +472,22 @@ public sealed class GenerationRejectCommand : AsyncCommand<GenerationRejectComma
         Ops.RunAsync(s, "generation.reject", new { specId = s.SpecId, proposalId = s.ProposalId });
 }
 
-/// <summary>`arke spec promote` — human board correction: advance a draft to in-review (SPEC-010).</summary>
+/// <summary>`arke spec promote` — advance a draft to in-review. SPEC-024 removed the ungated
+/// `spec.promote` door: this now routes through the SAME gated `approveDraft` op as `spec approve`
+/// (well-formedness → completed review panel → no running authoring session → branch guard → git).</summary>
 public sealed class SpecPromoteCommand : AsyncCommand<SpecPromoteCommand.Settings>
 {
     public sealed class Settings : GlobalSettings
     {
         [CommandArgument(0, "<SPEC_ID>")]
         public string SpecId { get; set; } = "";
+
+        [CommandOption("--branch <BRANCH>")]
+        public string? Branch { get; set; }
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "spec.promote", new { specId = s.SpecId });
+        Ops.RunAsync(s, "approveDraft", new { specId = s.SpecId, branch = s.Branch });
 }
 
 /// <summary>`arke spec approve` — branch-guarded commit + status advance to in-review (SPEC-006).</summary>

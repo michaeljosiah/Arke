@@ -223,8 +223,8 @@ export function KanbanCard({ taskId, title, status, harness, model, needsHuman }
 // ---------- SpecCard ----------
 export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
   const [hover, setHover] = React.useState(false);
-  const TONE = { draft: 'var(--foreground)', 'in-review': 'var(--warning)', approved: 'var(--success)', merged: 'var(--neutral-400)' };
-  const STATUS_LABEL = { draft: 'Draft', 'in-review': 'In review', approved: 'Approved', merged: 'Merged' };
+  const TONE = { draft: 'var(--foreground)', 'in-review': 'var(--warning)', approved: 'var(--success)', delivered: 'var(--neutral-400)' };
+  const STATUS_LABEL = { draft: 'Draft', 'in-review': 'In review', approved: 'Approved', delivered: 'Delivered' };
   return e('div', {
     onClick,
     onMouseEnter: () => setHover(true), onMouseLeave: () => setHover(false),
@@ -235,7 +235,7 @@ export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
     },
   },
     e('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 } },
-      e('span', { style: { flex: 'none', marginTop: 2, color: TONE[status] || 'var(--neutral-400)' } }, e(StatusDot, { status: status === 'approved' ? 'agree' : status === 'merged' ? 'idle' : status === 'in-review' ? 'waiting' : 'running', pulse: status === 'draft' })),
+      e('span', { style: { flex: 'none', marginTop: 2, color: TONE[status] || 'var(--neutral-400)' } }, e(StatusDot, { status: status === 'approved' ? 'agree' : status === 'delivered' ? 'idle' : status === 'in-review' ? 'waiting' : 'running', pulse: status === 'draft' })),
       e('div', { style: { flex: 1, minWidth: 0 } },
         e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600, color: 'var(--foreground)', marginBottom: 3, lineHeight: 1.35 } }, title),
         e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)' } }, specId),

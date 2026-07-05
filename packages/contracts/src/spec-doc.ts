@@ -68,7 +68,10 @@ export function parseFrontmatter(md: string): SplitFrontmatter {
   const inner = text.slice(text.indexOf("\n") + 1, end);
   const body = afterFence === -1 ? "" : text.slice(afterFence + 1);
   const data: Record<string, string> = {};
-  for (const line of inner.split("\n")) {
+  for (const rawLine of inner.split("\n")) {
+    // Strip a trailing CR so CRLF frontmatter (git `autocrlf` checkout on Windows) parses: `.` in the
+    // value regex does not match `\r`, so without this every key silently failed and the doc parsed empty.
+    const line = rawLine.replace(/\r$/, "");
     const m = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
     if (m) data[m[1]!] = normalizeScalar(m[2]!.trim());
   }
@@ -157,6 +160,37 @@ function parseRequirements(md: string): ParsedRequirement[] {
   }
   flush();
   return out;
+}
+
+/**
+ * Well-formedness gate for promoting a draft out of `draft` (SPEC-024). This is deliberately MORE than
+ * {@link parseSpecDoc}'s section-presence walk: `SPEC_ANATOMY` models section headings but has no notion
+ * of normative SHALL/MUST statements or WHEN/THEN scenarios, so this ADDS that parsing. A draft may not
+ * advance to `in-review` unless (a) the Requirements section is present and non-empty, (b) at least one
+ * requirement carries a SHALL or MUST statement, and (c) at least one `#### Scenario:` block contains
+ * both a WHEN and a THEN. `missing` names each absent element — `"requirements section"` |
+ * `"normative statements"` | `"scenarios"` — so the cockpit can tell the author exactly what to add.
+ */
+export function validateWellFormed(md: string): { ok: boolean; missing: string[] } {
+  const missing: string[] = [];
+  const { body } = parseFrontmatter(md);
+  const requirements = parseSpecDoc(md).sections.find((s) => s.key === "requirements");
+  const reqMd = requirements?.markdown ?? "";
+  // (a) the Requirements section — the one SPEC_ANATOMY section that carries the normative content —
+  // must be present and non-empty; a draft with no requirements has nothing to review.
+  if (!requirements?.present || reqMd.trim() === "") missing.push("requirements section");
+  // (b) at least one normative statement (SHALL or MUST) in the requirements prose.
+  if (!/\b(?:SHALL|MUST)\b/.test(reqMd)) missing.push("normative statements");
+  // (c) at least one acceptance scenario with both a trigger and an outcome. Scan each
+  // `#### Scenario:` block (up to the next heading) for a WHEN and a THEN, case-insensitively and
+  // tolerant of markdown emphasis (`- **WHEN**`).
+  const scenarios = body.split(/^####\s+Scenario:/im).slice(1);
+  const hasWhenThen = scenarios.some((block) => {
+    const upToNextHeading = block.split(/^#{2,4}\s+/m)[0] ?? block;
+    return /\bWHEN\b/i.test(upToNextHeading) && /\bTHEN\b/i.test(upToNextHeading);
+  });
+  if (!hasWhenThen) missing.push("scenarios");
+  return { ok: missing.length === 0, missing };
 }
 
 /** Rewrite the `status:` line in the frontmatter (inserting one if absent). */

@@ -459,7 +459,7 @@ export function Library() {
     { id: 'draft', label: 'Draft', count: counts.draft || 0 },
     { id: 'in-review', label: 'In review', count: counts['in-review'] || 0 },
     { id: 'approved', label: 'Approved', count: counts.approved || 0 },
-    { id: 'merged', label: 'Merged', count: counts.merged || 0 },
+    { id: 'delivered', label: 'Delivered', count: counts.delivered || 0 },
   ];
   const ql = q.toLowerCase();
   // Search by title, specId, capability, or status (SPEC-008).

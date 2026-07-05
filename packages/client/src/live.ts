@@ -25,7 +25,7 @@ function resolveCoordinatorUrl(): string {
   return (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ARKE_COORDINATOR_URL ?? 'ws://127.0.0.1:4319';
 }
 
-type Col = 'authoring' | 'review' | 'approved' | 'implementing' | 'needs-human' | 'diff' | 'merged';
+type Col = 'authoring' | 'review' | 'approved' | 'implementing' | 'needs-human' | 'diff' | 'delivered';
 
 /** A harness session folded onto its specification's card (SPEC-023). Session detail reads these. */
 interface LiveSession {
@@ -71,13 +71,13 @@ function deriveColumn(card: LiveCard): Col {
     case 'draft': return 'authoring';
     case 'in-review': return 'review';
     case 'approved': return 'approved';
-    case 'merged': return 'merged';
+    case 'delivered': return 'delivered';
     default: return 'authoring';
   }
 }
 
 function progressFor(status: string, col: Col): number {
-  if (status === 'done' || col === 'merged') return 100;
+  if (status === 'done' || col === 'delivered') return 100;
   if (status === 'waiting') return 80;
   if (status === 'running') return 55;
   if (status === 'error') return 100;
@@ -931,9 +931,33 @@ export function reconnectLive(): void {
   startLive();
 }
 
-/** Promote a draft spec to in-review from the board (SPEC-010) — a governed coordinator command,
- *  refused while offline (not queued), exactly like approve/convene. */
+/** Promote a draft spec to in-review from the board (SPEC-010). SPEC-024 removed the ungated
+ *  `spec.promote` door: promotion now routes through the SAME gated `approveDraft` op as the cockpit's
+ *  approve — well-formedness, a completed review panel, no running authoring session, and the branch
+ *  guard all apply. Refused (not queued) while offline. */
 export function promoteSpecLive(specId: string): Promise<any> {
   if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to promote" });
-  return liveRequest("spec.promote", { specId }, 30000);
+  return liveRequest("approveDraft", { specId }, 30000);
+}
+
+/** Deliver an approved spec (SPEC-024) — the explicit, decoupled start of delivery. Approval parks a
+ *  spec in the `approved` backlog; this fans the task list out and proposes downstream artefacts. Like
+ *  promote, it is a governed command, refused (not queued) while offline. */
+export function deliverSpecLive(specId: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to deliver" });
+  return liveRequest("spec.deliver", { specId }, 30000);
+}
+
+/** A human manual board move (SPEC-024): dispatch the gated `spec.transition` op so the SAME gate runs
+ *  as for a webhook. The client only offers legal-adjacent targets; the server is the real boundary and
+ *  refuses any illegal/non-adjacent move regardless of caller. `actor` attributes a team-mode approval. */
+export function transitionSpecLive(specId: string, to: string, actor?: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to move" });
+  return liveRequest("spec.transition", { specId, to, actor }, 30000);
+}
+
+/** Fetch the host-optional governance assurance level (SPEC-024) into the store for the board badge. */
+export async function fetchGovernance(): Promise<void> {
+  const res = await liveRequest("governance.status");
+  if (res?.ok && res.result) store.set({ governance: res.result });
 }

@@ -250,8 +250,8 @@ export class ReadModel {
         return "review";
       case "approved":
         return "approved";
-      case "merged":
-        return "merged";
+      case "delivered":
+        return "delivered";
       default:
         return "authoring";
     }

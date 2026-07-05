@@ -69,6 +69,20 @@ test("a created session immediately appears in session.list", async () => {
   ws.close();
 });
 
+test("spec.deliver is a registered op and enforces its precondition (SPEC-024)", async () => {
+  const { c, port } = await coordinator();
+  after(() => c.stop());
+  const { ws, request } = await connect(port);
+  // Delivery of a spec that isn't on disk is refused with a structured error — NOT "unknown op".
+  // This proves the op is dispatched (decoupled delivery door exists) and fails closed.
+  const res = await request("spec.deliver", { specId: "SPEC-NOPE" });
+  assert.equal(res.ok, true, "the command surface accepts the op");
+  assert.equal(res.result.ok, false, "delivery is refused");
+  assert.doesNotMatch(res.result.error ?? "", /unknown op/, "the op is registered, not unknown");
+  assert.match(res.result.error ?? "", /no spec/, "refused because the spec does not exist");
+  ws.close();
+});
+
 test("an unknown op returns a structured error, not a crash", async () => {
   const { c, port } = await coordinator();
   after(() => c.stop());

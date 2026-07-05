@@ -25,8 +25,8 @@ const SPECS = [
   { specId: 'SPEC-016', slug: 'webhook-verify', fmt: 'md', title: 'Webhook signature verification', status: 'draft', owner: 'priya.n', tasks: 0, updated: 'authoring now', branch: 'spec/webhook-verify' },
   { specId: 'SPEC-014', slug: 'payment-retry', fmt: 'md', title: 'Payment retry with idempotency keys', status: 'in-review', owner: 'priya.n', tasks: 6, updated: '12m ago', branch: 'spec/payment-retry' },
   { specId: 'SPEC-013', slug: 'rate-limits', fmt: 'html', title: 'Tenant-scoped API rate limits', status: 'approved', owner: 'marco.f', tasks: 5, updated: '1h ago', branch: 'spec/rate-limits' },
-  { specId: 'SPEC-012', slug: 'asset-tagging', fmt: 'md', title: 'Asset tagging taxonomy', status: 'merged', owner: 'priya.n', tasks: 4, updated: 'merged 2d ago', branch: 'spec/asset-tagging' },
-  { specId: 'SPEC-011', slug: 'audit-export', fmt: 'html', title: 'Audit log CSV export', status: 'merged', owner: 'marco.f', tasks: 3, updated: 'merged 4d ago', branch: 'spec/audit-export' },
+  { specId: 'SPEC-012', slug: 'asset-tagging', fmt: 'md', title: 'Asset tagging taxonomy', status: 'delivered', owner: 'priya.n', tasks: 4, updated: 'delivered 2d ago', branch: 'spec/asset-tagging' },
+  { specId: 'SPEC-011', slug: 'audit-export', fmt: 'html', title: 'Audit log CSV export', status: 'delivered', owner: 'marco.f', tasks: 3, updated: 'delivered 4d ago', branch: 'spec/audit-export' },
   { specId: 'SPEC-010', slug: 'sso-okta', fmt: 'md', title: 'SSO via Okta SAML', status: 'approved', owner: 'dana.k', tasks: 7, updated: '3h ago', branch: 'spec/sso-okta' },
 ];
 
@@ -38,8 +38,8 @@ const CARDS = [
   { id: 'T-5', kind: 'task', title: 'Backfill processed events', col: 'implementing', status: 'waiting', needsHuman: true, harness: 'Claude Code', model: 'Sonnet', progress: 80, specId: 'SPEC-014' },
   { id: 'T-2', kind: 'task', title: 'Idempotency key column + index', col: 'diff', status: 'done', harness: 'OpenCode', model: 'mid-tier', progress: 100, specId: 'SPEC-014', diff: { added: 84, removed: 12, files: 4 } },
   { id: 'T-9', kind: 'task', title: 'Rate-limit middleware', col: 'implementing', status: 'running', harness: 'OpenCode', model: 'mid-tier', progress: 51, specId: 'SPEC-013' },
-  { id: 'SPEC-012', kind: 'spec', title: 'Asset tagging taxonomy', col: 'merged', status: 'done', harness: 'OpenCode', model: 'mid-tier', progress: 100, specId: 'SPEC-012' },
-  { id: 'SPEC-011', kind: 'spec', title: 'Audit log CSV export', col: 'merged', status: 'done', harness: 'OpenCode', model: 'mid-tier', progress: 100, specId: 'SPEC-011' },
+  { id: 'SPEC-012', kind: 'spec', title: 'Asset tagging taxonomy', col: 'delivered', status: 'done', harness: 'OpenCode', model: 'mid-tier', progress: 100, specId: 'SPEC-012' },
+  { id: 'SPEC-011', kind: 'spec', title: 'Audit log CSV export', col: 'delivered', status: 'done', harness: 'OpenCode', model: 'mid-tier', progress: 100, specId: 'SPEC-011' },
 ];
 
 const EVENTS = [
@@ -124,6 +124,9 @@ export const store = createStore({
   agents: DEMO ? AGENTS : [],
   harnesses: DEMO ? HARNESSES : [],
   integrations: DEMO ? INTEGRATIONS : [],
+  // Host-optional governance assurance level (SPEC-024): { level, hostConfigured }, filled from the
+  // coordinator's governance.status. In the offline demo, show the host-less 'solo' baseline.
+  governance: DEMO ? { level: 'solo', hostConfigured: false } : null,
   tiers: DEMO ? TIERS : [],
   // Roster resolution table (role → instance → tier label) from the live registry (SPEC-005).
   roster: [],
@@ -195,7 +198,7 @@ function markNotifsRead() {
   store.set((s) => ({ notifs: s.notifs.map((n) => ({ ...n, read: true })) }));
 }
 
-const COL_ORDER = ['authoring', 'review', 'implementing', 'diff', 'merged'];
+const COL_ORDER = ['authoring', 'review', 'implementing', 'diff', 'delivered'];
 
 function moveCard(id, col, patch) {
   store.set((s) => ({ cards: s.cards.map((c) => c.id === id ? { ...c, col, ...patch } : c) }));
@@ -283,7 +286,7 @@ function stop() { if (timer) { clearInterval(timer); timer = null; } }
 function acceptDiff(id) {
   const s = store.get();
   const card = s.cards.find((c) => c.id === id);
-  moveCard(id, 'merged', { status: 'done' });
+  moveCard(id, 'delivered', { status: 'done' });
   logEvent('pr.merged', id, 'pr.merged · ' + id + ' · squash-merged into main');
   logAudit({ actor: 'marco.f', kind: 'approval', text: 'Reviewer approved & merged ' + id, detail: card ? card.title : '', status: 'ok' });
   notify('merge', id + ' merged into main', 'board');
