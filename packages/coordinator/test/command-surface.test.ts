@@ -60,9 +60,11 @@ test("a created session immediately appears in session.list", async () => {
   assert.equal(created.ok, true);
   const id = created.result.sessionId;
   const list = await request("session.list");
+  // Sessions fold into their spec's card (SPEC-023): the session appears in a card's `sessions[]`,
+  // not as a top-level card keyed by the session id.
   assert.ok(
-    list.result.some((card: { id: string }) => card.id === id),
-    "session.list should include the just-created session",
+    list.result.some((card: { sessions?: { sessionId: string }[] }) => (card.sessions ?? []).some((s) => s.sessionId === id)),
+    "session.list should include the just-created session, folded into its spec's card",
   );
   ws.close();
 });

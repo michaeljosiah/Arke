@@ -27,31 +27,47 @@ function resolveCoordinatorUrl(): string {
 
 type Col = 'authoring' | 'review' | 'approved' | 'implementing' | 'needs-human' | 'diff' | 'merged';
 
-interface LiveCard {
-  id: string;
-  specId: string;
+/** A harness session folded onto its specification's card (SPEC-023). Session detail reads these. */
+interface LiveSession {
+  sessionId: string;
   kind: 'spec' | 'task';
-  title: string;
-  col: Col;
   status: string;
-  harness?: string;
   model?: string;
+  harness?: string;
   needsHuman: boolean;
-  progress: number;
   transcript: any[];
   diff?: { added: number; removed: number; files: number };
 }
 
+/** One card per specification (SPEC-023): its harness sessions fold into `sessions[]`. */
+interface LiveCard {
+  id: string; // specId — the card identity, never a sessionId
+  specId: string;
+  title: string;
+  col: Col;
+  status: string; // spec frontmatter status
+  harness?: string;
+  model?: string;
+  needsHuman: boolean;
+  progress: number;
+  sessions: LiveSession[];
+}
+
+const FAILED_STATUSES = new Set(['interrupted', 'error']);
+
 let transport: ArkeTransport | null = null;
-const cards = new Map<string, LiveCard>();
+const cards = new Map<string, LiveCard>(); // keyed by specId
+const sessionSpec = new Map<string, string>(); // sessionId → specId (so per-session events find their card)
 const specStatus = new Map<string, string>();
 const reachByEndpoint = new Map<string, { reachable: boolean; reason?: string; partial?: boolean }>();
 let evSeq = 0;
 
-function deriveColumn(card: LiveCard, ss?: string): Col {
-  if (card.needsHuman) return 'needs-human';
-  if (card.kind === 'task') return card.status === 'done' ? 'diff' : 'implementing';
-  switch (ss) {
+function deriveColumn(card: LiveCard): Col {
+  const tasks = card.sessions.filter((s) => s.kind === 'task');
+  if (card.needsHuman || tasks.some((s) => FAILED_STATUSES.has(s.status))) return 'needs-human';
+  if (tasks.some((s) => s.status === 'running')) return 'implementing';
+  if (tasks.some((s) => s.status === 'done')) return 'diff';
+  switch (card.status) {
     case 'draft': return 'authoring';
     case 'in-review': return 'review';
     case 'approved': return 'approved';
@@ -68,23 +84,46 @@ function progressFor(status: string, col: Col): number {
   return 12;
 }
 
-function ensureCard(id: string, specId: string, kind: 'spec' | 'task'): LiveCard {
-  let c = cards.get(id);
+function ensureCard(specId: string): LiveCard {
+  let c = cards.get(specId);
   if (!c) {
-    c = { id, specId, kind, title: id, col: 'authoring', status: 'idle', needsHuman: false, progress: 12, transcript: [] };
-    cards.set(id, c);
+    c = { id: specId, specId, title: specId, col: 'authoring', status: specStatus.get(specId) ?? 'draft', needsHuman: false, progress: 12, sessions: [] };
+    cards.set(specId, c);
   }
   return c;
 }
 
+function ensureSession(card: LiveCard, sessionId: string, kind: 'spec' | 'task'): LiveSession {
+  sessionSpec.set(sessionId, card.specId);
+  let s = card.sessions.find((x) => x.sessionId === sessionId);
+  if (!s) {
+    s = { sessionId, kind, status: 'idle', needsHuman: false, transcript: [] };
+    card.sessions.push(s);
+  }
+  return s;
+}
+
+/** The card owning a session, via the session→spec index (populated on session.status / snapshot). */
+function cardForSession(sessionId: string): LiveCard | undefined {
+  const specId = sessionSpec.get(sessionId);
+  return specId ? cards.get(specId) : undefined;
+}
+
+/** Recompute the card's aggregate needsHuman + column + progress from all folded sessions (SPEC-023). */
+function recompute(card: LiveCard) {
+  card.needsHuman = card.sessions.some((s) => s.needsHuman);
+  card.col = deriveColumn(card);
+  card.progress = progressFor(card.sessions.find((s) => s.kind === 'task')?.status ?? card.status, card.col);
+}
+
 const MAX_TRANSCRIPT = 100;
 
-function transcriptEntry(card: LiveCard, messageId: string, role: string) {
-  let entry = card.transcript.find((t) => t.messageId === messageId);
+function transcriptEntry(session: LiveSession, messageId: string, role: string) {
+  let entry = session.transcript.find((t) => t.messageId === messageId);
   if (!entry) {
     entry = { messageId, role, text: '', toolCalls: [], isStreaming: true };
-    card.transcript.push(entry);
-    if (card.transcript.length > MAX_TRANSCRIPT) card.transcript.shift();
+    session.transcript.push(entry);
+    if (session.transcript.length > MAX_TRANSCRIPT) session.transcript.shift();
   }
   return entry;
 }
@@ -103,8 +142,9 @@ function applyEvent(ev: any) {
   switch (ev.type) {
     case 'spec.status': {
       specStatus.set(ev.specId, ev.status);
-      const c = ensureCard(ev.specId, ev.specId, 'spec');
-      c.col = deriveColumn(c, ev.status);
+      const c = ensureCard(ev.specId);
+      c.status = ev.status;
+      recompute(c);
       // SPEC-008: live-update the spec library badge for this spec (no reload).
       store.set((s: any) => ({
         specs: (s.specs || []).map((sp: any) => sp.specId === ev.specId ? { ...sp, status: ev.status } : sp),
@@ -119,13 +159,13 @@ function applyEvent(ev: any) {
       if (oldId !== newId) {
         const st = specStatus.get(oldId);
         if (st !== undefined) { specStatus.delete(oldId); specStatus.set(newId, st); }
-        for (const c of cards.values()) if (c.specId === oldId) c.specId = newId;
         const specCard = cards.get(oldId);
         if (specCard) {
           cards.delete(oldId);
           specCard.id = newId; specCard.specId = newId;
           if (specCard.title === oldId) specCard.title = newId;
           cards.set(newId, specCard);
+          for (const s of specCard.sessions) sessionSpec.set(s.sessionId, newId);
         }
       }
       store.set((s: any) => {
@@ -193,19 +233,22 @@ function applyEvent(ev: any) {
       break;
     }
     case 'session.status': {
-      const c = ensureCard(ev.sessionId, ev.specId, ev.kind);
-      c.status = ev.status;
+      const c = ensureCard(ev.specId);
+      const s = ensureSession(c, ev.sessionId, ev.kind);
+      s.status = ev.status;
+      if (ev.model) s.model = ev.model;
+      s.harness = ev.harness;
+      s.needsHuman = ev.status === 'waiting' || s.needsHuman;
       if (ev.model) c.model = ev.model;
-      c.harness = ev.harness;
-      c.needsHuman = ev.status === 'waiting';
-      c.col = deriveColumn(c, specStatus.get(ev.specId));
-      c.progress = progressFor(c.status, c.col);
+      if (ev.harness) c.harness = ev.harness;
+      recompute(c);
       if (ev.status === 'running') rail('session.busy', `session.busy · ${ev.sessionId} · running`, ts);
       break;
     }
     case 'permission.asked': {
-      const c = cards.get(ev.sessionId);
-      if (c) { c.needsHuman = true; c.col = 'needs-human'; }
+      const c = cardForSession(ev.sessionId);
+      const s = c?.sessions.find((x) => x.sessionId === ev.sessionId);
+      if (c && s) { s.needsHuman = true; recompute(c); }
       // Raise the live approval overlay (SPEC-016). Auto-granted asks never reach the client.
       store.set({
         permission: {
@@ -218,27 +261,28 @@ function applyEvent(ev: any) {
       break;
     }
     case 'permission.replied': {
-      const c = cards.get(ev.sessionId);
-      if (c) { c.needsHuman = false; c.col = deriveColumn(c, specStatus.get(c.specId)); }
+      const c = cardForSession(ev.sessionId);
+      const s = c?.sessions.find((x) => x.sessionId === ev.sessionId);
+      if (c && s) { s.needsHuman = false; recompute(c); }
       const cur: any = store.get().permission;
       if (cur && cur.permissionId === ev.permissionId) store.set({ permission: null });
       rail(ev.granted ? 'permission.granted' : 'permission.denied', `permission.${ev.granted ? 'granted' : 'denied'} · ${ev.sessionId}`, ts);
       break;
     }
     case 'message.part': {
-      const c = cards.get(ev.sessionId);
-      if (c) { const en = transcriptEntry(c, ev.messageId, ev.role); en.text += ev.delta; en.isStreaming = !ev.done; }
+      const s = cardForSession(ev.sessionId)?.sessions.find((x) => x.sessionId === ev.sessionId);
+      if (s) { const en = transcriptEntry(s, ev.messageId, ev.role); en.text += ev.delta; en.isStreaming = !ev.done; }
       rail('session.busy', `session.busy · ${ev.sessionId} · ${ev.delta.trim()}`, ts);
       break;
     }
     case 'message.updated': {
-      const c = cards.get(ev.sessionId);
-      if (c) { const en = transcriptEntry(c, ev.messageId, ev.role); en.text = ev.text; en.toolCalls = ev.toolCalls || []; en.isStreaming = ev.isStreaming; }
+      const s = cardForSession(ev.sessionId)?.sessions.find((x) => x.sessionId === ev.sessionId);
+      if (s) { const en = transcriptEntry(s, ev.messageId, ev.role); en.text = ev.text; en.toolCalls = ev.toolCalls || []; en.isStreaming = ev.isStreaming; }
       break;
     }
     case 'diff.finalized': {
-      const c = cards.get(ev.sessionId);
-      if (c) c.diff = { added: ev.added, removed: ev.removed, files: ev.files };
+      const s = cardForSession(ev.sessionId)?.sessions.find((x) => x.sessionId === ev.sessionId);
+      if (s) s.diff = { added: ev.added, removed: ev.removed, files: ev.files };
       rail('diff.finalised', `diff.finalised · ${ev.sessionId} · +${ev.added} −${ev.removed} across ${ev.files} files`, ts);
       break;
     }
@@ -540,18 +584,24 @@ function applySnapshot(snap: any) {
     return;
   }
   if (snap?.projectId && snap.projectId === desiredProjectId) rebindInFlight = false;
+  // The snapshot carries one folded card per specification (SPEC-023): a CardState with `sessions[]`,
+  // its aggregate `column`, and the spec's frontmatter `status`. Adopt them and rebuild the session index.
   const snapCards: any[] = Array.isArray(snap?.cards) ? snap.cards : [];
   cards.clear();
+  sessionSpec.clear();
   specStatus.clear();
-  const SPEC_COL_TO_STATUS: Record<string, string> = { authoring: 'draft', review: 'in-review', approved: 'approved', merged: 'merged' };
   for (const c of snapCards) {
     const col: Col = c.column ?? c.col ?? 'authoring';
-    cards.set(c.id, {
-      id: c.id, specId: c.specId, kind: c.kind, title: c.title, col,
-      status: c.status, harness: c.harness, model: c.model, needsHuman: c.needsHuman,
-      progress: progressFor(c.status, col), transcript: c.transcript ?? [],
+    const sessions: LiveSession[] = Array.isArray(c.sessions)
+      ? c.sessions.map((s: any) => ({ sessionId: s.sessionId, kind: s.kind, status: s.status, model: s.model, harness: s.harness, needsHuman: !!s.needsHuman, transcript: s.transcript ?? [], diff: s.diff }))
+      : [];
+    cards.set(c.specId, {
+      id: c.specId, specId: c.specId, title: c.title, col, status: c.status,
+      harness: c.harness, model: c.model, needsHuman: !!c.needsHuman,
+      progress: progressFor(sessions.find((s) => s.kind === 'task')?.status ?? c.status, col), sessions,
     });
-    if (c.kind === 'spec' && SPEC_COL_TO_STATUS[col]) specStatus.set(c.specId, SPEC_COL_TO_STATUS[col]);
+    for (const s of sessions) sessionSpec.set(s.sessionId, c.specId);
+    if (c.status) specStatus.set(c.specId, c.status);
   }
   // Snapshot is authoritative; switch the UI to live and let the mock engine stand down. It also
   // carries the onboarding state (SPEC-004): harness reachability + the project classification.

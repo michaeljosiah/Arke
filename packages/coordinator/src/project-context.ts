@@ -258,7 +258,10 @@ export class ProjectContext {
    */
   workInFlight(): boolean {
     for (const card of this.read.snapshot()) {
-      if (card.status === "running" || card.status === "waiting" || card.needsHuman) return true;
+      // Sessions fold into their spec's card (SPEC-023): work is in flight if any folded session is
+      // running/waiting, or a human gate is open. `card.status` is now the spec's frontmatter status.
+      if (card.needsHuman) return true;
+      if (card.sessions.some((s) => s.status === "running" || s.status === "waiting")) return true;
     }
     for (const q of this.fanoutQueues.values()) if (q.length > 0) return true; // queued, not yet dispatched
     return false;
@@ -781,7 +784,7 @@ export class ProjectContext {
 
   /** True when a session exists in the read model (the ownership guard — not specId truthiness). */
   private sessionExists(sessionId: string): boolean {
-    return this.read.snapshot().some((c) => c.id === sessionId);
+    return this.read.snapshot().some((c) => c.sessions.some((s) => s.sessionId === sessionId));
   }
 
   /** `revert` / `unrevert` (SPEC-011) — git-checkpoint rescue, routed to the adapter, ownership-checked. */
@@ -1178,7 +1181,8 @@ export class ProjectContext {
     // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
     // while a spec-author/architect AUTHORING session for this spec is running — an unrelated
     // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7).
-    if (this.read.snapshot().some((c) => c.specId === cid && c.id !== cid && c.kind === "spec" && c.status === "running")) {
+    const cidCard = this.read.snapshot().find((c) => c.specId === cid);
+    if (cidCard?.sessions.some((s) => s.kind === "spec" && s.status === "running")) {
       return fail(`an authoring session for '${cid}' is still running — wait for it to finish before approving`);
     }
     const fmBranch = found.frontmatter.branch;
@@ -1701,7 +1705,8 @@ export class ProjectContext {
         // Stale-session guard (SPEC-006): a queued message that targets a session no longer idle or
         // running (e.g. it went waiting/done/error while the client was offline) is rejected with its
         // current status rather than silently executed.
-        const known = this.read.snapshot().find((c) => c.id === sessionId);
+        const knownCard = this.read.snapshot().find((c) => c.sessions.some((s) => s.sessionId === sessionId));
+        const known = knownCard?.sessions.find((s) => s.sessionId === sessionId);
         if (known) {
           if (known.status !== "idle" && known.status !== "running") {
             throw new Error(`session '${sessionId}' is '${known.status}', not idle/running — message rejected`);
@@ -1726,7 +1731,7 @@ export class ProjectContext {
         // prepend the file path as context. Best-effort — a session with no spec file sends as-is.
         let specContext = "";
         try {
-          const sid = (a.specId ? String(a.specId) : undefined) ?? known?.specId;
+          const sid = (a.specId ? String(a.specId) : undefined) ?? knownCard?.specId;
           const found = sid ? this.findSpecFile(sid) : null;
           if (found) {
             specContext = `Working specification: ${found.relPath} (spec_id: ${found.canonicalId}). Read and edit THIS file for this conversation; do not pick a different specification unless explicitly asked.\n`;
@@ -2153,8 +2158,10 @@ export class ProjectContext {
     // created parentless (so they surface as spec-kind cards), but a reviewer or generation turn on
     // a still-untitled spec must NOT trigger the rename — otherwise it races the author.
     if (this.reviewerSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.taskSessions.has(sessionId)) return;
-    const card = this.read.snapshot().find((c) => c.id === sessionId);
-    if (!card || card.kind !== "spec") return;
+    // The authoring session folds into its spec's card as a `spec`-kind session (SPEC-023); find that
+    // card and rename the spec it belongs to.
+    const card = this.read.snapshot().find((c) => c.sessions.some((s) => s.sessionId === sessionId && s.kind === "spec"));
+    if (!card) return;
     await this.renameSpec(card.specId).catch(() => undefined);
   }
 

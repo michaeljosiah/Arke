@@ -36,13 +36,23 @@ const COLS = [
   { id: 'merged', label: 'Merged' },
 ];
 
+/** Open a card's session detail (SPEC-023): a spec card folds N sessions, so pick the target — the sole
+ *  session directly, or a picker when there is more than one. A card with no session yet opens the
+ *  detail placeholder for the spec. A `diff`-column card opens the diff view for the relevant session. */
+function openCard(c: any) {
+  const ss = c.sessions || [];
+  if (ss.length > 1) { store.set({ sessionPicker: { specId: c.id, title: c.title, col: c.col, sessions: ss } }); return; }
+  const sole = ss[0];
+  store.set({ activeCard: c.id, activeSession: sole?.sessionId ?? null, view: c.col === 'diff' ? 'diff' : 'session' });
+}
+
 function BoardCard({ c }: any) {
-  const open = () => store.set({ activeCard: c.id, view: c.col === 'diff' ? 'diff' : 'session' });
+  const open = () => openCard(c);
   const showBar = (c.col === 'authoring' || c.col === 'implementing') && !c.needsHuman;
-  // Promote-to-review is a human correction on a draft SPEC card — it sends a governed coordinator
+  // Promote-to-review is a human correction on a draft spec card — it sends a governed coordinator
   // command (spec.promote); the card moves only when the resulting spec.status event arrives, never
-  // by a direct column write (SPEC-010).
-  const canPromote = c.col === 'authoring' && c.kind === 'spec';
+  // by a direct column write (SPEC-010). Every card is now one specification (SPEC-023).
+  const canPromote = c.col === 'authoring';
   const promote = async (ev: any) => {
     ev.stopPropagation();
     const res = await promoteSpecLive(c.specId || c.id);
@@ -109,7 +119,29 @@ export function Board() {
         : e('div', { style: { flex: 1, display: 'flex', gap: 16, minHeight: 0, overflowX: 'auto' } },
             COLS.map((col) => e(Column, { key: col.id, col, cards: cards.filter((c) => c.col === col.id) })))),
     e(EventRail, null),
+    e(SessionPicker, null),
   );
+}
+
+/** Disambiguation overlay (SPEC-023): when a spec card folds more than one session, choosing which
+ *  session's detail/diff to open. Never mutates board state — it only sets the active session + view. */
+function SessionPicker() {
+  const picker = useStore((s: any) => s.sessionPicker) as any;
+  if (!picker) return null;
+  const choose = (s: any) => store.set({ activeCard: picker.specId, activeSession: s.sessionId, view: s.status === 'done' ? 'diff' : 'session', sessionPicker: null });
+  return e('div', { onClick: () => store.set({ sessionPicker: null }), style: { position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,10,10,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 } },
+    e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 480, maxHeight: '72vh', display: 'flex', flexDirection: 'column', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden', boxShadow: 'var(--shadow-lg)' } },
+      e('div', { style: { padding: '14px 18px', borderBottom: '1px solid var(--border)' } },
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600 } }, picker.title),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 } }, picker.sessions.length + ' sessions — choose one to open')),
+      e('div', { style: { overflowY: 'auto' } },
+        picker.sessions.map((s: any) => e('button', { key: s.sessionId, onClick: () => choose(s), onMouseEnter: (ev: any) => ev.currentTarget.style.background = 'var(--accent)', onMouseLeave: (ev: any) => ev.currentTarget.style.background = 'var(--background)', style: { appearance: 'none', textAlign: 'left', width: '100%', cursor: 'pointer', background: 'var(--background)', border: 'none', borderBottom: '1px solid var(--line-soft)', padding: '11px 18px', display: 'flex', alignItems: 'center', gap: 12 } },
+          e(StatusDot, { status: s.needsHuman ? 'attention' : s.status === 'running' ? 'running' : s.status === 'done' ? 'agree' : 'idle', pulse: s.status === 'running' }),
+          e('div', { style: { flex: 1, minWidth: 0 } },
+            e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, s.sessionId),
+            e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, (s.kind === 'spec' ? 'authoring' : 'task') + ' · ' + s.status + (s.harness ? ' · ' + s.harness : ''))),
+          e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 }))))),
+    ));
 }
 
 const DIFF_FILES = [
@@ -148,16 +180,21 @@ function DiffView() {
 }
 
 export function DiffReview() {
-  const { activeCard, cards } = useStore();
-  const card = cards.find((c) => c.id === activeCard) || cards.find((c) => c.col === 'diff') || {} as any;
+  const { activeCard, activeSession, cards } = useStore();
+  const card: any = cards.find((c) => c.id === activeCard) || cards.find((c) => c.col === 'diff') || {};
+  // Resolve the folded session being reviewed (SPEC-023) — the chosen one, else the first done task.
+  const sessions: any[] = card.sessions || [];
+  const session: any = sessions.find((s) => s.sessionId === activeSession) || sessions.find((s) => s.status === 'done') || sessions[0] || {};
+  const d = session.diff;
+  const summary = d ? `+${d.added} −${d.removed} across ${d.files} files` : '+84 −12 across 4 files';
   return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('div', { style: { padding: '14px 22px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 } },
       e(Button, { variant: 'ghost', size: 'sm', iconLeft: e(Icon, { name: 'arrowLeft', size: 15 }), onClick: () => store.set({ view: 'board' }) }, 'Board'),
       e('div', { style: { flex: 1 } },
         e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, (card.id || 'T-2') + ' · ' + (card.title || 'Idempotency key column + index')),
-        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, 'diff.finalised · +84 −12 across 4 files · ' + (card.harness || 'OpenCode'))),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `diff.finalised · ${summary} · ` + (session.harness || card.harness || 'OpenCode') + (session.sessionId ? ' · ' + session.sessionId : ''))),
       e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }) }, 'Revert run'),
-      e(Button, { iconLeft: e(Icon, { name: 'pr', size: 15 }), onClick: () => { engine.acceptDiff(card.id || 'T-2'); store.set({ view: 'board' }); } }, 'Accept & open PR')),
+      e(Button, { iconLeft: e(Icon, { name: 'pr', size: 15 }), onClick: () => { engine.acceptDiff(session.sessionId || card.id || 'T-2'); store.set({ view: 'board' }); } }, 'Accept & open PR')),
     e('div', { style: { flex: 1, minHeight: 0 } }, e(DiffView, null)),
   );
 }
@@ -175,8 +212,11 @@ const TRANSCRIPT = [
 ];
 
 export function Session() {
-  const { activeCard, cards } = useStore();
-  const card = cards.find((c) => c.id === activeCard) || { id: 'T-4', title: 'Guard the retry handler', harness: 'Claude Code', model: 'Sonnet', status: 'running' } as any;
+  const { activeCard, activeSession, cards } = useStore();
+  const card: any = cards.find((c) => c.id === activeCard) || { id: 'T-4', title: 'Guard the retry handler', sessions: [] };
+  // Resolve the folded session for detail (SPEC-023): the chosen one, else the sole/first session.
+  const sessions: any[] = card.sessions || [];
+  const session: any = sessions.find((s) => s.sessionId === activeSession) || sessions[0] || { status: 'running', harness: 'Claude Code', model: 'Sonnet', transcript: [] };
   const [tab, setTab] = React.useState('transcript');
   return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('div', { style: { padding: '14px 22px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 } },
@@ -184,17 +224,17 @@ export function Session() {
       e('div', { style: { flex: 1, minWidth: 0 } },
         e('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
           e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, card.id + ' · ' + card.title),
-          e(StatusDot, { status: card.needsHuman ? 'attention' : card.status, pulse: card.status === 'running' })),
-        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, card.harness + ' · ' + card.model + ' · one git worktree')),
+          e(StatusDot, { status: session.needsHuman ? 'attention' : session.status, pulse: session.status === 'running' })),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, (session.harness || card.harness || 'OpenCode') + ' · ' + (session.model || card.model || '—') + (session.sessionId ? ' · ' + session.sessionId : ''))),
       e(Button, { variant: 'outline', iconLeft: e(Icon, { name: 'refresh', size: 14 }) }, 'Restore checkpoint'),
-      e(Button, { iconLeft: e(Icon, { name: 'pr', size: 15 }), onClick: () => engine.raisePermission(card, 'open pull request', 'gh pr create --fill --base main') }, 'Open pull request')),
+      e(Button, { iconLeft: e(Icon, { name: 'pr', size: 15 }), onClick: () => engine.raisePermission({ id: session.sessionId || card.id, title: card.title }, 'open pull request', 'gh pr create --fill --base main') }, 'Open pull request')),
     e('div', { style: { padding: '0 22px', borderBottom: '1px solid var(--border)' } },
       e(Tabs, { tabs: [{ id: 'transcript', label: 'Transcript' }, { id: 'todos', label: 'Todos', count: TODOS.length }, { id: 'diff', label: 'Diff' }], value: tab, onChange: setTab })),
     e('div', { style: { flex: 1, minHeight: 0, overflow: 'hidden' } },
       tab === 'transcript' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 760 } },
         // Live transcript from the coordinator when present (SPEC-003); otherwise the sample.
-        (card.transcript && card.transcript.length
-          ? card.transcript.map((m, i) => e(AgentMessage, { key: m.messageId || i, role: 'agent', agent: m.role === 'tool' ? 'Tool' : 'Implementation', model: card.model || 'mid-tier' }, m.text + (m.isStreaming ? ' ▍' : '')))
+        (session.transcript && session.transcript.length
+          ? session.transcript.map((m, i) => e(AgentMessage, { key: m.messageId || i, role: 'agent', agent: m.role === 'tool' ? 'Tool' : 'Implementation', model: session.model || card.model || 'mid-tier' }, m.text + (m.isStreaming ? ' ▍' : '')))
           : TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text))),
         e(Callout, { variant: 'default', label: 'Runtime receipts' }, 'The board reacts to typed receipts — turn quiescence, diff finalisation — captured around each agent turn, with automatic git checkpoints for rescue and audit.')) : null,
       tab === 'todos' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, maxWidth: 620 } },

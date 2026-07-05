@@ -111,6 +111,10 @@ export const store = createStore({
   view: 'picker',
   activeSpec: DEMO ? 'SPEC-014' : null,
   activeCard: null,
+  // SPEC-023: a card folds N sessions; `activeSession` is the chosen session for detail/diff, and
+  // `sessionPicker` holds the disambiguation overlay when a card has more than one session.
+  activeSession: null,
+  sessionPicker: null,
   specs: DEMO ? SPECS : [],
   cards: DEMO ? CARDS : [],
   events: DEMO ? EVENTS : [],
