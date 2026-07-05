@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arke · Specification Lifecycle &amp; Delivery — Governance Contract</title>
+<style>
+  :root{
+    --bg:#FAFAFA; --card:#FFFFFF; --ink:#0A0A0A; --ink-2:#171717;
+    --muted:#737373; --muted-2:#A1A1A1; --line:#E5E5E5; --line-soft:#F0F0F0;
+    --code-bg:#0A0A0A; --code-ink:#E5E5E5; --green:#16A34A; --amber:#B45309; --red:#DC2626; --blue:#1D4ED8;
+    --chip:#F5F5F5;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px}
+
+  header{padding:56px 0 28px;border-bottom:1px solid var(--line)}
+  .mark{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:#fff;border-radius:12px;padding:9px 15px;font-weight:700;font-size:15px;letter-spacing:-.01em}
+  .mark .s{color:var(--muted-2);font-family:var(--mono);font-weight:600}
+  h1{font-size:31px;line-height:1.18;letter-spacing:-.02em;margin:22px 0 8px;font-weight:680}
+  .sub{color:var(--muted);font-size:16px;max-width:74ch}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .meta .m{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+
+  nav.toc{margin:26px 0 8px;display:flex;flex-wrap:wrap;gap:6px}
+  nav.toc a{font-size:12.5px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:5px 10px;background:#fff}
+  nav.toc a:hover{color:var(--ink);border-color:var(--muted-2)}
+
+  section{padding:38px 0;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted-2);margin-bottom:8px}
+  h2{font-size:22px;letter-spacing:-.015em;font-weight:660;margin-bottom:6px}
+  h3{font-size:15.5px;font-weight:640;margin:22px 0 8px}
+  p{margin:10px 0;color:var(--ink-2)}
+  p.lead{font-size:16.5px;color:var(--ink)}
+  strong{font-weight:640}
+  code{font-family:var(--mono);font-size:.86em;background:var(--chip);border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:var(--ink)}
+  a.cite{font-family:var(--mono);font-size:11px;color:var(--muted-2);text-decoration:none;white-space:nowrap}
+  ul,ol{margin:10px 0 10px 4px;padding-left:20px}
+  li{margin:6px 0;color:var(--ink-2)}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:16px 0}
+  .principle{background:var(--ink);color:#fff;border:none}
+  .principle .eyebrow{color:var(--muted-2)}
+  .principle h2,.principle h3{color:#fff}
+  .principle p{color:#D4D4D4}
+  .principle code{background:#262626;border-color:#333;color:#fff}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+  .two .card{margin:0}
+  .col-gov{border-top:3px solid var(--ink)}
+  .col-del{border-top:3px solid var(--blue)}
+  @media (max-width:680px){.two{grid-template-columns:1fr}}
+
+  .callout{border-radius:12px;padding:14px 16px;margin:14px 0;font-size:14px;border:1px solid}
+  .callout .lbl{font-weight:640;font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;display:block}
+  .c-warn{background:#FEFCE8;border-color:#FDE68A;color:#713F12}
+  .c-warn .lbl{color:var(--amber)}
+  .c-info{background:#F5F5F5;border-color:var(--line);color:var(--ink-2)}
+  .c-info .lbl{color:var(--muted)}
+  .c-key{background:#EFF6FF;border-color:#BFDBFE;color:#1E3A8A}
+  .c-key .lbl{color:var(--blue)}
+
+  .tbl-wrap{overflow-x:auto;margin:16px 0;border:1px solid var(--line);border-radius:12px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:660px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  th{background:#FBFBFB;font-weight:620;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);border-bottom:1px solid var(--line)}
+  tr:last-child td{border-bottom:none}
+  td code{font-size:12px}
+  .mono{font-family:var(--mono);font-size:12.5px}
+
+  .b{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10.5px;font-weight:640;letter-spacing:.02em;padding:2px 8px;border-radius:999px;border:1px solid;white-space:nowrap}
+  .b-ok{color:var(--green);border-color:#BBF7D0;background:#F0FDF4}
+  .b-part{color:var(--amber);border-color:#FDE68A;background:#FEFCE8}
+  .b-miss{color:var(--red);border-color:#FECACA;background:#FEF2F2}
+  .b .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+
+  .flow{margin:22px 0}
+  .flow svg{width:100%;height:auto;display:block}
+
+  .states{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+  .state{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:#fff;flex:1;min-width:150px}
+  .state .k{font-family:var(--mono);font-size:12.5px;font-weight:660}
+  .state .d{font-size:12px;color:var(--muted);margin-top:3px}
+
+  footer{padding:34px 0 60px;color:var(--muted);font-size:12.5px;line-height:1.7}
+  @media (max-width:640px){h1{font-size:24px}.wrap{padding:0 16px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="mark"><span class="s">//</span> Arke</span>
+  <h1>Specification Lifecycle &amp; Delivery</h1>
+  <p class="sub">The governance contract for a specification, from creation through delivery. <strong>Arke governs the specification; git delivers the code.</strong> The specification's markdown is the single source of truth for its governed state — so every transition is a gated operation, and git is an optional accelerator, never a prerequisite.</p>
+  <div class="meta">
+    <span class="m">status: draft — for review</span>
+    <span class="m">scope: FR-1 · FR-5 · FR-8 · FR-9 · FR-12 · FR-16</span>
+    <span class="m">grounds: SPEC-006 · 007 · 008 · 009 · 010</span>
+    <span class="m">canonical for: PRD §8.4 · Architecture §08</span>
+  </div>
+  <nav class="toc">
+    <a href="#principle">1 · Principle</a>
+    <a href="#tracks">2 · Two tracks</a>
+    <a href="#frontmatter">3 · Frontmatter</a>
+    <a href="#vocab">4 · Status vs columns</a>
+    <a href="#oneop">5 · One op, two triggers</a>
+    <a href="#flow">6 · The flow</a>
+    <a href="#gates">7 · The gates</a>
+    <a href="#manual">8 · Host-optional &amp; manual moves</a>
+    <a href="#deliver">9 · Deliver is explicit</a>
+    <a href="#invariants">10 · Invariants</a>
+    <a href="#deltas">11 · Deltas</a>
+    <a href="#gaps">12 · Conformance &amp; gaps</a>
+  </nav>
+</header>
+
+<!-- 1 -->
+<section id="principle">
+  <div class="eyebrow">1 · The one principle</div>
+  <h2>The markdown is the source of truth. Everything else is a projection.</h2>
+  <p class="lead">Every feature is exactly one <code>specification.md</code>, authored on its branch, reviewed, and approved. Tickets, board cards, tests, and tracking are generated <em>from</em> that file — never edited beside it.</p>
+
+  <div class="card principle">
+    <div class="eyebrow">Corollary — the load-bearing rule</div>
+    <p>A specification's governed state lives in one place: the <code>status:</code> field of its frontmatter. The delivery board, the audit trail, and every downstream artifact are <strong>read-only projections</strong> of that field plus live session / CI state. A card moves because a <em>governed operation ran and passed its gate</em> — never because a person dragged pixels, and never because a client wrote a column.</p>
+  </div>
+
+  <p>Two consequences follow, and they are the whole reason this document exists:</p>
+  <ul>
+    <li><strong>State changes must be authoritative.</strong> Whoever can write <code>status:</code> controls delivery. That write must therefore be gated — a completed review, a well-formed document, a non-author human — not a free edit.</li>
+    <li><strong>The projection must be faithful.</strong> One specification is one unit of work and therefore <strong>one card</strong>. Anything that mints extra cards (e.g. a harness session appearing as its own row) is a projection defect, not new work.</li>
+  </ul>
+</section>
+
+<!-- 2 -->
+<section id="tracks">
+  <div class="eyebrow">2 · Two tracks</div>
+  <h2>Arke governs the specification; git delivers the code</h2>
+  <p>The lifecycle is two linked but separable tracks. Keeping them separate is what makes the system usable with or without a configured git host.</p>
+
+  <div class="two">
+    <div class="card col-gov">
+      <div class="eyebrow">Track 1 — Governance</div>
+      <h3>Owned by Arke</h3>
+      <p><code>draft → in-review → approved → delivered</code>, persisted in the frontmatter <code>status:</code> and moved only by gated coordinator ops. This is the <strong>WHAT</strong> — the agreed change. It works with <strong>zero git configuration</strong>.</p>
+    </div>
+    <div class="card col-del">
+      <div class="eyebrow">Track 2 — Delivery</div>
+      <h3>Tracked through git</h3>
+      <p>Once a spec is <code>approved</code>, git + agent activity is the live <em>telemetry</em> of turning it into code: agent implementing → branch in PR → PR merged. The board <strong>projects</strong> this; it never invents spec status.</p>
+    </div>
+  </div>
+
+  <div class="callout c-key"><span class="lbl">The handshake</span> The <strong>merge</strong> is the single git event permitted to write back into governance: it flips <code>approved → delivered</code> and flattens the deltas. Everything from <code>approved</code> up to that merge is read-only projection — git does not dribble into the frontmatter at every push.</div>
+
+  <p><strong>Graceful degradation.</strong> "Agent implementing" is Arke-native (the coordinator's own harness session) and is visible with no git host at all. Only "branch in PR" and "PR merged" genuinely need git — and host-less, <code>delivered</code> is reached by a local branch merge the coordinator performs instead of a PR merge. Nothing goes dark.</p>
+</section>
+
+<!-- 3 -->
+<section id="frontmatter">
+  <div class="eyebrow">3 · The frontmatter that drives state</div>
+  <h2>What the file declares</h2>
+  <p>Every specification opens with a canonical frontmatter block. These fields — and only these — drive governance:</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th style="width:150px">Field</th><th>Role</th><th style="width:120px">Drives state?</th></tr></thead>
+    <tbody>
+      <tr><td><code>spec_id</code></td><td><span class="mono">SPEC-YYYY-MM-DD-&lt;slug&gt;</span> — the stable identity. The board card is keyed on this, <em>never</em> on a branch or session id.</td><td><b class="b b-ok"><span class="dot"></span>identity</b></td></tr>
+      <tr><td><code>status</code></td><td>The governed state. <strong>One of exactly four values</strong> (see §4).</td><td><b class="b b-ok"><span class="dot"></span>yes — primary</b></td></tr>
+      <tr><td><code>branch</code></td><td>The <em>active</em> work branch for the current phase. During authoring it is the authoring branch; when delivery starts it is set (by a governed op) to the delivery branch. The approval branch-guard checks <code>HEAD == branch</code>.</td><td><b class="b b-ok"><span class="dot"></span>gate input</b></td></tr>
+      <tr><td><code>owner</code></td><td>The authoring product engineer. Approval by this identity is rejected as self-approval.</td><td><b class="b b-ok"><span class="dot"></span>authority</b></td></tr>
+      <tr><td><code>capabilities</code></td><td>The capability slice(s) this spec owns. Feeds the per-capability roll-up.</td><td><b class="b b-part"><span class="dot"></span>routing</b></td></tr>
+      <tr><td><code>title</code>, <code>created</code>, <code>updated</code></td><td>Display + provenance. <code>updated</code> is excluded from the material-change hash.</td><td><b class="b b-part"><span class="dot"></span>metadata</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-info"><span class="lbl">Single write path</span> Frontmatter is a flat <code>key: value</code> block; <code>status: draft&nbsp;#&nbsp;comment</code> reads as <code>draft</code>. Every write goes through one gated coordinator path — a hand-edited <code>status:</code> that bypasses the coordinator is a <em>divergence</em>, not a transition (see §12).</div>
+</section>
+
+<!-- 4 -->
+<section id="vocab">
+  <div class="eyebrow">4 · Two vocabularies — do not conflate them</div>
+  <h2>Spec status (4) vs. board columns (7)</h2>
+  <p>The single most common confusion — and a direct cause of the board looking "broken" — is treating board columns as if they were spec statuses. They are not.</p>
+
+  <h3>A · Spec status — authored, governed, four values</h3>
+  <div class="states">
+    <div class="state"><div class="k">draft</div><div class="d">Being authored on its branch.</div></div>
+    <div class="state"><div class="k">in-review</div><div class="d">Complete enough to critique; a panel has run.</div></div>
+    <div class="state"><div class="k">approved</div><div class="d">Agreed by a non-author human. A stable resting state — the backlog.</div></div>
+    <div class="state"><div class="k">delivered</div><div class="d">Terminal. Code merged to the mainline; deltas flattened into current truth.</div></div>
+  </div>
+  <p>These live in <code>status:</code>. They move only through gated ops (triggered by a human or a webhook — §5), never by hand. Note <code>delivered</code> means <em>landed on the mainline as current truth</em>, not "deployed to production" — deployment, if ever modelled, is a separate axis.</p>
+
+  <h3>B · Board columns — a live projection, seven lanes</h3>
+  <p>The board combines spec status with <em>live session state</em> and <em>CI / PR state</em> to place a card. Three of its columns are <strong>not</strong> spec statuses at all — they describe what the harness is doing to an <code>approved</code> spec:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th style="width:150px">Column</th><th>Derived from</th><th>Frontmatter status?</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Authoring</td><td><code>status: draft</code></td><td>yes</td></tr>
+      <tr><td class="mono">In review</td><td><code>status: in-review</code></td><td>yes</td></tr>
+      <tr><td class="mono">Approved</td><td><code>status: approved</code>, no active delivery session — <strong>the backlog lane</strong></td><td>yes</td></tr>
+      <tr><td class="mono">Implementing</td><td>a task <strong>session</strong> is running against an approved spec</td><td><strong>no</strong> — session-derived</td></tr>
+      <tr><td class="mono">Needs human</td><td>a <code>permission.asked</code> / <code>elicitation.asked</code> gate is open (sticky)</td><td><strong>no</strong> — session-derived</td></tr>
+      <tr><td class="mono">Diff review</td><td>the delivery session finished; a diff / PR awaits human review</td><td><strong>no</strong> — session / CI-derived</td></tr>
+      <tr><td class="mono">Delivered</td><td><code>status: delivered</code></td><td>yes</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout c-info"><span class="lbl">Rule</span> Column precedence is computed <em>per card</em>: an open human gate wins → else a running / finished delivery session → else the spec's <code>status</code>. One specification yields exactly <strong>one</strong> card that walks these lanes. Sessions fold into that card; they are never cards of their own.</div>
+</section>
+
+<!-- 5 -->
+<section id="oneop">
+  <div class="eyebrow">5 · The unifying rule</div>
+  <h2>One op, two triggers</h2>
+  <p class="lead">A card moves only when a <strong>governed transition op</strong> runs and passes its gate. The op writes <code>status:</code> (single write path). The <em>trigger</em> can be a git-host webhook <strong>or</strong> a human — neither bypasses the gate.</p>
+
+  <div class="two">
+    <div class="card">
+      <div class="eyebrow">Trigger A — automated</div>
+      <p>When a git host is configured, PR / review / merge webhooks fire the same ops automatically. Branch protection and CI harden the gates. This is the target steady state.</p>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Trigger B — human</div>
+      <p>A person invokes the transition from the board or cockpit (§8). Same op, same gate. Used when no host is configured, and always available as an override.</p>
+    </div>
+  </div>
+
+  <div class="callout c-key"><span class="lbl">Why this matters</span> Because both triggers call the <em>same op</em>, adopting a git host later requires <strong>no rework</strong> — the manual path and the automated path were always the same gated write. The git host is an accelerator layered on an Arke-native governance core, not a dependency.</div>
+</section>
+
+<!-- 6 -->
+<section id="flow">
+  <div class="eyebrow">6 · The flow, end to end</div>
+  <h2>Create → author → review → approve → (later) deliver</h2>
+
+  <div class="flow">
+  <svg viewBox="0 0 960 270" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace">
+    <defs><marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#A1A1A1"/></marker></defs>
+    <text x="0" y="24" font-size="11" fill="#A1A1A1" letter-spacing="1">GOVERNED — status: in the markdown (Arke, host-optional)</text>
+    <g font-size="13" font-weight="600">
+      <rect x="0"   y="38" width="140" height="44" rx="10" fill="#fff" stroke="#E5E5E5"/><text x="70"  y="65" text-anchor="middle" fill="#0A0A0A">draft</text>
+      <rect x="196" y="38" width="140" height="44" rx="10" fill="#fff" stroke="#E5E5E5"/><text x="266" y="65" text-anchor="middle" fill="#0A0A0A">in-review</text>
+      <rect x="392" y="38" width="150" height="44" rx="10" fill="#0A0A0A" stroke="#0A0A0A"/><text x="467" y="60" text-anchor="middle" fill="#fff">approved</text><text x="467" y="74" text-anchor="middle" font-size="8.5" fill="#A1A1A1">backlog · rests here</text>
+      <rect x="810" y="38" width="150" height="44" rx="10" fill="#fff" stroke="#16A34A"/><text x="885" y="65" text-anchor="middle" fill="#0A0A0A">delivered</text>
+    </g>
+    <g stroke="#A1A1A1" stroke-width="1.4" fill="none">
+      <line x1="140" y1="60" x2="188" y2="60" marker-end="url(#arw)"/>
+      <line x1="336" y1="60" x2="384" y2="60" marker-end="url(#arw)"/>
+    </g>
+    <g font-size="9.5" fill="#737373" text-anchor="middle">
+      <text x="164" y="30">panel + well-formed</text><text x="164" y="97">+ approve draft</text>
+      <text x="360" y="30">2nd human,</text><text x="360" y="97">≠ owner</text>
+    </g>
+    <path d="M467 82 C467 116, 266 116, 266 84" stroke="#B45309" stroke-width="1.3" fill="none" stroke-dasharray="4 3" marker-end="url(#arw)"/>
+    <text x="366" y="132" font-size="9.5" fill="#B45309" text-anchor="middle">material change to Requirements/Design → back to in-review</text>
+
+    <text x="0" y="182" font-size="11" fill="#1D4ED8" letter-spacing="1">DELIVERY — explicit, later, any branch (git telemetry)</text>
+    <g font-size="12">
+      <rect x="392" y="196" width="120" height="40" rx="10" fill="#EFF6FF" stroke="#BFDBFE"/><text x="452" y="221" text-anchor="middle" fill="#1E3A8A">implementing</text>
+      <rect x="542" y="196" width="120" height="40" rx="10" fill="#EFF6FF" stroke="#BFDBFE"/><text x="602" y="221" text-anchor="middle" fill="#1E3A8A">diff review</text>
+    </g>
+    <text x="330" y="222" font-size="10" fill="#1D4ED8" text-anchor="end">[Deliver] ▸</text>
+    <g stroke="#1D4ED8" stroke-width="1.2" fill="none" stroke-dasharray="3 3">
+      <line x1="467" y1="84" x2="467" y2="194" marker-end="url(#arw)"/>
+      <line x1="512" y1="216" x2="540" y2="216" marker-end="url(#arw)"/>
+      <line x1="662" y1="210" x2="885" y2="84" marker-end="url(#arw)"/>
+    </g>
+    <text x="600" y="256" font-size="9" fill="#1D4ED8" text-anchor="middle">the merge is the handshake — approved → delivered + flatten deltas</text>
+  </svg>
+  </div>
+
+  <p><strong>Reading the diagram.</strong> The top lane is <em>governed</em> — the four values that live in the markdown and move only through gated ops. <code>approved</code> is a <strong>home, not a doorway</strong>: a spec rests there in the backlog until someone explicitly chooses to deliver it. The bottom lane is the <em>delivery</em> effort — started on demand, on any branch, whenever — projecting <code>implementing</code> / <code>diff review</code> over the still-<code>approved</code> spec. The dashed reopen edge is the reversibility rule.</p>
+</section>
+
+<!-- 7 -->
+<section id="gates">
+  <div class="eyebrow">7 · The gates</div>
+  <h2>What SHALL be true at each transition</h2>
+  <p>Each transition names a legitimate trigger and the preconditions that MUST hold. The gate is identical whether the trigger is a human or a webhook. Anything else is rejected with a named error and logged to the audit trace.</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th style="width:130px">Transition</th><th style="width:140px">Trigger(s)</th><th>Preconditions (gate)</th><th style="width:130px">Rejected with</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>draft → in-review</b></td>
+        <td>Human <em>approve draft</em> (or, host: spec ready)</td>
+        <td>① An adjudicated review panel has run (<code>panel.complete {status:"complete"}</code>) — a <em>failed</em> panel does not count. ② <strong>Well-formedness</strong>: required anatomy present (SHALL statements, WHEN/THEN scenarios, mandated sections). ③ Branch guard: <code>HEAD == frontmatter.branch</code>. ④ Coordinator commits the file, sets <code>status: in-review</code>, appends a Change-history line — atomically.</td>
+        <td><code>review.gate-failed</code> · <code>spec.malformed</code> · <code>spec.branch-mismatch</code></td>
+      </tr>
+      <tr>
+        <td><b>in-review → approved</b></td>
+        <td>Non-author approval (webhook <em>or</em> human, §8)</td>
+        <td>An approving review from a human who is <strong>not the <code>owner</code></strong>. Host mode: <code>pull_request_review</code> + branch protection. Host-less: an in-app approver identity ≠ owner, or an audited solo-mode override. The approved spec document lands in the library (main).</td>
+        <td><code>governance.self-approval-rejected</code></td>
+      </tr>
+      <tr>
+        <td><b>approved</b> <span class="mono" style="font-size:11px;color:var(--muted)">(rest)</span></td>
+        <td>—</td>
+        <td><strong>No automatic delivery.</strong> Reaching <code>approved</code> does not fan out. The spec rests in the backlog (Approved lane) indefinitely until a human explicitly starts delivery. This is the decoupling that lets teams "write now, deliver later."</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><b>Deliver → implementing</b></td>
+        <td>Explicit <em>Deliver</em> action</td>
+        <td>Spec is <code>approved</code>. Cuts / records a delivery branch (any branch, any time — keyed by <code>spec_id</code>), then fans out task sessions in per-task worktrees off that branch. Not a <code>status</code> change — the board shows <code>implementing</code> because a session is running.</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><b>implementing → diff review</b></td>
+        <td>Delivery session finishes</td>
+        <td>Task worktrees roll up into the single delivery branch; its <code>feature → main</code> PR is opened. The human diff-gate (<code>pr.approve</code>) reviews the accumulated code.</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><b>→ delivered</b></td>
+        <td>Merge (webhook <em>or</em> local)</td>
+        <td>The one delivery PR merges to main (host mode; branch-protected, ≥1 non-author) — or the coordinator performs a local branch merge (host-less). Sets <code>status: delivered</code> and <strong>flattens the delta tags</strong> into current truth (idempotent).</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><b>approved → in-review</b><br><span class="mono" style="font-size:11px;color:var(--muted)">(reopen)</span></td>
+        <td>Material change detector</td>
+        <td>Any edit to <strong>Requirements or Design</strong> (SHA-256 over those sections, LF-normalised; frontmatter, <code>updated</code>, Change-history, Open-questions, Decision-log excluded) regresses the spec to <code>in-review</code> and ripples to everything projected from it. Non-normative edits do not regress.</td>
+        <td>— (automatic, reversible)</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>The review-panel gate, precisely</h3>
+  <ul>
+    <li><strong>At least two reviewers</strong>, resolving to <strong>pairwise-distinct concrete models</strong> — two roles on the same model is rejected.</li>
+    <li>Reviewers are <strong>read-only</strong> (<code>edit: deny</code>, <code>bash: deny</code>), grounded in source, and <strong>blind to each other</strong>.</li>
+    <li>"Complete" = <code>panel.complete {status:"complete"}</code> plus human adjudication (accept / dismiss / send-back). One reviewer erroring does not abort; <em>all</em> erroring yields a <code>failed</code> panel that does <strong>not</strong> satisfy the gate.</li>
+    <li>Gate state is reconstructed from the durable trace on restart — not in-memory only.</li>
+  </ul>
+</section>
+
+<!-- 8 -->
+<section id="manual">
+  <div class="eyebrow">8 · Host-optional &amp; safe manual moves</div>
+  <h2>Letting the human move the board — without breaking the gate</h2>
+  <p>When no git host is configured, or as a deliberate override, a human moves a card. A manual move is <strong>not</strong> a raw <code>status:</code> write — it is the human acting as the <em>trigger</em> for the same gated op a webhook would fire.</p>
+  <ol>
+    <li><strong>The drag dispatches the op, not the column.</strong> Dropping a card into the next lane calls the transition op (e.g. <code>approve</code>), which runs its full gate. Fail the gate → the move is rejected with the reason. The projection stays read-only; the human only triggered a governed write.</li>
+    <li><strong>Only legal adjacent transitions are offered</strong> — you may drop into the <em>next</em> valid lane, never an arbitrary jump.</li>
+    <li><strong>Confirmation shows the write</strong> — "This sets <code>status: approved</code> and commits to <code>spec/x</code>, attributed to you." Deliberate, not accidental.</li>
+    <li><strong>Every manual move is a first-class audit event</strong> — <code>spec.status { reason:"manual", actor, from → to }</code>. The difference between manual and webhook-driven is always visible in the trace.</li>
+    <li><strong>Host-independent gates still fire</strong> — the review panel and well-formedness checks apply whether the trigger is a human or a webhook.</li>
+  </ol>
+
+  <div class="callout c-warn"><span class="lbl">The one honest trade-off — the "second human"</span> Only one gate genuinely needs an identity system: <strong>approver ≠ owner</strong>. Today that identity comes from the git host. Host-less, Arke shows a <strong>governance-level badge</strong> on the board and behaves in one of two modes: <em>team</em> (an in-app approver identity distinct from the owner is required) or <em>solo</em> (self-approval is permitted but explicitly flagged and audited — "approved by owner, no independent reviewer"). No one should mistake solo-mode assurance for host-enforced assurance.</div>
+</section>
+
+<!-- 9 -->
+<section id="deliver">
+  <div class="eyebrow">9 · Delivery is explicit</div>
+  <h2>Approve now, deliver later — on any branch</h2>
+  <p>Approval agrees the <em>WHAT</em>. It must not dictate the <em>WHEN</em>. So:</p>
+  <ul>
+    <li><strong>The Approved lane is the backlog.</strong> Approved-but-unbuilt specs live in the library (merged to main at approval), browsable and prioritisable — a real backlog, not cards stranded on rotting feature branches.</li>
+    <li><strong>A spec is identified by <code>spec_id</code>, not its branch.</strong> That is exactly what lets delivery happen later, off <code>main</code>, on a fresh branch — its own, or one you name to bundle with other work.</li>
+    <li><strong>Deltas stay tagged as "pending delivery"</strong> on an approved-but-undelivered spec, and flatten only at <code>delivered</code>. This keeps current truth honest: the library shows the spec is <em>agreed</em>, but not that the capability is <em>built</em>, until it is.</li>
+    <li><strong>Roll-up: one branch, one PR, one completion.</strong> Parallel task worktrees roll back into the single delivery branch; the one <code>feature → main</code> merge is the unambiguous "spec delivered" signal.</li>
+  </ul>
+  <div class="callout c-info"><span class="lbl">Edge to name later</span> A spec can rest at <code>approved</code> indefinitely. If a spec is <em>decided against</em> rather than <em>pending</em>, a future <code>superseded</code> / <code>withdrawn</code> terminal will keep the backlog free of zombies. Out of scope for now — <code>approved</code> cleanly covers "waiting."</div>
+</section>
+
+<!-- 10 -->
+<section id="invariants">
+  <div class="eyebrow">10 · Invariants &amp; restrictions</div>
+  <h2>The things that SHALL NOT happen</h2>
+  <ul>
+    <li><strong>No ungoverned state changes.</strong> <code>status</code> is written only by a gated op. A hand-edited <code>status:</code> that bypasses the coordinator is a <em>divergence</em>, surfaced as a warning — never honoured as a transition.</li>
+    <li><strong>No raw column writes.</strong> The board column is a read-only projection; a drag <em>triggers a gated op</em>, it never sets a <code>column</code>. No <code>column</code> field is ever written from the client.</li>
+    <li><strong>No self-approval.</strong> The approver's identity SHALL NOT equal the spec's <code>owner</code> — enforced at the coordinator and (host mode) at branch protection; flagged-and-audited in solo mode.</li>
+    <li><strong>One specification per active branch.</strong> The branch guard ties every approval to <code>HEAD == branch</code>; delivery runs on one branch that merges once.</li>
+    <li><strong>One specification → one card.</strong> Harness sessions fold into their spec's card; a session is never a top-level card.</li>
+    <li><strong>Single write path.</strong> All writes to <code>docs/specifications/</code> flow through the coordinator / harness adapter. The client renders a read-only preview and never holds a separate authoritative copy.</li>
+    <li><strong>No advance out of <code>draft</code> for a malformed spec.</strong> Required anatomy (SHALL statements, WHEN/THEN scenarios, mandated sections) must be present before promotion.</li>
+    <li><strong>Git is optional.</strong> No governed transition may <em>require</em> a git host to exist — the host only automates and hardens what Arke can already do.</li>
+  </ul>
+</section>
+
+<!-- 11 -->
+<section id="deltas">
+  <div class="eyebrow">11 · Deltas &amp; flatten-on-deliver</div>
+  <h2>How a spec versions itself</h2>
+  <p>While a change is in flight, each affected requirement carries a delta tag, e.g. <code>delta: ADDED (feat/x)</code>. The vocabulary is closed:</p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th style="width:120px">Tag</th><th>Meaning</th><th>On deliver (flatten)</th></tr></thead>
+    <tbody>
+      <tr><td><code>ADDED</code></td><td>New requirement.</td><td>Drop the tag; it becomes current truth.</td></tr>
+      <tr><td><code>MODIFIED</code></td><td>Changed behaviour — write the <em>full</em> updated requirement, not a diff.</td><td>Drop the tag.</td></tr>
+      <tr><td><code>REMOVED</code></td><td>Going away — keep a tombstone.</td><td>Cut the body; leave a <code>## Removed</code> tombstone with Reason + Migration.</td></tr>
+      <tr><td><code>RENAMED</code></td><td>Name-only change; note FROM/TO.</td><td>Apply in place.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Flatten runs at <code>delivered</code> (the merge handshake), is <strong>idempotent</strong> (flatten-started / -complete trace markers), appends one Change-history line, and never invents content. Per-capability "current truth" is a generated, read-only roll-up — <strong>never authored by hand</strong> — and reflects <em>delivered</em> capabilities, not merely approved ones.</p>
+</section>
+
+<!-- 12 -->
+<section id="gaps">
+  <div class="eyebrow">12 · Conformance &amp; current gaps</div>
+  <h2>Where the implementation must be tightened</h2>
+  <p>The contract above is largely already <em>specified</em>. This section is the honest delta between it and today's code — the work this document authorises. The broken delivery board (raw <code>ses_…</code> ids showing as duplicate cards) is the visible symptom of the first two rows.</p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>Rule</th><th style="width:110px">Today</th><th>Gap &amp; where it lives</th><th style="width:160px">Fix direction</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>One spec → one card</strong></td>
+        <td><b class="b b-miss"><span class="dot"></span>broken</b></td>
+        <td>Cards are minted <em>per session</em>: <code>session.status</code> calls <code>ensureCard(sessionId,…)</code>, so a real harness session (<code>ses_…</code>) becomes its own card next to the spec card. The design assumed <code>sessionId === specId</code>, which only holds in the mock. <a class="cite">read-model.ts:87 · live.ts:196</a></td>
+        <td>Fold sessions into the spec's card via <code>specId</code>; never emit a session-keyed top-level card.</td>
+      </tr>
+      <tr>
+        <td><strong>Faithful session↔spec linkage</strong></td>
+        <td><b class="b b-miss"><span class="dot"></span>broken</b></td>
+        <td>The link is the session <em>title</em> with a raw-id fallback: <code>specId: s.title ?? s.id</code>. When the title doesn't encode the spec id, the card's id, title and specId are all the same raw <code>ses_…</code> string. <a class="cite">normalize.ts:135</a></td>
+        <td>Resolve <code>specId</code> from the active spec, not the title; an unlinkable session is attached-or-dead-lettered, never its own spec.</td>
+      </tr>
+      <tr>
+        <td><strong>Delivery is explicit (no auto fan-out)</strong></td>
+        <td><b class="b b-part"><span class="dot"></span>coupled</b></td>
+        <td>Reaching <code>approved</code> currently triggers <code>fanOut</code> immediately, so "approve now, deliver later" is impossible and the Approved lane can't act as a backlog. <a class="cite">project-context.ts:712</a></td>
+        <td>Decouple: <code>approved</code> rests. Add an explicit <em>Deliver</em> op that records a delivery branch and starts fan-out.</td>
+      </tr>
+      <tr>
+        <td><strong>One gated door to in-review</strong></td>
+        <td><b class="b b-part"><span class="dot"></span>two doors</b></td>
+        <td>The strict path <code>approveDraft</code> enforces panel + branch guard. But <code>spec.promote</code> flips <code>draft → in-review</code> after only checking <code>status === "draft"</code> — no review, no authority, no validation. <a class="cite">project-context.ts:763 vs 1148</a></td>
+        <td>Route all promotion through the gated path; remove or gate <code>spec.promote</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>Well-formedness before promotion</strong></td>
+        <td><b class="b b-miss"><span class="dot"></span>missing</b></td>
+        <td>Nothing validates required anatomy before promotion. <code>parseSpecDoc</code> marks sections <code>present:false</code> but no gate reads it. <a class="cite">spec.ts (SPEC_ANATOMY)</a></td>
+        <td>Add a promotion precondition rejecting a malformed spec (<code>spec.malformed</code>) with the reason surfaced in the cockpit.</td>
+      </tr>
+      <tr>
+        <td><strong><code>delivered</code> terminal + flatten</strong></td>
+        <td><b class="b b-part"><span class="dot"></span>rename</b></td>
+        <td>The terminal state is currently <code>merged</code>, coupling governance vocabulary to a git verb. <a class="cite">spec.ts (SpecStatus) · spec-lifecycle.ts</a></td>
+        <td>Rename the enum <code>merged → delivered</code>; keep flatten at the merge handshake; update the column + webhook map.</td>
+      </tr>
+      <tr>
+        <td><strong>Manual moves + governance level</strong></td>
+        <td><b class="b b-miss"><span class="dot"></span>missing</b></td>
+        <td>No human-triggered transition path or governance-level badge; the board assumes webhooks it may never receive if no host is configured. <a class="cite">board-session-diff-permission.tsx</a></td>
+        <td>Add gated manual-move ops (dispatch the op, not the column) + a host-configured / solo / team badge.</td>
+      </tr>
+      <tr>
+        <td><strong>Self-approval / branch guard / material-change</strong></td>
+        <td><b class="b b-ok"><span class="dot"></span>enforced</b></td>
+        <td>Fail-closed self-approval, branch-mismatch rejection, normative-hash regression already hold. <a class="cite">spec-lifecycle.ts</a></td>
+        <td>Keep; add tests that pin each gate.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-warn"><span class="lbl">Bottom line</span> The lifecycle is well-specified but has a handful of implementation holes — the session→card projection, the ungated <code>spec.promote</code> door, no well-formedness gate, delivery coupled to approval, and no host-optional manual path. Closing them is what makes "the markdown drives the state" safe to rely on — and fixes the board at the same time, because the board is only ever a mirror.</div>
+</section>
+
+<footer>
+  <div class="wrap" style="padding:0">
+    <strong>Arke · Specification Lifecycle &amp; Delivery.</strong> Canonical governance contract. Grounds: SPEC-006 (authoring cockpit), SPEC-007 (review panel), SPEC-008 (lifecycle &amp; governance), SPEC-009 (parallel execution), SPEC-010 (delivery board). Referenced by PRD §8.4 (Where state lives) and Architecture §08 (Governance). Nothing here is written to state by a client; everything projects from the specification's markdown, and no governed transition requires a git host to exist.
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
