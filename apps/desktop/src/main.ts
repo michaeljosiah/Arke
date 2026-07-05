@@ -164,8 +164,9 @@ async function createWindow(coordinatorUrl: string): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      // Injected into the sandboxed preload's process.argv, so the client reads the bound URL lazily.
-      additionalArguments: [`--arke-coordinator-url=${coordinatorUrl}`],
+      // Injected into the sandboxed preload's process.argv, so the client reads these lazily (the
+      // coordinator URL + the app version shown in Settings › About).
+      additionalArguments: [`--arke-coordinator-url=${coordinatorUrl}`, `--arke-app-version=${app.getVersion()}`],
     },
   });
   // Deny any attempt to open external/remote content in a new window (NFR-5).
@@ -195,6 +196,40 @@ function wireIpc(): void {
     });
     toast.show();
   });
+
+  // Settings › About: report the last known update state, run a manual check, and apply a ready update.
+  ipcMain.handle("arke:update-status", () => lastUpdate);
+  ipcMain.handle("arke:update-check", async () => {
+    if (!app.isPackaged) return (lastUpdate = { state: "dev" }); // no feed in a dev run
+    manualCheck = true; // this check came from About — let its button, not the native modal, be the surface
+    broadcastUpdate({ state: "checking" });
+    try {
+      await autoUpdater.checkForUpdates(); // the events above drive the real state transitions
+    } catch (err) {
+      manualCheck = false;
+      broadcastUpdate({ state: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+    return lastUpdate;
+  });
+  ipcMain.handle("arke:update-restart", async () => {
+    if (lastUpdate.state !== "downloaded") return lastUpdate; // nothing staged to apply
+    // Applying tears down the embedded coordinator + managed harness, so honour the SAME work-in-flight
+    // gate the native auto-apply path enforces (maybeApplyUpdate / gracefulQuit) — the About button must
+    // not interrupt a running task/review/decision without the same warning.
+    if (workInFlight()) {
+      const { response } = await dialog.showMessageBox(win!, {
+        type: "warning",
+        buttons: ["Restart anyway", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+        message: "Arke has work in flight",
+        detail: "A task or review is still running, or a decision is waiting. Restart to update anyway?",
+      });
+      if (response === 1) return lastUpdate; // cancelled — leave the staged update in place
+    }
+    await applyUpdateAndRestart(); // drains the coordinator + harness, then quitAndInstall
+    return { state: "downloaded" } as UpdateStatus;
+  });
 }
 
 /** Whether any embedded-coordinator work is in flight (attached mode can't be interrupted by our quit). */
@@ -213,6 +248,25 @@ function workInFlight(): boolean {
 // are verified by electron-updater before an update is ever offered.
 let updateReady = false;
 let updatePrompting = false;
+
+// The last known updater state, mirrored to the renderer so Settings › About can show it and drive a
+// manual "Check for updates". Never carries anything sensitive — just a coarse lifecycle state.
+export interface UpdateStatus {
+  state: "idle" | "dev" | "checking" | "available" | "downloading" | "downloaded" | "none" | "error";
+  version?: string;
+  percent?: number;
+  message?: string;
+}
+let lastUpdate: UpdateStatus = { state: "idle" };
+// True while a check that the user kicked off from Settings › About is in flight. If it results in a
+// download, the About "Restart to update" button is the surface — we suppress the native modal so a single
+// user intent isn't answered by two overlapping prompts. Cleared when the check concludes.
+let manualCheck = false;
+
+function broadcastUpdate(s: UpdateStatus): void {
+  lastUpdate = s;
+  win?.webContents.send("arke:update", s);
+}
 
 async function applyUpdateAndRestart(): Promise<void> {
   quitting = true; // let the before-quit handler pass through to the updater's restart
@@ -241,11 +295,24 @@ async function maybeApplyUpdate(): Promise<void> {
 }
 
 function setupAutoUpdate(): void {
-  if (!app.isPackaged) return; // dev runs never self-update
+  if (!app.isPackaged) { lastUpdate = { state: "dev" }; return; } // dev runs never self-update
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = false; // we control the apply (defer while busy)
-  autoUpdater.on("update-downloaded", () => { updateReady = true; void maybeApplyUpdate(); });
-  autoUpdater.on("error", (err) => console.error("[arke] auto-update error:", err?.message ?? err));
+  autoUpdater.on("checking-for-update", () => broadcastUpdate({ state: "checking" }));
+  autoUpdater.on("update-available", (info) => broadcastUpdate({ state: "available", version: info?.version }));
+  autoUpdater.on("update-not-available", () => { manualCheck = false; broadcastUpdate({ state: "none" }); });
+  autoUpdater.on("download-progress", (p) => broadcastUpdate({ state: "downloading", percent: Math.round(p?.percent ?? 0) }));
+  autoUpdater.on("update-downloaded", (info) => {
+    updateReady = true;
+    broadcastUpdate({ state: "downloaded", version: info?.version });
+    // A background download prompts natively; one the user kicked off from About does NOT — the About
+    // "Restart to update" button is already the surface. The 60s interval still re-offers it later if
+    // it's left unapplied, so a manually-surfaced update is never silently forgotten.
+    const fromAbout = manualCheck;
+    manualCheck = false;
+    if (!fromAbout) void maybeApplyUpdate();
+  });
+  autoUpdater.on("error", (err) => { manualCheck = false; broadcastUpdate({ state: "error", message: err?.message ?? String(err) }); });
   void autoUpdater.checkForUpdates().catch(() => undefined);
   // Catch an update that was deferred while busy: prompt once work goes quiescent.
   const timer = setInterval(() => void maybeApplyUpdate(), 60_000);

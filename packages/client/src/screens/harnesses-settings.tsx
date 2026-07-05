@@ -4,8 +4,13 @@ import { Button, Badge, Card, Callout, StatusDot, Switch } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
 import { reprobeRegistry } from '../live';
+import { isDesktop, desktopVersion, desktopUpdates, type DesktopUpdateStatus } from '../desktop';
 
 const e = React.createElement;
+
+// Injected by Vite (define) at build time; absent under tsx/tests — the typeof guard keeps it safe.
+declare const __ARKE_VERSION__: string | undefined;
+const BUILD_VERSION = typeof __ARKE_VERSION__ !== 'undefined' ? __ARKE_VERSION__ : undefined;
 
 const ALL_CAPS = ['events', 'todos', 'diff', 'permissions', 'commands', 'models'];
 
@@ -83,6 +88,59 @@ function Row({ title, sub, children }: any) {
     e('div', { style: { flex: 'none' } }, children));
 }
 
+/** Human-readable line for a given updater state (desktop only), with a tone for colouring. */
+function updateLabel(s: DesktopUpdateStatus | null): { text: string; tone: 'muted' | 'success' | 'destructive' } {
+  switch (s?.state) {
+    case 'checking': return { text: 'Checking for updates…', tone: 'muted' };
+    case 'available': return { text: `Update found${s.version ? ` — v${s.version}` : ''}, downloading…`, tone: 'muted' };
+    case 'downloading': return { text: `Downloading update…${s.percent != null ? ` ${s.percent}%` : ''}`, tone: 'muted' };
+    case 'downloaded': return { text: `Update ready${s.version ? ` — v${s.version}` : ''}. Restart to apply.`, tone: 'success' };
+    case 'none': return { text: 'Arke is up to date.', tone: 'success' };
+    case 'error': return { text: `Update check failed${s.message ? `: ${s.message}` : '.'}`, tone: 'destructive' };
+    case 'dev': return { text: 'Development build — self-update is disabled.', tone: 'muted' };
+    case 'idle': return { text: 'Arke checks for updates automatically.', tone: 'muted' };
+    default: return { text: '', tone: 'muted' };
+  }
+}
+
+/** Settings › About: real app version + a manual update check (desktop), or a version + note (browser). */
+function AboutArke() {
+  const updates = desktopUpdates();
+  const version = desktopVersion() || BUILD_VERSION || 'dev';
+  const [status, setStatus] = React.useState<DesktopUpdateStatus | null>(null);
+
+  React.useEffect(() => {
+    if (!updates) return;
+    let live = true;
+    void updates.status().then((s) => { if (live) setStatus(s); }).catch(() => {});
+    // `onStatus` returns an unsubscribe — remove the listener on unmount so it doesn't accumulate each
+    // time the Settings screen is remounted (store-routed screens mount/unmount on navigation).
+    const off = updates.onStatus((s) => { if (live) setStatus(s); });
+    return () => { live = false; off?.(); };
+  }, []);
+
+  const st = status?.state;
+  const busy = st === 'checking' || st === 'available' || st === 'downloading';
+  const info = updateLabel(status);
+  const toneColor = info.tone === 'success' ? 'var(--success)' : info.tone === 'destructive' ? 'var(--destructive)' : 'var(--muted-foreground)';
+
+  return e('div', null,
+    e('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 0' } },
+      e('span', { style: { flex: 'none', width: 36, height: 36, borderRadius: 'var(--radius-md)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 14 } }, '//'),
+      e('div', { style: { flex: 1, minWidth: 0 } },
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, 'Arke · Specification Orchestrator'),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `v${version} · ${isDesktop() ? 'desktop' : 'web'} build · open source`)),
+      updates
+        ? e('div', { style: { flex: 'none' } },
+            st === 'downloaded'
+              ? e(Button, { variant: 'default', iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => { void updates.restart(); } }, 'Restart to update')
+              : e(Button, { variant: 'outline', disabled: busy, iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: () => { void updates.check().then(setStatus).catch(() => {}); } }, busy ? 'Checking…' : 'Check for updates'))
+        : null),
+    info.text ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: toneColor, paddingBottom: 4 } }, info.text) : null,
+    !updates ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)', paddingBottom: 4, maxWidth: 520, lineHeight: 1.45 } }, 'This is the browser build. The desktop app checks for updates automatically and can be updated from Settings › About.') : null,
+  );
+}
+
 export function Settings() {
   const { theme, density, runtimeMode, accent, chrome, liveStream } = useStore();
   const [telemetry, setTelemetry] = React.useState(true);
@@ -102,11 +160,6 @@ export function Settings() {
     e(Group, { title: 'Telemetry' },
       e(Row, { title: 'Observability spans', sub: 'Spans at every boundary persist to a local NDJSON trace — the audit source of truth — and export via OTLP.' }, e(Switch, { checked: telemetry, onChange: setTelemetry })),
       e(Row, { title: 'OTLP endpoint', sub: 'Grafana / Tempo / Prometheus.' }, e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'otlp://localhost:4317'))),
-    e(Group, { title: 'About' },
-      e('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 0' } },
-        e('span', { style: { width: 36, height: 36, borderRadius: 'var(--radius-md)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 14 } }, '//'),
-        e('div', null,
-          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13.5, fontWeight: 600 } }, 'Arke · Specification Orchestrator'),
-          e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, 'v0.8 · open source · shadcn/Radix neutral theme')))),
+    e(Group, { title: 'About' }, e(AboutArke)),
   );
 }

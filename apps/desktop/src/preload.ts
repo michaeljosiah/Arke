@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 // The narrow, enumerated native bridge (SPEC-022) — nothing here returns a credential or an arbitrary
 // host capability. This is the ONLY surface the sandboxed renderer can reach the main process through;
@@ -14,6 +14,8 @@ function argValue(prefix: string): string | undefined {
 const arke = {
   /** The coordinator's actual bound `ws://` URL (possibly ephemeral) — the client reads this lazily. */
   coordinator: { url: argValue("--arke-coordinator-url=") ?? "" },
+  /** The running app version (from the desktop package.json) shown in Settings › About. */
+  app: { version: argValue("--arke-app-version=") ?? "" },
   /** Open a native folder dialog; resolves to the picked absolute path, or null if cancelled. */
   openProjectDialog: (): Promise<string | null> => ipcRenderer.invoke("arke:open-project-dialog"),
   /** Forward a normalised domain event to main's NotificationRouter (which de-dups + shows OS toasts). */
@@ -21,6 +23,20 @@ const arke = {
   /** Subscribe to application-menu actions (Open project…, New specification, Reload). */
   onMenu: (cb: (action: string) => void): void => {
     ipcRenderer.on("arke:menu", (_e, action: string) => cb(action));
+  },
+  /** electron-updater surface for Settings › About: current state, a manual check, and apply-and-restart.
+   *  Nothing here downloads or applies without user intent beyond the automatic background check. */
+  updates: {
+    status: (): Promise<unknown> => ipcRenderer.invoke("arke:update-status"),
+    check: (): Promise<unknown> => ipcRenderer.invoke("arke:update-check"),
+    restart: (): Promise<unknown> => ipcRenderer.invoke("arke:update-restart"),
+    /** Subscribe to update-state pushes; returns an unsubscribe so the renderer can remove the listener
+     *  on unmount (the Settings screen mounts/unmounts on navigation — without this, listeners stack). */
+    onStatus: (cb: (s: unknown) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: unknown) => cb(s);
+      ipcRenderer.on("arke:update", handler);
+      return () => ipcRenderer.removeListener("arke:update", handler);
+    },
   },
 };
 
