@@ -4,14 +4,43 @@ import { openProjectLive } from './live';
 // Browser-safe Electron-shell glue (SPEC-022). Everything here no-ops when `window.arke` is absent
 // (a plain browser), so it ships in the single client build without a desktop-specific fork.
 
+export interface DesktopUpdateStatus {
+  state: 'idle' | 'dev' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'none' | 'error';
+  version?: string;
+  percent?: number;
+  message?: string;
+}
+
 interface ArkeBridge {
   openProjectDialog?: () => Promise<string | null>;
   onMenu?: (cb: (action: string) => void) => void;
   notify?: (event: unknown) => void;
+  app?: { version?: string };
+  updates?: {
+    status: () => Promise<DesktopUpdateStatus>;
+    check: () => Promise<DesktopUpdateStatus>;
+    restart: () => Promise<DesktopUpdateStatus>;
+    onStatus: (cb: (s: DesktopUpdateStatus) => void) => void;
+  };
 }
 
 function bridge(): ArkeBridge | undefined {
   return (globalThis as { arke?: ArkeBridge }).arke;
+}
+
+/** True inside the Electron shell (the native bridge is present); false in a plain browser. */
+export function isDesktop(): boolean {
+  return !!bridge();
+}
+
+/** The running desktop app version, or undefined in a browser. */
+export function desktopVersion(): string | undefined {
+  return bridge()?.app?.version || undefined;
+}
+
+/** The electron-updater surface (Settings › About), or undefined in a browser / when unavailable. */
+export function desktopUpdates(): ArkeBridge['updates'] | undefined {
+  return bridge()?.updates;
 }
 
 /**

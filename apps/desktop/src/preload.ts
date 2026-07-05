@@ -14,6 +14,8 @@ function argValue(prefix: string): string | undefined {
 const arke = {
   /** The coordinator's actual bound `ws://` URL (possibly ephemeral) — the client reads this lazily. */
   coordinator: { url: argValue("--arke-coordinator-url=") ?? "" },
+  /** The running app version (from the desktop package.json) shown in Settings › About. */
+  app: { version: argValue("--arke-app-version=") ?? "" },
   /** Open a native folder dialog; resolves to the picked absolute path, or null if cancelled. */
   openProjectDialog: (): Promise<string | null> => ipcRenderer.invoke("arke:open-project-dialog"),
   /** Forward a normalised domain event to main's NotificationRouter (which de-dups + shows OS toasts). */
@@ -21,6 +23,16 @@ const arke = {
   /** Subscribe to application-menu actions (Open project…, New specification, Reload). */
   onMenu: (cb: (action: string) => void): void => {
     ipcRenderer.on("arke:menu", (_e, action: string) => cb(action));
+  },
+  /** electron-updater surface for Settings › About: current state, a manual check, and apply-and-restart.
+   *  Nothing here downloads or applies without user intent beyond the automatic background check. */
+  updates: {
+    status: (): Promise<unknown> => ipcRenderer.invoke("arke:update-status"),
+    check: (): Promise<unknown> => ipcRenderer.invoke("arke:update-check"),
+    restart: (): Promise<unknown> => ipcRenderer.invoke("arke:update-restart"),
+    onStatus: (cb: (s: unknown) => void): void => {
+      ipcRenderer.on("arke:update", (_e, s: unknown) => cb(s));
+    },
   },
 };
 
