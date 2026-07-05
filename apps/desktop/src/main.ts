@@ -211,6 +211,20 @@ function wireIpc(): void {
   });
   ipcMain.handle("arke:update-restart", async () => {
     if (lastUpdate.state !== "downloaded") return lastUpdate; // nothing staged to apply
+    // Applying tears down the embedded coordinator + managed harness, so honour the SAME work-in-flight
+    // gate the native auto-apply path enforces (maybeApplyUpdate / gracefulQuit) — the About button must
+    // not interrupt a running task/review/decision without the same warning.
+    if (workInFlight()) {
+      const { response } = await dialog.showMessageBox(win!, {
+        type: "warning",
+        buttons: ["Restart anyway", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+        message: "Arke has work in flight",
+        detail: "A task or review is still running, or a decision is waiting. Restart to update anyway?",
+      });
+      if (response === 1) return lastUpdate; // cancelled — leave the staged update in place
+    }
     await applyUpdateAndRestart(); // drains the coordinator + harness, then quitAndInstall
     return { state: "downloaded" } as UpdateStatus;
   });

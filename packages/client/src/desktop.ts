@@ -20,7 +20,8 @@ interface ArkeBridge {
     status: () => Promise<DesktopUpdateStatus>;
     check: () => Promise<DesktopUpdateStatus>;
     restart: () => Promise<DesktopUpdateStatus>;
-    onStatus: (cb: (s: DesktopUpdateStatus) => void) => void;
+    /** Returns an unsubscribe function so callers can remove the listener on unmount. */
+    onStatus: (cb: (s: DesktopUpdateStatus) => void) => () => void;
   };
 }
 

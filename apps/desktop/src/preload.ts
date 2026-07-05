@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 // The narrow, enumerated native bridge (SPEC-022) — nothing here returns a credential or an arbitrary
 // host capability. This is the ONLY surface the sandboxed renderer can reach the main process through;
@@ -30,8 +30,12 @@ const arke = {
     status: (): Promise<unknown> => ipcRenderer.invoke("arke:update-status"),
     check: (): Promise<unknown> => ipcRenderer.invoke("arke:update-check"),
     restart: (): Promise<unknown> => ipcRenderer.invoke("arke:update-restart"),
-    onStatus: (cb: (s: unknown) => void): void => {
-      ipcRenderer.on("arke:update", (_e, s: unknown) => cb(s));
+    /** Subscribe to update-state pushes; returns an unsubscribe so the renderer can remove the listener
+     *  on unmount (the Settings screen mounts/unmounts on navigation — without this, listeners stack). */
+    onStatus: (cb: (s: unknown) => void): (() => void) => {
+      const handler = (_e: IpcRendererEvent, s: unknown) => cb(s);
+      ipcRenderer.on("arke:update", handler);
+      return () => ipcRenderer.removeListener("arke:update", handler);
     },
   },
 };

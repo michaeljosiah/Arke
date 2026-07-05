@@ -112,8 +112,10 @@ function AboutArke() {
     if (!updates) return;
     let live = true;
     void updates.status().then((s) => { if (live) setStatus(s); }).catch(() => {});
-    updates.onStatus((s) => { if (live) setStatus(s); });
-    return () => { live = false; };
+    // `onStatus` returns an unsubscribe — remove the listener on unmount so it doesn't accumulate each
+    // time the Settings screen is remounted (store-routed screens mount/unmount on navigation).
+    const off = updates.onStatus((s) => { if (live) setStatus(s); });
+    return () => { live = false; off?.(); };
   }, []);
 
   const st = status?.state;
