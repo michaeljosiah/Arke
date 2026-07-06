@@ -122,7 +122,22 @@ jobs:
           npm run build --workspace @arke/client
           npm run build --workspace @arke/desktop
       - name: Package + publish installers (signed/notarised when creds are configured)
-        run: npm run publish --workspace @arke/desktop
+        # `shell: bash` (not each OS's default) so this one script covers the whole os matrix — GitHub's
+        # windows-latest runners ship Git Bash, so `shell: bash` works there too.
+        shell: bash
+        run: |
+          # A secret that isn't configured in the repo renders as an EMPTY STRING here, not an absent
+          # variable — `${{ secrets.CSC_LINK }}` on an unset secret is "", never unset. electron-builder's
+          # Windows signer explicitly treats an empty CSC_LINK the same as "not configured"
+          # (`cscLink == null || cscLink === ""`), but its macOS signer only checks `== null`
+          # (app-builder-lib's MacPackager). So on macOS an empty CSC_LINK is NOT treated as unset: it
+          # reaches `importCertificate("")`, which resolves to `path.resolve(currentDir, "")` — the
+          # project directory itself — and throws "<projectDir> not a file" (observed across v0.1.1–v0.1.3).
+          # `unset` here so an empty secret behaves identically to no secret at all on every platform,
+          # matching the "unsigned build still succeeds without secrets" contract these jobs rely on.
+          [ -z "${CSC_LINK:-}" ] && unset CSC_LINK
+          [ -z "${CSC_KEY_PASSWORD:-}" ] && unset CSC_KEY_PASSWORD
+          npm run publish --workspace @arke/desktop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
