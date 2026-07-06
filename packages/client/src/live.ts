@@ -325,10 +325,28 @@ function applyEvent(ev: any) {
       break;
     }
     case 'scaffold.done': {
-      store.set((s: any) => ({
-        scaffold: { ...(s.scaffold ?? { steps: {}, log: [] }), running: false, done: true },
-      }));
       rail('scaffold.done', `scaffold.done · ${(ev.stepsRun || []).join(', ')}`, ts);
+      // Re-open the intended project to verify the scaffold ran FOR IT before enabling
+      // "Open authoring cockpit". scaffold.done carries ev.projectPath but the coordinator's
+      // activeByConn may have been a different project at the time scaffold.run was sent (e.g.
+      // a reconnect that didn't rebind) — so the scaffold could have silently run for the
+      // wrong project. project.open returns the canonical state; only a genuine method-ready
+      // result sets done:true. While the round-trip is in flight, scaffold.running stays true
+      // (its last value from scaffold.step) so the button stays "Scaffolding…" — no flicker.
+      const target = desiredProjectId;
+      if (target) {
+        void openProjectLive({ projectId: target }).then((res: any) => {
+          const isReady = res?.ok && res.result?.state === 'method-ready';
+          store.set((s: any) => ({
+            scaffold: { ...(s.scaffold ?? { steps: {}, log: [] }), running: false, done: isReady },
+          }));
+        });
+      } else {
+        // No intended project recorded (edge case); optimistic done.
+        store.set((s: any) => ({
+          scaffold: { ...(s.scaffold ?? { steps: {}, log: [] }), running: false, done: true },
+        }));
+      }
       break;
     }
     case 'registry.updated': {
