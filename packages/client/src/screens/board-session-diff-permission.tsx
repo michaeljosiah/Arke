@@ -4,6 +4,7 @@ import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
 import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance } from '../live';
+import { openCard } from '../nav';
 
 const e = React.createElement;
 
@@ -61,16 +62,6 @@ const COLS = [
   { id: 'diff', label: 'Diff review' },
   { id: 'delivered', label: 'Delivered' },
 ];
-
-/** Open a card's session detail (SPEC-023): a spec card folds N sessions, so pick the target — the sole
- *  session directly, or a picker when there is more than one. A card with no session yet opens the
- *  detail placeholder for the spec. A `diff`-column card opens the diff view for the relevant session. */
-function openCard(c: any) {
-  const ss = c.sessions || [];
-  if (ss.length > 1) { store.set({ sessionPicker: { specId: c.id, title: c.title, col: c.col, sessions: ss } }); return; }
-  const sole = ss[0];
-  store.set({ activeCard: c.id, activeSession: sole?.sessionId ?? null, view: c.col === 'diff' ? 'diff' : 'session' });
-}
 
 function BoardCard({ c }: any) {
   const open = () => openCard(c);

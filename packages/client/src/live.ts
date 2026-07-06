@@ -188,6 +188,20 @@ function applyEvent(ev: any) {
       store.set({ integrations: ev.integrations });
       break;
     }
+    case 'repo.identity': {
+      // SPEC-025: the Overview repository panel header.
+      store.set({ repo: { name: ev.name, remote: ev.remote, default: ev.default, head: ev.head } });
+      break;
+    }
+    case 'repo.status': {
+      // SPEC-025: replace this spec's row in gitBranches (one row per specification branch).
+      store.set((s: any) => {
+        const row = { specId: ev.specId, branch: ev.branch, ahead: ev.ahead, behind: ev.behind, dirty: ev.dirty, added: ev.added, removed: ev.removed, files: ev.files, pr: ev.pr, degraded: ev.degraded };
+        const rest = (s.gitBranches || []).filter((b: any) => b.specId !== ev.specId);
+        return { gitBranches: [...rest, row] };
+      });
+      break;
+    }
     case 'generation.proposed': {
       // SPEC-013: the agent's pre-write artefact proposal for review.
       store.set({ generation: { specId: ev.specId, proposalId: ev.sessionId, artifacts: ev.artifacts, status: 'pending-review' } });
@@ -619,6 +633,8 @@ function applySnapshot(snap: any) {
     missingSentinels: snap?.missingSentinels ?? [],
     tierDefaults: snap?.tierDefaults ?? null,
     specs: Array.isArray(snap?.specs) ? snap.specs : [], // SPEC-008: live spec library for this project
+    repo: snap?.repoIdentity ?? null, // SPEC-025: seed the repository panel on connect (no blank first paint)
+    gitBranches: Array.isArray(snap?.gitBranches) ? snap.gitBranches : [],
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   engine.stop();
@@ -900,6 +916,8 @@ export const revertSessionLive = (sessionId: string, messageId: string) => gover
 export const unrevertSessionLive = (sessionId: string) => governed("unrevert", { sessionId });
 /** Re-fetch the diff from the adapter and re-emit diff.finalized. */
 export const refreshDiffLive = (sessionId: string) => governed("diff.refresh", { sessionId });
+/** SPEC-025: recompute git/PR status (optionally one spec) — read-only, for a manual/degraded-row retry. */
+export const refreshRepoStatusLive = (specId?: string) => governed("repo.status.refresh", specId ? { specId } : {});
 /** Answer an agent elicitation question (SPEC-012). */
 export const elicitationReplyLive = (sessionId: string, questionId: string, answer: string) => governed("elicitation.reply", { sessionId, questionId, answer });
 /** Decline an agent elicitation question (SPEC-012). */

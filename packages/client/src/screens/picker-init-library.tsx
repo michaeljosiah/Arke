@@ -5,6 +5,7 @@ import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
 import { liveSend, liveRequest, openProjectLive, createSpecLive } from '../live';
+import { routeOpenedProject } from '../nav';
 
 const e = React.createElement;
 
@@ -186,8 +187,9 @@ export function Picker() {
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
   const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
-  // Route into a just-opened project by its real folder state: method-ready → library, else scaffold.
-  const enter = (name: string, state: string | null) => store.set({ project: { name, specs: 0 }, entryPath: '.', view: state === 'method-ready' ? 'library' : 'init' });
+  // Route into a just-opened project by its real folder state via the shared helper (SPEC-025):
+  // method-ready → Overview, else the scaffold screen. The library stays reachable from the sidebar.
+  const enter = (name: string, state: string | null) => routeOpenedProject(name, state);
   const routeOpen = (res: any) => { setBusy(false); if (res?.ok) enter(res.result.name, res.result.state); else setEntryError(res?.error || 'could not open the project'); };
   // Open ANY host path (workspace.browse selection or a pasted path); the coordinator resolves it.
   const doOpen = (path: string) => { setPicker(null); setBusy(true); setEntryError(null); void openProjectLive({ path }).then(routeOpen); };
