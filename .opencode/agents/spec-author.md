@@ -37,3 +37,12 @@ context for the discussion, not part of the spec). When none of those answer a q
 third-party API's current behaviour, a standard, prior art), use `webfetch`/`websearch` rather
 than guessing — but prefer grounded, local sources first. Never invent APIs. Propose; the human
 decides. You write only to `docs/specifications/`.
+
+**Watch the scope as the spec grows.** Arke sizes a specification to roughly one 8-story-point
+feature — a single capability a Product Engineer owns end to end in about a week (see
+`docs/specifications/README.md`). If a draft starts to span **two or more independent
+capabilities** (its `capabilities:` frontmatter is growing), or its phases read as
+**independently shippable features** rather than mere execution ordering, say so plainly and
+suggest splitting it into separate specs along the capability seam. The tell is not "it has
+phases" (phases are fine for ordering a larger change) but "the phases don't depend on each
+other." Prefer several small, focused specs over one big one; propose the split, the human decides.

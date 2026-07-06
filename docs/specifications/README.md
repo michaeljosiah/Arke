@@ -57,6 +57,8 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 023 | [One card per specification — board fold & faithful session linkage](023.one-card-per-spec-board-fold.md) | FR-9; NFR-7; the urgent board fix — supersedes SPEC-010 Decision #4 (`sessionId` card key); amends SPEC-002/010/011 | 2 | 5 |
 | 024 | [Specification lifecycle gating — delivered, decoupled delivery, host-optional governance](024.specification-lifecycle-gating.md) | FR-5/12/16; NFR-1/7; implements the lifecycle governance contract ([`../specification-lifecycle-and-delivery.html`](../specification-lifecycle-and-delivery.html)); amends SPEC-008; depends on SPEC-023 | 2 | 8 |
 | 025 | [Project overview dashboard, live git/PR status & desktop chrome cleanup](025.project-overview-dashboard-and-chrome-cleanup.md) | FR-9/14/15 (client shell); new git-status coordinator capability; UI cleanup from the updated design template | 2 | 8 |
+| 026 | [OKF convention & deterministic docs/ bundle indexes](026.okf-bundle-indexes.md) | FR-1 (spec library); adopts OKF for `docs/`; deterministic all-bundle `index.md` generation — supersedes this hand-maintained table | 2 | 8 |
+| 027 | [OKF grounding layer — typed grounding on the docs/ tree](027.okf-grounding-layer.md) | FR-1/14/15/16 (authoring & review grounding); typed grounding selected across `docs/`; depends on SPEC-026 | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
