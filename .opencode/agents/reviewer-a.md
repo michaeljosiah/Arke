@@ -1,7 +1,7 @@
 ---
 description: Independent critique of the specification, grounded in source (model A).
 mode: subagent
-tier: capable            # pinned to a distinct instance/model in the registry vs reviewer-b
+tier: capable            # pinned to a distinct instance/model FAMILY in the registry vs reviewer-b
 permission:
   read: allow
   grep: allow

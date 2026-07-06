@@ -14,5 +14,7 @@ interaction:
   mode: primary
 permission:
   read: allow
+  webfetch: allow
+  websearch: allow
   edit: allow
   bash: ask
