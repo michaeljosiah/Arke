@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -10,6 +10,12 @@ import {
   parseSpecDoc,
   setFrontmatterStatus,
   validateWellFormed,
+  bundleEntryFromFile,
+  isBundleDoc,
+  isSpecFile,
+  renderBundleIndex,
+  renderSpecIndex,
+  specEntryFromFile,
   type AgentImage,
   type AgentModel,
   type CapabilityMaterialisation,
@@ -195,6 +201,10 @@ export class ProjectContext {
   private readonly repoDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** SPEC-025: the periodic background repo-status refresh (≤1/60s), cleared on stop(). */
   private repoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** SPEC-026: the `docs/**` watcher driving bundle-index regeneration, closed on stop(). */
+  private docsWatcher: FSWatcher | null = null;
+  /** SPEC-026: per-bundle debounce timers, coalescing rapid `docs/` edits into one regeneration. */
+  private readonly indexDebounce = new Map<string, ReturnType<typeof setTimeout>>();
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -240,6 +250,8 @@ export class ProjectContext {
     // instance is a real, useful state for the harnesses screen (SPEC-005).
     await this.refreshRegistry();
     this.startRepoRefresh(); // SPEC-025: seed the Overview's repository panel + keep it fresh
+    this.sweepAllBundles(); // SPEC-026: regenerate every docs/ bundle index from disk (out-of-band repair)
+    this.startDocsWatcher(); // SPEC-026: keep bundle indexes current on any docs/ change
     const readiness = this.adapter.readiness?.();
     if (readiness && !readiness.ready) return; // serve snapshot only; no stream
     void this.pump();
@@ -252,8 +264,120 @@ export class ProjectContext {
     this.repoRefreshTimer = null;
     for (const t of this.repoDebounce.values()) clearTimeout(t);
     this.repoDebounce.clear();
+    this.stopDocsWatcher(); // SPEC-026: close the docs/ watcher + clear its debounce timers
     await this.trace.drain(); // SPEC-015: flush enqueued trace appends before exit (no dropped records)
     await this.adapter.stopServer?.();
+  }
+
+  // ---- OKF bundle indexes (SPEC-026) --------------------------------------
+
+  /** Regenerate the `docs/specifications/` index synchronously — the spec lifecycle fast-path, so a
+   *  governed status write reflects immediately rather than on the watcher's debounce latency. */
+  private regenerateSpecIndex(): void {
+    this.regenerateBundleIndex(resolve(this.root, "docs", "specifications"));
+  }
+
+  /**
+   * Regenerate one `docs/` bundle's `index.md` from its documents' frontmatter (SPEC-026). Best-effort:
+   * a failure is traced and swallowed, never thrown into the caller. `docs/specifications/` renders the
+   * rich spec table; every other bundle renders the generic OKF index. Idempotent — it writes only when
+   * the rendered text differs, so a no-op regeneration touches nothing (and cannot loop the watcher).
+   */
+  private regenerateBundleIndex(dir: string): void {
+    const bundle = relative(this.root, dir).replaceAll("\\", "/") || ".";
+    try {
+      if (!existsSync(dir)) return;
+      const isSpecs = resolve(dir) === resolve(this.root, "docs", "specifications");
+      const names = readdirSync(dir).filter((f) => {
+        try {
+          return statSync(resolve(dir, f)).isFile();
+        } catch {
+          return false;
+        }
+      });
+      let md: string;
+      let count: number;
+      if (isSpecs) {
+        const entries = names.filter(isSpecFile).map((f) => specEntryFromFile(f, readFileSync(resolve(dir, f), "utf8")));
+        md = renderSpecIndex(entries);
+        count = entries.length;
+      } else {
+        const files = names.filter(isBundleDoc);
+        if (files.length === 0) return; // not an OKF bundle (no documents) → no index
+        const entries = files.map((f) => bundleEntryFromFile(f, readFileSync(resolve(dir, f), "utf8")));
+        md = renderBundleIndex(basename(dir), entries);
+        count = entries.length;
+      }
+      const indexPath = resolve(dir, "index.md");
+      const changed = !existsSync(indexPath) || readFileSync(indexPath, "utf8") !== md;
+      if (changed) writeFileSync(indexPath, md, "utf8");
+      void this.trace.write({ kind: "index.generated", projectId: this.projectId, bundle, docCount: count, changed });
+    } catch (err) {
+      void this.trace.write({ kind: "index.generated", projectId: this.projectId, bundle, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /** Regenerate every `docs/` bundle index from disk (the project-open sweep, SPEC-026): the `docs/` root
+   *  itself (if it holds top-level documents) plus each subfolder that is an OKF bundle. */
+  private sweepAllBundles(): void {
+    const docsRoot = resolve(this.root, "docs");
+    if (!existsSync(docsRoot)) return;
+    try {
+      this.regenerateBundleIndex(docsRoot);
+      for (const name of readdirSync(docsRoot)) {
+        const sub = resolve(docsRoot, name);
+        try {
+          if (statSync(sub).isDirectory()) this.regenerateBundleIndex(sub);
+        } catch {
+          /* skip an unreadable entry */
+        }
+      }
+    } catch {
+      /* docs/ unreadable — the watcher (if it starts) still covers live edits */
+    }
+  }
+
+  /** Watch `docs/**` and regenerate the changed bundle's index, debounced (SPEC-026). The generator's own
+   *  `index.md` writes are excluded so regeneration cannot self-trigger. Degrades to sweep-only when
+   *  filesystem watching is unavailable (headless/CI). */
+  private startDocsWatcher(): void {
+    const docsRoot = resolve(this.root, "docs");
+    if (this.docsWatcher || !existsSync(docsRoot)) return;
+    try {
+      this.docsWatcher = watch(docsRoot, { recursive: true }, (_evt, filename) => {
+        if (!filename) return;
+        const rel = filename.toString().replaceAll("\\", "/");
+        if (!rel.endsWith(".md") || rel.endsWith("index.md")) return; // .md documents only; never our own writes
+        const slash = rel.indexOf("/");
+        const bundleDir = slash === -1 ? docsRoot : resolve(docsRoot, rel.slice(0, slash));
+        const prev = this.indexDebounce.get(bundleDir);
+        if (prev) clearTimeout(prev);
+        const t = setTimeout(() => {
+          this.indexDebounce.delete(bundleDir);
+          this.regenerateBundleIndex(bundleDir);
+        }, 250);
+        if (typeof t.unref === "function") t.unref();
+        this.indexDebounce.set(bundleDir, t);
+      });
+      this.docsWatcher.on("error", () => {
+        /* watcher died — the project-open sweep remains the backstop */
+      });
+    } catch {
+      /* fs.watch unavailable — sweep-only fallback */
+    }
+  }
+
+  private stopDocsWatcher(): void {
+    if (this.docsWatcher) {
+      try {
+        this.docsWatcher.close();
+      } catch {
+        /* already gone */
+      }
+      this.docsWatcher = null;
+    }
+    for (const t of this.indexDebounce.values()) clearTimeout(t);
+    this.indexDebounce.clear();
   }
 
   /** Whether the pump is (or could be) streaming — used by idle eviction to avoid killing live work. */
@@ -613,7 +737,7 @@ export class ProjectContext {
     if (realDir !== expectedDir || !isWithinRoot(realRoot, realDir)) return null;
     let entries: string[];
     try {
-      entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "index.md"); // exclude the generated index (SPEC-026)
     } catch {
       return null;
     }
@@ -704,7 +828,7 @@ export class ProjectContext {
     if (realDir !== expectedDir) return records; // same symlink guard as findSpecFile
     let entries: string[];
     try {
-      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "specification.template.md");
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "specification.template.md" && f !== "index.md");
     } catch {
       return records;
     }
@@ -841,6 +965,7 @@ export class ProjectContext {
       await this.trace.write({ kind: "fanout.halted", projectId: this.projectId, specId, reason: "spec-demoted" });
     }
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) } as DomainEvent);
+    this.regenerateSpecIndex(); // SPEC-026: keep the index status column true through the lifecycle
   }
 
   /** Legal governed status edges (SPEC-024). The client offers only adjacent moves as an affordance; the
@@ -1517,6 +1642,7 @@ export class ProjectContext {
     } catch {
       /* committed + published already — the preflight recorded the governed action; this is bonus */
     }
+    this.regenerateSpecIndex(); // SPEC-026: draft→in-review is written here (bypasses commitStatus) — refresh the index
     return { ok: true, specId: cid, status: "in-review", branch: fmBranch };
   }
 
@@ -1845,6 +1971,7 @@ export class ProjectContext {
     if (existsSync(absPath)) throw new Error(`a specification file '${filename}' already exists`);
     writeFileSync(absPath, renderBlankSpec({ specId, title, branch, date }), "utf8");
     await this.trace.write({ kind: "spec.create", projectId: this.projectId, specId, branch, path: `docs/specifications/${filename}` });
+    this.regenerateSpecIndex(); // SPEC-026: the new spec appears in the index immediately
     return { specId, branch, path: `docs/specifications/${filename}`, number };
   }
 
@@ -1907,6 +2034,7 @@ export class ProjectContext {
       const relPath = `docs/specifications/${newFilename}`;
       await this.trace.write({ kind: "spec.rename", projectId: this.projectId, oldSpecId, specId: newSpecId, path: relPath, branch: newBranch });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.renamed", oldSpecId, specId: newSpecId, path: relPath, branch: newBranch, title } as DomainEvent);
+      this.regenerateSpecIndex(); // SPEC-026: the index reflects the new id/slug/link
       return { renamed: true, specId: newSpecId, path: relPath, branch: newBranch };
     } finally {
       this.renamingSpecs.delete(oldSpecId);
@@ -2639,6 +2767,7 @@ status: draft
 branch: ${branch}
 owner: core-maintainers
 capabilities: []
+type: specification
 created: ${date}
 updated: ${date}
 ---

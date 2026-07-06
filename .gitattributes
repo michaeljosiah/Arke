@@ -1,0 +1,4 @@
+# SPEC-026: generated bundle indexes are written with LF by the coordinator. Pin them to LF so a
+# Windows `autocrlf` checkout cannot rewrite the line endings and produce a perpetual (spurious) diff
+# against the byte-identical regeneration.
+docs/**/index.md text eol=lf
