@@ -176,6 +176,66 @@ export const DiffFinalizedEvent = base.extend({
   files: z.number().int(),
 });
 
+/**
+ * SPEC-025: live repository identity for a project — the header of the Overview's Repository panel.
+ * Coordinator-emitted (never from the harness stream), re-emitted only when HEAD or the remote changes.
+ * `default` reuses the existing `gitDefaultBranch()` mainline probe, not a separate symbolic-ref notion.
+ */
+export const RepoIdentityEvent = base.extend({
+  type: z.literal("repo.identity"),
+  name: z.string(),
+  remote: z.string(),
+  default: z.string(),
+  head: z.string(),
+});
+
+/**
+ * SPEC-025: live git + GitHub PR status for one specification branch. Every git-derived numeric field is
+ * nullable and paired with an explicit `degraded[]` reason — a field the coordinator could not compute is
+ * `null` with a degraded entry, NEVER a fabricated `0`. `pr === null` means "verified: no PR is linked";
+ * `pr` present with a null number/status, or a degraded entry for `pr`, means "unknown" — the two are
+ * never collapsed. `dirty` is null for any branch that is not the one currently checked out.
+ */
+export const RepoStatusEvent = base.extend({
+  type: z.literal("repo.status"),
+  specId: z.string(),
+  branch: z.string(),
+  ahead: z.number().int().nullable(),
+  behind: z.number().int().nullable(),
+  dirty: z.number().int().nullable(),
+  added: z.number().int().nullable(),
+  removed: z.number().int().nullable(),
+  files: z.number().int().nullable(),
+  pr: z
+    .object({ number: z.number().int().nullable(), status: z.enum(["open", "draft"]).nullable() })
+    .nullable(),
+  degraded: z
+    .array(z.object({ field: z.enum(["ahead", "behind", "dirty", "diff", "pr"]), reason: z.string() }))
+    .optional(),
+});
+
+/** SPEC-025: the read-model / client view of repository identity (event envelope stripped). */
+export interface RepoIdentityView {
+  name: string;
+  remote: string;
+  default: string;
+  head: string;
+}
+
+/** SPEC-025: the read-model / client view of one specification branch's git + PR status. */
+export interface RepoStatusView {
+  specId: string;
+  branch: string;
+  ahead: number | null;
+  behind: number | null;
+  dirty: number | null;
+  added: number | null;
+  removed: number | null;
+  files: number | null;
+  pr: { number: number | null; status: "open" | "draft" | null } | null;
+  degraded?: { field: "ahead" | "behind" | "dirty" | "diff" | "pr"; reason: string }[];
+}
+
 export const PermissionAskedEvent = base.extend({
   type: z.literal("permission.asked"),
   sessionId: z.string(),
@@ -451,6 +511,8 @@ export const DomainEvent = z.discriminatedUnion("type", [
   SessionStatusEvent,
   TodoUpdatedEvent,
   DiffFinalizedEvent,
+  RepoIdentityEvent,
+  RepoStatusEvent,
   PermissionAskedEvent,
   PermissionRepliedEvent,
   ProjectionWriteEvent,

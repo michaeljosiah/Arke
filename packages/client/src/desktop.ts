@@ -1,5 +1,6 @@
 import { store } from './store';
 import { openProjectLive } from './live';
+import { routeOpenedProject } from './nav';
 
 // Browser-safe Electron-shell glue (SPEC-022). Everything here no-ops when `window.arke` is absent
 // (a plain browser), so it ships in the single client build without a desktop-specific fork.
@@ -59,7 +60,12 @@ export function initDesktopBridge(): void {
     }
     if (action === 'open-project') {
       const path = await b.openProjectDialog?.();
-      if (path) await openProjectLive({ path }); // the coordinator canonicalises/validates the path
+      if (path) {
+        // The coordinator canonicalises/validates the path; route into the project on success (SPEC-025)
+        // so the native "Open project…" menu lands on the Overview like the in-app picker does.
+        const res: any = await openProjectLive({ path });
+        if (res?.ok) routeOpenedProject(res.result.name, res.result.state);
+      }
       return;
     }
     if (action === 'new-spec') {

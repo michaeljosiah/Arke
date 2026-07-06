@@ -30,7 +30,7 @@ function AccentSwatches({ value, onChange }: { value: string; onChange: (v: stri
 
 export function Tweaks() {
   const [open, setOpen] = React.useState(false);
-  const { theme, density, runtimeMode, accent, chrome, liveStream } = useStore();
+  const { theme, density, runtimeMode, accent, liveStream } = useStore();
   const set = (patch: any) => store.set(patch);
 
   if (!open) {

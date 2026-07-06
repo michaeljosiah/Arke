@@ -142,7 +142,7 @@ function AboutArke() {
 }
 
 export function Settings() {
-  const { theme, density, runtimeMode, accent, chrome, liveStream } = useStore();
+  const { theme, density, runtimeMode, accent, liveStream } = useStore();
   const [telemetry, setTelemetry] = React.useState(true);
   const set = (patch) => store.set(patch);
   const Group = ({ title, children }: any) => e('div', { style: { marginBottom: 26 } },
@@ -152,8 +152,7 @@ export function Settings() {
     e(SectionHead, { eyebrow: 'Project', title: 'Settings', sub: 'Theme, default runtime mode, connections and telemetry.' }),
     e(Group, { title: 'Appearance' },
       e(Row, { title: 'Theme', sub: 'The system is a neutral monochrome with a full dark token set.' }, e(Seg, { value: theme, onChange: (v) => set({ theme: v }), options: [{ v: 'light', label: 'Light' }, { v: 'dark', label: 'Dark' }] })),
-      e(Row, { title: 'Density', sub: 'Comfortable for prose, compact for dense tool surfaces.' }, e(Seg, { value: density, onChange: (v) => set({ density: v }), options: [{ v: 'comfortable', label: 'Comfortable' }, { v: 'compact', label: 'Compact' }] })),
-      e(Row, { title: 'Window chrome', sub: 'The desktop build runs as a signed Electron app; the browser build has no frame.' }, e(Seg, { value: chrome, onChange: (v) => set({ chrome: v }), options: [{ v: 'desktop', label: 'Desktop' }, { v: 'plain', label: 'Browser' }] }))),
+      e(Row, { title: 'Density', sub: 'Comfortable for prose, compact for dense tool surfaces.' }, e(Seg, { value: density, onChange: (v) => set({ density: v }), options: [{ v: 'comfortable', label: 'Comfortable' }, { v: 'compact', label: 'Compact' }] }))),
     e(Group, { title: 'Governance' },
       e(Row, { title: 'Default runtime mode', sub: 'Supervised asks for approval and writes only within the workspace. Full access is for trusted flows.' }, e(Seg, { value: runtimeMode, onChange: (v) => set({ runtimeMode: v }), options: [{ v: 'supervised', label: 'Supervised' }, { v: 'full-access', label: 'Full access' }] })),
       e(Row, { title: 'Live event stream', sub: 'Project delivery state from harness events as they arrive.' }, e(Switch, { checked: liveStream, onChange: (v) => set({ liveStream: v }) }))),

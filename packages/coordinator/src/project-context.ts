@@ -65,6 +65,7 @@ import {
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
+import { computeRepoStatus, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
 import type { GrantStore } from "./grant-store.js";
@@ -188,6 +189,12 @@ export class ProjectContext {
   private readonly completedReviews = new Set<string>();
   /** Specs currently being auto-renamed after titling, so the per-turn trigger is not re-entrant (SPEC-020). */
   private readonly renamingSpecs = new Set<string>();
+  /** SPEC-025: last emitted repo.identity signature (remote|default|head) — re-emit only on change. */
+  private lastRepoIdentitySig = "";
+  /** SPEC-025: per-spec debounce timers, coalescing rapid triggers into one recompute per branch. */
+  private readonly repoDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  /** SPEC-025: the periodic background repo-status refresh (≤1/60s), cleared on stop(). */
+  private repoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -232,6 +239,7 @@ export class ProjectContext {
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
     // instance is a real, useful state for the harnesses screen (SPEC-005).
     await this.refreshRegistry();
+    this.startRepoRefresh(); // SPEC-025: seed the Overview's repository panel + keep it fresh
     const readiness = this.adapter.readiness?.();
     if (readiness && !readiness.ready) return; // serve snapshot only; no stream
     void this.pump();
@@ -240,6 +248,10 @@ export class ProjectContext {
   /** Stop this context's pump and any harness it started (never an attached one — SPEC-016). */
   async stop(): Promise<void> {
     this.abort.abort();
+    if (this.repoRefreshTimer) clearInterval(this.repoRefreshTimer); // SPEC-025: stop the background refresh
+    this.repoRefreshTimer = null;
+    for (const t of this.repoDebounce.values()) clearTimeout(t);
+    this.repoDebounce.clear();
     await this.trace.drain(); // SPEC-015: flush enqueued trace appends before exit (no dropped records)
     await this.adapter.stopServer?.();
   }
@@ -302,11 +314,87 @@ export class ProjectContext {
       // false, the launch screen shows first-run quick setup instead of the configured-but-down state.
       harnessSetup: { configured: this.endpoints.length > 0 || Object.keys(this.agents.providers).length > 0 },
       specs: this.specLibrary(), // SPEC-008: the spec library for this project
+      ...this.read.repoSnapshot(), // SPEC-025: repoIdentity + gitBranches, so a fresh client isn't blank
     };
   }
 
   cardCount(): number {
     return this.read.snapshot().length;
+  }
+
+  // ---- repository status (SPEC-025) ---------------------------------------
+
+  /**
+   * Recompute git + GitHub PR status for one specification branch (or all when `specId` is omitted) and
+   * emit `repo.status` per branch plus `repo.identity` once (re-emitted only when HEAD/remote changed).
+   * All queries are read-only and each failure degrades one field, never crashes the context. Emitted
+   * events fold into the read model (so the snapshot seeds them) and publish to clients.
+   */
+  async refreshRepoStatus(specId?: string): Promise<void> {
+    if (!gitAvailable()) return; // no git → nothing to compute; the panel shows its empty state
+    let records: SpecLibraryRecord[];
+    try {
+      records = this.specLibrary().filter((r) => r.branch && (specId ? r.specId === specId : true));
+    } catch {
+      return;
+    }
+    const id = gitRepoIdentity(this.root);
+    const sig = `${id.remote}|${id.default}|${id.head}`;
+    if (sig !== this.lastRepoIdentitySig) {
+      this.lastRepoIdentitySig = sig;
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "repo.identity", ...id });
+    }
+    const ghEnabled = this.hostConfigured();
+    const defaultBranch = id.default || "main";
+    for (const rec of records) {
+      const status = computeRepoStatus({
+        root: this.root,
+        specId: rec.specId,
+        branch: rec.branch,
+        defaultBranch,
+        ghEnabled,
+        ...(rec.prNumber !== undefined ? { prNumberFallback: rec.prNumber } : {}),
+      });
+      // Trace a fully-degraded row's reason once (NFR-7) so a missing binary/integration is visible.
+      if (status.degraded && status.degraded.length) {
+        await this.trace
+          .write({ kind: "repo.status-degraded", projectId: this.projectId, specId: rec.specId, branch: rec.branch, degraded: status.degraded })
+          .catch(() => undefined);
+      }
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "repo.status", ...status });
+    }
+  }
+
+  /**
+   * SPEC-025 trigger (3): after a `diff.finalized` or a TERMINAL `session.status`, schedule a debounced
+   * per-branch recompute. Called from `emit()`; it never reacts to `repo.*` events (so no recursion) and
+   * coalesces the frequent `session.status` transitions of a fan-out into one recompute per branch.
+   */
+  private scheduleRepoRecompute(event: DomainEvent): void {
+    let specId: string | undefined;
+    if (event.type === "diff.finalized") {
+      specId = this.read.specForSession(event.sessionId);
+    } else if (event.type === "session.status" && (event.status === "done" || event.status === "error" || event.status === "interrupted")) {
+      specId = event.specId;
+    }
+    if (!specId) return;
+    const existing = this.repoDebounce.get(specId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.repoDebounce.delete(specId!);
+      void this.refreshRepoStatus(specId).catch(() => undefined);
+    }, 400);
+    timer.unref?.();
+    this.repoDebounce.set(specId, timer);
+  }
+
+  /** Start the bounded (≤1/60s) background repo-status refresh. Idempotent; cleared by {@link stop}. */
+  private startRepoRefresh(): void {
+    if (this.repoRefreshTimer) return;
+    void this.refreshRepoStatus().catch(() => undefined); // trigger (1): on open
+    const timer = setInterval(() => void this.refreshRepoStatus().catch(() => undefined), 60_000); // trigger (2)
+    timer.unref?.();
+    this.repoRefreshTimer = timer;
   }
 
   // ---- registry projection (SPEC-005) -------------------------------------
@@ -2053,6 +2141,9 @@ export class ProjectContext {
         return this.approvePr(String(a.sessionId ?? ""));
       case "diff.refresh":
         return this.refreshDiff(String(a.sessionId ?? ""));
+      case "repo.status.refresh": // SPEC-025: client-requested recompute (optionally one spec)
+        await this.refreshRepoStatus(a.specId ? String(a.specId) : undefined);
+        return { ok: true };
       case "elicitation.reply": // SPEC-012
         return this.decideElicitation("reply", String(a.sessionId ?? ""), String(a.questionId ?? ""), a.answer != null ? String(a.answer) : undefined);
       case "elicitation.reject":
@@ -2449,6 +2540,10 @@ export class ProjectContext {
       /* trace unavailable — still publish the live event */
     }
     this.publish(stamped);
+    // SPEC-025: after a diff/terminal-session event, schedule a debounced repo-status recompute for the
+    // affected branch. This lives in emit() (not the pump) because diff.finalized/session.status are
+    // emitted internally too; it never reacts to repo.* events, so there is no recursion.
+    this.scheduleRepoRecompute(stamped);
   }
 }
 
@@ -2629,9 +2724,9 @@ function sanitizePermission(raw: unknown): Record<string, string> | undefined {
 }
 
 /** Bound git invocations so a hanging hook / credential or GPG prompt can't wedge the event loop. */
-const GIT_TIMEOUT_MS = Number(process.env.ARKE_GIT_TIMEOUT_MS ?? 20_000);
+export const GIT_TIMEOUT_MS = Number(process.env.ARKE_GIT_TIMEOUT_MS ?? 20_000);
 /** Non-interactive git: never block on a terminal credential prompt (PR #18 review round 6). */
-function gitOpts(cwd: string) {
+export function gitOpts(cwd: string) {
   return { cwd, encoding: "utf8" as const, timeout: GIT_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
 }
 

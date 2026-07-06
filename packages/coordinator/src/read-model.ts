@@ -1,4 +1,4 @@
-import type { BoardColumn, DomainEvent, TranscriptEntry } from "@arke/contracts";
+import type { BoardColumn, DomainEvent, RepoIdentityView, RepoStatusView, TranscriptEntry } from "@arke/contracts";
 
 /**
  * The normalized read model the board reads from (PRD §8.5, FR-9; SPEC-003, SPEC-023).
@@ -63,6 +63,9 @@ export class ReadModel {
   /** sessionId → open human-gate ids (permissionIds + elicitation questionIds). `needsHuman` is sticky
    *  while any gate is open, so an unrelated session.status/todo/message event can't vacate it (SPEC-012). */
   private openGates = new Map<string, Set<string>>();
+  /** SPEC-025: live repository identity + per-spec git/PR status, folded from repo.identity/repo.status. */
+  private repoIdentity: RepoIdentityView | null = null;
+  private repoStatusBySpec = new Map<string, RepoStatusView>();
 
   private gateOpen(sessionId: string, gateId: string): void {
     let s = this.openGates.get(sessionId);
@@ -166,6 +169,26 @@ export class ReadModel {
         if (s) s.diff = { added: event.added, removed: event.removed, files: event.files };
         break;
       }
+      case "repo.identity": {
+        // SPEC-025: strip the event envelope; keep only the identity view the panel header renders.
+        this.repoIdentity = { name: event.name, remote: event.remote, default: event.default, head: event.head };
+        break;
+      }
+      case "repo.status": {
+        this.repoStatusBySpec.set(event.specId, {
+          specId: event.specId,
+          branch: event.branch,
+          ahead: event.ahead,
+          behind: event.behind,
+          dirty: event.dirty,
+          added: event.added,
+          removed: event.removed,
+          files: event.files,
+          pr: event.pr,
+          ...(event.degraded ? { degraded: event.degraded } : {}),
+        });
+        break;
+      }
       case "message.part":
         this.applyPart(event);
         break;
@@ -181,6 +204,18 @@ export class ReadModel {
 
   snapshot(): CardState[] {
     return [...this.cards.values()];
+  }
+
+  /** SPEC-025: the current repository identity + per-spec status, for the connection snapshot so a
+   *  freshly-connected client isn't blank until the next refresh. */
+  repoSnapshot(): { repoIdentity: RepoIdentityView | null; gitBranches: RepoStatusView[] } {
+    return { repoIdentity: this.repoIdentity, gitBranches: [...this.repoStatusBySpec.values()] };
+  }
+
+  /** SPEC-025: the specification a session folds into (populated on session.status), or undefined — so a
+   *  repo-status recompute trigger can resolve a `diff.finalized`'s bare sessionId to its owning spec. */
+  specForSession(sessionId: string): string | undefined {
+    return this.sessionSpec.get(sessionId);
   }
 
   // ---- card / session helpers ----

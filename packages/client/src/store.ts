@@ -63,6 +63,15 @@ const NOTIFS = [
   { id: uid('nt'), ts: now() - 800000, kind: 'projection', text: 'Jira projection PAY-318 succeeded', read: true, view: 'projections' },
 ];
 
+// SPEC-025: demo repository identity + per-spec git/PR status for the Overview's Repository panel.
+const REPO = { name: 'acme/payments-service', remote: 'git@github.com:acme/payments-service.git', default: 'main', head: 'a1f8c02' };
+const GIT_BRANCHES = [
+  { specId: 'SPEC-016', branch: 'spec/webhook-verify', ahead: 2, behind: 0, dirty: 3, added: 41, removed: 6, files: 4, pr: null },
+  { specId: 'SPEC-014', branch: 'spec/payment-retry', ahead: 9, behind: 1, dirty: null, added: 212, removed: 38, files: 11, pr: { number: 224, status: 'draft' } },
+  { specId: 'SPEC-013', branch: 'spec/rate-limits', ahead: 4, behind: 0, dirty: null, added: 96, removed: 11, files: 6, pr: { number: 221, status: 'open' } },
+  { specId: 'SPEC-010', branch: 'spec/sso-okta', ahead: 0, behind: 3, dirty: null, added: 0, removed: 0, files: 0, pr: null, degraded: [{ field: 'pr', reason: 'GitHub integration not configured' }] },
+];
+
 const PROJECTIONS = [
   { id: 'PAY-318', system: 'Jira', title: 'Payment retry with idempotency keys', state: 'In Progress', spec: 'SPEC-014', health: 'ok', last: '4m ago' },
   { id: 'PAY-319', system: 'Jira', title: 'Add idempotency_key migration', state: 'In Progress', spec: 'SPEC-014', health: 'ok', last: '4m ago' },
@@ -121,6 +130,10 @@ export const store = createStore({
   audit: DEMO ? AUDIT : [],
   notifs: DEMO ? NOTIFS : [],
   projections: DEMO ? PROJECTIONS : [],
+  // SPEC-025: live repository identity + per-spec git/PR status for the Overview's Repository panel,
+  // folded from repo.identity/repo.status events and seeded by the connection snapshot.
+  repo: DEMO ? REPO : null,
+  gitBranches: DEMO ? GIT_BRANCHES : [],
   agents: DEMO ? AGENTS : [],
   harnesses: DEMO ? HARNESSES : [],
   integrations: DEMO ? INTEGRATIONS : [],
@@ -149,7 +162,6 @@ export const store = createStore({
   runtimeMode: 'supervised',
   accent: 'mono',
   liveStream: true,
-  chrome: 'desktop',
   emptyDemo: false,
   // Live coordinator link (SPEC-003). `connection` mirrors the transport state machine;
   // `live` flips true once a snapshot arrives, at which point the mock engine stands down.

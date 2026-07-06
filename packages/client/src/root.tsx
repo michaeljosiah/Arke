@@ -7,6 +7,7 @@ import { Picker, Initialisation, Library } from './screens/picker-init-library';
 import { Cockpit } from './screens/cockpit';
 import { Review, Generation } from './screens/review-generation';
 import { Board, Session, DiffReview, PermissionOverlay } from './screens/board-session-diff-permission';
+import { Overview } from './screens/overview';
 import { Audit, Projections, Agents, Notifications } from './screens/audit-projections-roster-notifications';
 import { Harnesses, Settings } from './screens/harnesses-settings';
 import { Integrations } from './screens/config';
@@ -16,6 +17,7 @@ import { Tweaks } from './tweaks';
 const e = React.createElement;
 
 const SCREENS: Record<string, React.ComponentType<any>> = {
+  dashboard: Overview,
   library: Library,
   cockpit: Cockpit,
   review: Review,
@@ -34,6 +36,7 @@ const SCREENS: Record<string, React.ComponentType<any>> = {
 
 // `{spec}` is substituted with the live active spec id at render (never a hardcoded demo id).
 const CRUMBS: Record<string, string[]> = {
+  dashboard: ['Overview'],
   library: ['Specifications'],
   cockpit: ['{spec}', 'Authoring cockpit'],
   review: ['{spec}', 'Review panel'],

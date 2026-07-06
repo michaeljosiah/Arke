@@ -12,20 +12,10 @@ export function Wordmark({ size = 18, onDark = false }: { size?: number; onDark?
     'Arke');
 }
 
-function ChromeBar() {
-  const project = useStore((s) => s.project);
-  return e('div', { style: { height: 36, flex: 'none', display: 'flex', alignItems: 'center', padding: '0 14px', background: 'var(--secondary)', borderBottom: '1px solid var(--border)', WebkitUserSelect: 'none', userSelect: 'none' } },
-    e('div', { style: { display: 'flex', gap: 8 } },
-      ['#FF5F57', '#FEBC2E', '#28C840'].map((c) => e('span', { key: c, style: { width: 12, height: 12, borderRadius: 999, background: c, opacity: 0.92 } }))),
-    e('div', { style: { flex: 1, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 } },
-      e(Wordmark, { size: 13 }),
-      project ? e('span', { style: { color: 'var(--neutral-400)' } }, '— ' + project.name) : null,
-    ),
-    e('div', { style: { width: 52 } }),
-  );
-}
-
 const NAV = [
+  { group: 'Home', items: [
+    { id: 'dashboard', name: 'gauge', label: 'Overview' },
+  ] },
   { group: 'Specification', items: [
     { id: 'library', name: 'book', label: 'Specifications' },
     { id: 'cockpit', name: 'chat', label: 'Authoring cockpit' },
@@ -181,9 +171,7 @@ function TopBar({ crumbs, actions }: any) {
 }
 
 export function Shell({ crumbs, actions, children }: any) {
-  const chrome = useStore((s) => s.chrome);
   return e('div', { style: { height: '100%', width: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--background)' } },
-    chrome === 'desktop' ? e(ChromeBar, null) : null,
     e('div', { style: { flex: 1, display: 'flex', minHeight: 0 } },
       e(Sidebar, null),
       e('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
