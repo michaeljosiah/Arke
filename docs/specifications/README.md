@@ -31,6 +31,14 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 
 ## The feature specs
 
+> **The live spec map is generated:** [`index.md`](index.md) is the authoritative, always-current
+> listing of every specification with its **status** — regenerated deterministically by the coordinator
+> on each change (SPEC-026), never hand-edited. The table below is the curated **planning** view (PRD
+> coverage · phase · effort), which is editorial and not in spec frontmatter; those columns fold into the
+> generated index once specs carry `covers`/`phase`/`points` frontmatter (opportunistic — SPEC-026 open
+> question). For "does this spec exist / what status is it in", read `index.md`; for "why/when/how-big",
+> read here.
+
 | # | Feature | Covers (PRD) | Phase | ~pts |
 |---|---------|--------------|-------|------|
 | 002 | [OpenCode harness adapter — live](002.opencode-harness-adapter.md) | FR-2, FR-4, FR-8; §15; NFR-5/8 | 1 | 8 |

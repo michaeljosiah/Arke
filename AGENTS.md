@@ -58,6 +58,17 @@ Read `docs/PRD-Arke.html` for the full product definition.
   `scaffold-manifest.json`, `projection-fallback.ndjson`) is runtime **state**, git-ignored. The
   config model is defined in SPEC-005.
 
+## The `docs/` tree is OKF (SPEC-026)
+
+Every folder under `docs/` is an **Open Knowledge Format** bundle — just markdown: each authored
+document carries a `type:` in its frontmatter, concepts link with ordinary markdown links, and each
+bundle has an **`index.md`**. That `index.md` is **generated** by the coordinator (a deterministic
+projection of the folder's frontmatter, regenerated on every relevant change) — **do not hand-edit
+it**; edit the documents and let it regenerate. Consult the relevant `index.md` to see what exists and
+follow its links to related documents. Foundational grounding (product/business/domain context) lives
+as typed OKF documents anywhere in `docs/` and is selected by `type`, not by folder (SPEC-027) — there
+is no dedicated grounding folder.
+
 ## Completion gates
 
 Before any task is "done":
