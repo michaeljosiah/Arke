@@ -49,6 +49,10 @@ owner: tester
 
 The system SHALL do a thing.
 
+#### Scenario: The thing is done
+- **WHEN** the thing is requested
+- **THEN** the system does the thing
+
 ## Change history
 - 2026-06-30 · ${BRANCH} · draft — ADDED x
 `;

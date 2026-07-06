@@ -46,6 +46,10 @@ owner: tester
 
 The system SHALL do a thing.
 
+#### Scenario: The thing is done
+- **WHEN** the thing is requested
+- **THEN** the system does the thing
+
 ## Change history
 - 2026-06-28 · ${branch} · draft — ADDED x
 `;
@@ -200,6 +204,47 @@ test("approveDraft with a mismatched branch fails, emits spec.approval-failed, l
   const evt = await waitFor((f) => f.type === "event" && f.event?.type === "spec.approval-failed");
   assert.equal(evt.event.specId, "SPEC-TEST");
   // status on disk is unchanged (still draft) and nothing new was committed
+  const onDisk = readFileSync(resolve(dir, "docs", "specifications", "test.md"), "utf8");
+  assert.ok(/status:\s*draft/.test(onDisk));
+  assert.equal(git(dir, "status", "--porcelain", "--", "docs/specifications/test.md").trim(), "");
+  ws.close();
+});
+
+test("SPEC-024: approveDraft on a malformed draft is rejected with spec.malformed, no commit", async () => {
+  const dir = repoWith(BRANCH);
+  // Overwrite the well-formed fixture with a malformed one: a Requirements section and a SHALL, but NO
+  // WHEN/THEN scenario. The well-formedness gate runs first, so this is refused before the review/branch
+  // gates, and nothing is written or committed.
+  const malformed = `---
+spec_id: SPEC-TEST
+title: Test spec
+status: draft
+branch: ${BRANCH}
+owner: tester
+---
+
+# Test spec
+
+## Requirements
+
+### Requirement: A thing
+The system SHALL do a thing.
+
+## Change history
+- 2026-07-05 · ${BRANCH} · draft — ADDED x
+`;
+  writeFileSync(resolve(dir, "docs", "specifications", "test.md"), malformed, "utf8");
+  git(dir, "commit", "-q", "-am", "malformed");
+  const { c, port } = await coordinatorAt(dir);
+  after(() => c.stop());
+  const { ws, ready, request, waitFor } = connect(port);
+  await ready;
+  const res = await request("approveDraft", { specId: "SPEC-TEST", branch: BRANCH });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not well-formed/i);
+  const evt = await waitFor((f) => f.type === "event" && f.event?.type === "spec.malformed" && f.event.specId === "SPEC-TEST");
+  assert.ok(evt.event.missing.includes("scenarios"), "the missing list names the absent scenarios");
+  // Status stays draft and nothing new is committed.
   const onDisk = readFileSync(resolve(dir, "docs", "specifications", "test.md"), "utf8");
   assert.ok(/status:\s*draft/.test(onDisk));
   assert.equal(git(dir, "status", "--porcelain", "--", "docs/specifications/test.md").trim(), "");

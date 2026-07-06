@@ -6,6 +6,7 @@ import {
   parseFrontmatter,
   parseSpecDoc,
   setFrontmatterStatus,
+  validateWellFormed,
 } from "@arke/contracts";
 
 const DOC = `---
@@ -57,6 +58,17 @@ test("parseFrontmatter strips inline comments and unquotes scalars", () => {
   assert.equal(data.status, "draft"); // inline comment removed
   assert.equal(data.branch, "feat/x"); // double-quotes stripped
   assert.equal(data.owner, "dana.k"); // single-quotes stripped
+});
+
+test("parseFrontmatter parses CRLF frontmatter (git autocrlf checkout on Windows)", () => {
+  // Regression (SPEC-024): git's autocrlf converts a spec to CRLF on checkout; the value regex's `.`
+  // does not match `\r`, so every key silently failed and the whole doc parsed empty — which made
+  // findSpecFile miss the file after a local merge left HEAD on the mainline.
+  const crlf = DOC.replace(/\n/g, "\r\n");
+  const { data } = parseFrontmatter(crlf);
+  assert.equal(data.spec_id, "SPEC-2026-06-28-authoring-cockpit");
+  assert.equal(data.status, "draft");
+  assert.equal(data.branch, "feat/authoring-cockpit");
 });
 
 test("parseFrontmatter unquotes a scalar that also carries an inline comment", () => {
@@ -115,4 +127,64 @@ test("appendChangeHistory creates the section when absent", () => {
   const out = appendChangeHistory("# Spec\n\nbody only\n", "first line");
   assert.ok(out.includes("## Change history"));
   assert.ok(out.includes("- first line"));
+});
+
+// ---- SPEC-024: the well-formedness gate (new parser, beyond section presence) ----
+
+/** A well-formed draft: Requirements section + a SHALL statement + a WHEN/THEN scenario. */
+const WELL_FORMED = `---
+spec_id: SPEC-WF
+status: draft
+branch: feat/x
+---
+
+# WF
+
+## Requirements
+
+### Requirement: A thing
+The system SHALL do a thing.
+
+#### Scenario: it works
+- **WHEN** asked
+- **THEN** it does
+`;
+
+test("validateWellFormed passes a draft with requirements, a SHALL, and a WHEN/THEN scenario", () => {
+  const r = validateWellFormed(WELL_FORMED);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.missing, []);
+});
+
+test("validateWellFormed flags a missing WHEN/THEN scenario", () => {
+  const noScenario = WELL_FORMED.replace(/#### Scenario:[\s\S]*$/, "");
+  const r = validateWellFormed(noScenario);
+  assert.equal(r.ok, false);
+  assert.ok(r.missing.includes("scenarios"));
+});
+
+test("validateWellFormed flags a scenario missing its THEN (a WHEN alone is not enough)", () => {
+  const whenOnly = WELL_FORMED.replace(/- \*\*THEN\*\* it does\n/, "");
+  const r = validateWellFormed(whenOnly);
+  assert.equal(r.ok, false);
+  assert.ok(r.missing.includes("scenarios"));
+});
+
+test("validateWellFormed flags missing normative statements (no SHALL/MUST)", () => {
+  const noNormative = WELL_FORMED.replace("The system SHALL do a thing.", "The system does a thing.");
+  const r = validateWellFormed(noNormative);
+  assert.equal(r.ok, false);
+  assert.ok(r.missing.includes("normative statements"));
+});
+
+test("validateWellFormed flags a missing requirements section", () => {
+  const noReq = `---\nstatus: draft\n---\n\n# X\n\n## Design\nprose only\n`;
+  const r = validateWellFormed(noReq);
+  assert.equal(r.ok, false);
+  assert.ok(r.missing.includes("requirements section"));
+});
+
+test("validateWellFormed accepts MUST as a normative statement too", () => {
+  const withMust = WELL_FORMED.replace("The system SHALL do a thing.", "The system MUST do a thing.");
+  assert.equal(validateWellFormed(withMust).ok, true);
 });

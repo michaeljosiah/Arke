@@ -43,4 +43,4 @@ export function Empty({ icon, title, body }: { icon: string; title: string; body
     e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, maxWidth: 380, textAlign: 'center', color: 'var(--muted-foreground)', lineHeight: 1.5 } }, body));
 }
 
-export const statusTone = { draft: 'draft', 'in-review': 'review', approved: 'approved', merged: 'merged' };
+export const statusTone = { draft: 'draft', 'in-review': 'review', approved: 'approved', delivered: 'delivered' };

@@ -3,9 +3,35 @@ import { Icon } from '../icons';
 import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { liveSend, reconnectLive, promoteSpecLive } from '../live';
+import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance } from '../live';
 
 const e = React.createElement;
+
+// SPEC-024: the legal governed status edges the board may OFFER as a manual move. This mirrors the
+// coordinator's authoritative LEGAL_TRANSITIONS — the server still refuses any illegal move, so this is
+// only a UI affordance. `draft → in-review` is intentionally omitted here: promotion has its own gated
+// "Promote to review" button (the well-formedness / review-panel door), not a bare status flip.
+const MANUAL_MOVES: Record<string, Array<{ to: string; label: string }>> = {
+  'in-review': [{ to: 'approved', label: 'Approve' }, { to: 'draft', label: 'Send back to draft' }],
+  approved: [{ to: 'in-review', label: 'Reopen (in-review)' }, { to: 'delivered', label: 'Mark delivered' }],
+  delivered: [{ to: 'in-review', label: 'Reopen (in-review)' }],
+};
+
+/** The governance assurance badge (SPEC-024, host-optional): how strongly the approver-≠-owner invariant
+ *  is enforced. `host-enforced` = webhooks + branch protection; `solo`/`team` = host-less. */
+function GovernanceBadge() {
+  const gov = useStore((s: any) => s.governance) as { level?: string; hostConfigured?: boolean } | undefined;
+  React.useEffect(() => { void fetchGovernance(); }, []);
+  if (!gov?.level) return null;
+  const LABEL: Record<string, string> = { 'host-enforced': 'Host-enforced', team: 'Team', solo: 'Solo' };
+  const title =
+    gov.level === 'host-enforced'
+      ? 'A git host is configured — PR review + branch protection enforce an approver distinct from the owner'
+      : 'No git host — governed transitions are human-triggered; self-approval is permitted but flagged';
+  return e('span', { title, style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 9px' } },
+    e(StatusDot, { status: gov.level === 'host-enforced' ? 'agree' : 'idle' }),
+    'Governance: ' + (LABEL[gov.level] ?? gov.level));
+}
 
 /** Transport health (SPEC-010): live dot when open, spinner while reconnecting, error banner on a
  *  permanent close with a manual Reconnect — distinct from the transient reconnecting state. */
@@ -33,7 +59,7 @@ const COLS = [
   { id: 'implementing', label: 'Implementing' },
   { id: 'needs-human', label: 'Needs human' },
   { id: 'diff', label: 'Diff review' },
-  { id: 'merged', label: 'Merged' },
+  { id: 'delivered', label: 'Delivered' },
 ];
 
 /** Open a card's session detail (SPEC-023): a spec card folds N sessions, so pick the target — the sole
@@ -48,10 +74,24 @@ function openCard(c: any) {
 
 function BoardCard({ c }: any) {
   const open = () => openCard(c);
+  const [menuOpen, setMenuOpen] = React.useState(false);
   const showBar = (c.col === 'authoring' || c.col === 'implementing') && !c.needsHuman;
-  // Promote-to-review is a human correction on a draft spec card — it sends a governed coordinator
-  // command (spec.promote); the card moves only when the resulting spec.status event arrives, never
-  // by a direct column write (SPEC-010). Every card is now one specification (SPEC-023).
+  // Manual board moves (SPEC-024): the human dispatches the gated `spec.transition` op — never a direct
+  // column write. We OFFER only legal-adjacent targets for the card's current frontmatter status; the
+  // server is the real gate and refuses anything illegal. (Live cards carry the frontmatter `status`; the
+  // offline demo's session-status cards have no entry here, so no menu shows.)
+  const moves = MANUAL_MOVES[c.status] || [];
+  const move = async (to: string, ev: any) => {
+    ev.stopPropagation();
+    setMenuOpen(false);
+    const res = await transitionSpecLive(c.specId || c.id, to);
+    const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+    if (err) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `move failed — ${err}` } }));
+  };
+  // Promote-to-review on a draft spec card runs the SINGLE gated door (SPEC-024): promoteSpecLive now
+  // dispatches the governed `approveDraft` op (well-formedness → completed review panel → no running
+  // authoring session → branch guard), never the deleted ungated `spec.promote`. The card moves only
+  // when the resulting spec.status event arrives, never by a direct column write. One card per spec (SPEC-023).
   const canPromote = c.col === 'authoring';
   const promote = async (ev: any) => {
     ev.stopPropagation();
@@ -61,11 +101,31 @@ function BoardCard({ c }: any) {
     const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
     if (err) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `promote failed — ${err}` } }));
   };
+  // Deliver is the explicit, decoupled start of delivery on an APPROVED spec (SPEC-024): approval parks
+  // the spec in the backlog; the human (or, later, an automation) chooses when to fan the tasks out. Same
+  // governed-command discipline as promote — the card moves only when the resulting status/session events
+  // arrive, never by a direct column write.
+  const canDeliver = c.col === 'approved';
+  const deliver = async (ev: any) => {
+    ev.stopPropagation();
+    const res = await deliverSpecLive(c.specId || c.id);
+    const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+    if (err) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `deliver failed — ${err}` } }));
+  };
   return e('div', { className: 'so-enter', onClick: open, style: { cursor: 'pointer', position: 'relative' } },
     showBar ? e('div', { style: { position: 'absolute', left: 11, right: 11, top: 0, height: 2, background: 'var(--secondary)', borderRadius: 999, overflow: 'hidden', zIndex: 2 } },
       e('div', { style: { height: '100%', width: (c.progress || 0) + '%', background: 'var(--foreground)', transition: 'width .6s ease' } })) : null,
     e(KanbanCard, { taskId: c.id, title: c.title, status: c.status, harness: c.harness, model: c.model, needsHuman: c.needsHuman }),
     canPromote ? e('button', { onClick: promote, title: 'Promote this draft to in-review', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--muted-foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer' } }, 'Promote to review') : null,
+    canDeliver ? e('button', { onClick: deliver, title: 'Start delivery — fan the approved spec\'s tasks out', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, cursor: 'pointer' } }, 'Deliver') : null,
+    moves.length > 0
+      ? e('div', { style: { marginTop: 6 } },
+          e('button', { onClick: (ev: any) => { ev.stopPropagation(); setMenuOpen((v) => !v); }, title: 'Manual governed move — runs the same gate as a webhook', style: { width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--muted-foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 } }, 'Move', e(Icon, { name: 'chevron', size: 12 })),
+          menuOpen
+            ? e('div', { style: { marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 } },
+                moves.map((m) => e('button', { key: m.to, onClick: (ev: any) => void move(m.to, ev), style: { textAlign: 'left', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--background)', color: 'var(--foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer' } }, m.label)))
+            : null)
+      : null,
   );
 }
 
@@ -107,6 +167,7 @@ export function Board() {
       e('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 } },
         e('p', { style: { margin: 0, maxWidth: 600, fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.5, color: 'var(--muted-foreground)' } }, 'A card moves because the work moved, not because a person dragged it. Columns are computed from frontmatter, session and CI state — projected live from the harness event stream.'),
         e('div', { style: { flex: 1 } }),
+        e(GovernanceBadge, null),
         e(ConnectionIndicator, null),
         e(Badge, { variant: 'secondary' }, 'event-driven')),
       empty

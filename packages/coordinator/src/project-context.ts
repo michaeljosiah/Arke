@@ -4,18 +4,20 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   DomainEvent,
+  SpecStatus,
   appendChangeHistory,
   parseFrontmatter,
   parseSpecDoc,
   setFrontmatterStatus,
+  validateWellFormed,
   type AgentImage,
   type AgentModel,
   type CapabilityMaterialisation,
+  type GovernanceLevel,
   type HarnessAdapter,
   type PermissionAck,
   type PermissionDecision,
   type ScaffoldStep,
-  type SpecStatus,
 } from "@arke/contracts";
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
@@ -556,6 +558,9 @@ export class ProjectContext {
         // `canonicalId` is the frontmatter spec id, so results/events use it even when the caller
         // passed a slug/title/filename alias (PR #18 review round 7).
         const canonicalId = data.spec_id ?? data.specId ?? specId;
+        // SPEC-024: coerce legacy on-disk `status: merged` to the renamed terminal `delivered` on read,
+        // so a spec authored before the rename still resolves to a valid status (spec.ts note).
+        if (data.status === "merged") data.status = "delivered";
         return { relPath: relative(realRoot, real).replaceAll("\\", "/"), absPath: real, text, frontmatter: data, canonicalId };
       }
     }
@@ -661,26 +666,10 @@ export class ProjectContext {
     const specId = found.canonicalId;
     const owner = found.frontmatter.owner;
 
-    // Advance status in the read model AND persist it to the file frontmatter, so the library's
-    // divergence check (read-model vs. frontmatter) only fires on genuine drift, not after every
-    // transition (the spec calls for the frontmatter status to follow PR state).
-    const setStatus = async (status: SpecStatus, reason: string, extra?: Partial<SpecRecordState>) => {
-      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), status, ...(("prNumber" in t) ? { prNumber: (t as any).prNumber } : {}), ...extra });
-      try {
-        const cur = this.findSpecFile(specId);
-        if (cur && (cur.frontmatter.status ?? "draft") !== status) writeFileSync(cur.absPath, setFrontmatterStatus(cur.text, status), "utf8");
-      } catch {
-        /* best-effort: the read model is authoritative for the gate; a write failure surfaces as divergence */
-      }
-      await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason });
-      // SPEC-009 demotion guard: leaving `approved` while tasks are still queued halts the queue —
-      // queued tasks for a no-longer-approved spec must not be dispatched.
-      if (status !== "approved" && (this.fanoutQueues.get(specId)?.length ?? 0) > 0) {
-        this.fanoutHalted.add(specId);
-        await this.trace.write({ kind: "fanout.halted", projectId: this.projectId, specId, reason: "spec-demoted" });
-      }
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason } as DomainEvent);
-    };
+    // Advance status via the shared `commitStatus` executor (SPEC-024) — the same write+persist+trace+
+    // emit mechanics the human manual-move path uses, so a webhook and a person leave identical state.
+    const setStatus = (status: SpecStatus, reason: string, extra?: Partial<SpecRecordState>) =>
+      this.commitStatus(specId, status, reason, { prNumber: "prNumber" in t ? (t as any).prNumber : undefined, extra });
 
     switch (t.kind) {
       case "opened":
@@ -703,23 +692,26 @@ export class ProjectContext {
         return { applied: "no-op", specId };
       }
       case "approved": {
-        // Second-human gate, fail CLOSED: an approval from the owner, OR a spec with no `owner` to check
-        // against, must NOT advance to approved (the governance invariant can't be verified).
-        if (!owner || isSelfApproval(t.approver, owner)) {
-          await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId, approver: t.approver, prNumber: t.prNumber, reason: owner ? "self-approval" : "no-owner-to-verify" });
-          return { applied: owner ? "self-approval-rejected" : "approval-rejected-no-owner", specId };
+        // Second-human gate, fail CLOSED (SPEC-024: shared `approveGate` with the manual path). An
+        // approval from the owner, OR a spec with no `owner` to verify against, must NOT advance to
+        // approved via a webhook — the governance invariant can't be verified.
+        const gate = this.approveGate(owner, t.approver, "webhook");
+        if (!gate.ok) {
+          await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId, approver: t.approver, prNumber: t.prNumber, reason: gate.code === "no-owner" ? "no-owner-to-verify" : "self-approval" });
+          return { applied: gate.code === "no-owner" ? "approval-rejected-no-owner" : "self-approval-rejected", specId };
         }
         // Record the normative baseline so a later material change can be detected.
         await setStatus("approved", "pr-approved", { normativeHash: normativeHash(found.text) });
         this.fanoutHalted.delete(specId);
-        void this.fanOut(specId); // SPEC-009: fan the task list out concurrently (non-blocking)
-        void this.generate(specId); // SPEC-013: propose downstream artefacts from the approved spec
+        // SPEC-024: approval is DECOUPLED from delivery. Reaching `approved` no longer fans out or
+        // generates — it is a resting backlog state. Delivery (fan-out + downstream-artefact generation)
+        // is started explicitly by the `spec.deliver` op, which may run later, on any branch.
         return { applied: "approved", specId };
       }
-      case "merged":
+      case "merged": // git-side transition kind (WebhookTransition.kind) — the PR merged
         await this.flattenAndMerge(specId, t.branch);
-        await setStatus("merged", "pr-merged");
-        return { applied: "merged", specId };
+        await setStatus("delivered", "pr-merged"); // SPEC-024: the governed terminal status is `delivered`
+        return { applied: "delivered", specId };
       case "force-push": {
         if (found.frontmatter.branch && found.frontmatter.branch !== t.branch) {
           await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.branch-mismatch", specId, frontmatterBranch: found.frontmatter.branch, pushedBranch: t.branch } as DomainEvent);
@@ -727,6 +719,185 @@ export class ProjectContext {
         return { applied: "force-push-revalidated", specId };
       }
     }
+  }
+
+  /**
+   * `commitStatus` (SPEC-024) — the ONE place a governed status is written: read-model record →
+   * frontmatter persistence → audit trace → SPEC-009 demotion guard → `spec.status` emit. Shared by the
+   * webhook lifecycle and the human manual-move path so both triggers leave identical state. `actor` is
+   * carried for a human move (audited + emitted); absent for a webhook.
+   */
+  private async commitStatus(
+    specId: string,
+    status: SpecStatus,
+    reason: string,
+    opts?: { prNumber?: number; actor?: string; extra?: Partial<SpecRecordState> },
+  ): Promise<void> {
+    this.specRecords.set(specId, {
+      ...(this.specRecords.get(specId) ?? {}),
+      status,
+      ...(opts?.prNumber !== undefined ? { prNumber: opts.prNumber } : {}),
+      ...(opts?.extra ?? {}),
+    });
+    try {
+      const cur = this.findSpecFile(specId);
+      if (cur && (cur.frontmatter.status ?? "draft") !== status) writeFileSync(cur.absPath, setFrontmatterStatus(cur.text, status), "utf8");
+    } catch {
+      /* best-effort: the read model is authoritative for the gate; a write failure surfaces as divergence */
+    }
+    await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) });
+    // SPEC-009 demotion guard: leaving `approved` while tasks are still queued halts the queue —
+    // queued tasks for a no-longer-approved spec must not be dispatched.
+    if (status !== "approved" && (this.fanoutQueues.get(specId)?.length ?? 0) > 0) {
+      this.fanoutHalted.add(specId);
+      await this.trace.write({ kind: "fanout.halted", projectId: this.projectId, specId, reason: "spec-demoted" });
+    }
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) } as DomainEvent);
+  }
+
+  /** Legal governed status edges (SPEC-024). The client offers only adjacent moves as an affordance; the
+   *  server enforces this table for EVERY caller, so an illegal/non-adjacent transition is refused
+   *  regardless of trigger (board, CLI, or a direct op). */
+  private static readonly LEGAL_TRANSITIONS: Record<string, SpecStatus[]> = {
+    draft: ["in-review"],
+    "in-review": ["approved", "draft"],
+    approved: ["in-review", "delivered", "draft"],
+    delivered: ["in-review"],
+  };
+
+  /** Is a git host configured (webhooks can drive transitions)? The webhook secret is the signal that
+   *  PR review + branch protection govern this project — otherwise governance is host-less. */
+  private hostConfigured(): boolean {
+    return !!process.env.ARKE_WEBHOOK_SECRET;
+  }
+
+  /** The governance assurance level surfaced to the board (SPEC-024, host-optional). */
+  governanceStatus(): { level: GovernanceLevel; hostConfigured: boolean } {
+    const hostConfigured = this.hostConfigured();
+    return { level: hostConfigured ? "host-enforced" : "solo", hostConfigured };
+  }
+
+  /**
+   * The second-human approval gate (SPEC-024), shared by the webhook `approved` path and the human
+   * manual-approve op — one gate, two triggers. A distinct approver (≠ owner) always passes. When the
+   * approver is the owner or unknown: a webhook fails CLOSED; a host-enforced human is refused; only a
+   * host-LESS human is allowed, in solo mode, and that self-approval is flagged for audit.
+   */
+  private approveGate(
+    owner: string | undefined,
+    approver: string | undefined,
+    trigger: "webhook" | "human",
+  ): { ok: true; solo?: boolean } | { ok: false; code: "self-approval" | "no-owner"; reason: string } {
+    if (approver && owner && !isSelfApproval(approver, owner)) return { ok: true };
+    if (trigger === "webhook") {
+      return owner
+        ? { ok: false, code: "self-approval", reason: "self-approval rejected" }
+        : { ok: false, code: "no-owner", reason: "no owner to verify the approver against" };
+    }
+    // Human trigger with no distinct approver:
+    if (this.hostConfigured()) return { ok: false, code: "self-approval", reason: "host-enforced governance requires an approver distinct from the owner" };
+    return { ok: true, solo: true }; // host-less solo self-approval — permitted but flagged
+  }
+
+  /**
+   * `applyTransition` (SPEC-024) — the ONE gated executor for a governed status change, shared by the
+   * human manual-move op and (for the symmetric edges) the webhook lifecycle. The trigger differs (a
+   * git-host webhook vs a person); the gate does not. Enforces legal adjacency, the per-edge gate
+   * (second-human approval; the gated draft→in-review door; host-less local merge), the reopen
+   * side-effect (interrupt in-flight delivery), and audits every move with `reason`/`actor`. Refuses any
+   * illegal or non-adjacent transition for EVERY caller.
+   */
+  private async applyTransition(
+    specId: string,
+    to: SpecStatus,
+    trigger: { kind: "webhook"; approver?: string } | { kind: "human"; actor?: string },
+  ): Promise<{ applied: string; specId?: string; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { applied: "no-spec", error: `no spec '${specId}'` };
+    const cid = found.canonicalId;
+    const from = (this.specRecords.get(cid)?.status ?? found.frontmatter.status ?? "draft") as SpecStatus;
+    if (from === to) return { applied: "no-op", specId: cid };
+    const legal = ProjectContext.LEGAL_TRANSITIONS[from] ?? [];
+    if (!legal.includes(to)) {
+      const reason = `illegal transition '${from}' → '${to}'`;
+      await this.trace.write({ kind: "spec.transition-rejected", projectId: this.projectId, specId: cid, from, to, reason, trigger: trigger.kind });
+      return { applied: "illegal-transition", specId: cid, error: reason };
+    }
+    const owner = found.frontmatter.owner;
+    const actor = trigger.kind === "human" ? trigger.actor : undefined;
+
+    // draft → in-review is the single gated door: delegate to `approveDraft` so a manual promote runs the
+    // identical well-formedness / review-panel / branch gate as the cockpit approve.
+    if (from === "draft" && to === "in-review") {
+      try {
+        const r = await this.approveDraft(cid);
+        return { applied: r.status, specId: cid };
+      } catch (err) {
+        return { applied: "gate-failed", specId: cid, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    // in-review → approved: the second-human gate (shared with the webhook path).
+    if (to === "approved") {
+      const gate = this.approveGate(owner, actor, "human");
+      if (!gate.ok) {
+        await this.trace.write({ kind: "governance.self-approval-rejected", projectId: this.projectId, specId: cid, approver: actor, reason: gate.code });
+        return { applied: "self-approval-rejected", specId: cid, error: gate.reason };
+      }
+      if (gate.solo) await this.trace.write({ kind: "governance.self-approval-allowed-solo", projectId: this.projectId, specId: cid, actor });
+      await this.commitStatus(cid, "approved", gate.solo ? "manual-solo" : "manual", { actor, extra: { normativeHash: normativeHash(found.text) } });
+      this.fanoutHalted.delete(cid);
+      return { applied: "approved", specId: cid };
+    }
+
+    // approved → delivered: the merge (git → frontmatter handshake). Host-enforced delivery lands via the
+    // `merged` webhook; a host-LESS human reaches delivered by a local branch merge with conflict handling.
+    if (to === "delivered") {
+      const specBranch = found.frontmatter.branch;
+      if (!specBranch) return { applied: "no-branch", specId: cid, error: `spec '${cid}' has no frontmatter branch to merge` };
+      const merge = await this.localMerge(cid, specBranch);
+      if (!merge.ok) return { applied: "merge-failed", specId: cid, error: merge.error };
+      // Post-merge, HEAD is on the mainline. Flatten the delta tags, set `delivered`, and COMMIT that on
+      // the mainline so git truly reflects the delivered outcome (no working-tree-vs-HEAD divergence).
+      await this.flattenAndMerge(cid, specBranch);
+      await this.commitStatus(cid, "delivered", "manual-merge", { actor });
+      gitCommit(this.root, found.relPath, `spec(${cid}): delivered (local merge)`);
+      return { applied: "delivered", specId: cid };
+    }
+
+    // reopen / regression → in-review, or a manual reject → draft. Reopening a delivered (or
+    // approved-and-delivering) spec interrupts any in-flight delivery so work does not continue against a
+    // superseded contract (SPEC-024, in-place reopen).
+    if (from === "delivered" || from === "approved") await this.interruptInFlightDelivery(cid);
+    await this.commitStatus(cid, to, "manual", { actor });
+    return { applied: to, specId: cid };
+  }
+
+  /** Interrupt any in-flight delivery for a reopened spec (SPEC-024): mark its live task sessions
+   *  `interrupted` (the card surfaces needs-human) and halt any queued tasks. The contract changed —
+   *  delivery must not silently continue. */
+  private async interruptInFlightDelivery(specId: string): Promise<void> {
+    const card = this.read.snapshot().find((c) => c.specId === specId);
+    const live = (card?.sessions ?? []).filter((s) => s.kind === "task" && (s.status === "running" || s.status === "waiting" || s.status === "idle"));
+    for (const s of live) {
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: s.sessionId, specId, kind: "task", status: "interrupted" } as DomainEvent);
+    }
+    if ((this.fanoutQueues.get(specId)?.length ?? 0) > 0) this.fanoutHalted.add(specId);
+    if (live.length > 0) await this.trace.write({ kind: "delivery.interrupted", projectId: this.projectId, specId, count: live.length, reason: "reopen" });
+  }
+
+  /** Host-less local merge of a spec branch into the mainline to reach `delivered` (SPEC-024). A conflict
+   *  is aborted cleanly and returned as a named error — never a half-merged tree. */
+  private async localMerge(specId: string, specBranch: string): Promise<{ ok: true; sha?: string } | { ok: false; error: string }> {
+    if (!gitAvailable()) return { ok: false, error: "git not found on PATH; cannot perform a local merge" };
+    const mainline = gitDefaultBranch(this.root);
+    if (!mainline) return { ok: false, error: "no mainline branch (main/master) found to merge into" };
+    if (mainline === specBranch) return { ok: false, error: `the spec branch '${specBranch}' is the mainline; nothing to merge` };
+    await this.trace.write({ kind: "local-merge.started", projectId: this.projectId, specId, from: specBranch, into: mainline });
+    const res = gitMerge(this.root, mainline, specBranch, `spec(${specId}): deliver → ${mainline} (local merge)`);
+    await this.trace.write({ kind: "local-merge.complete", projectId: this.projectId, specId, ok: res.ok, ...(res.ok ? {} : { conflict: !!res.conflict }) });
+    if (!res.ok) return { ok: false, error: res.conflict ? `local merge conflicted (aborted, no partial state): ${res.error}` : res.error };
+    return { ok: true, sha: res.sha };
   }
 
   /** Flatten delta tags on the working file at merge (idempotent), bracketed by trace markers. */
@@ -758,26 +929,29 @@ export class ProjectContext {
   }
 
   /**
-   * `spec.promote` (SPEC-010) — a human board correction that advances a DRAFT spec to in-review
-   * without going through a PR. The column is still a read-only projection: this writes the underlying
-   * frontmatter status and emits `spec.status`, so the card moves as a result of the event, never a
-   * direct column write. Traced before the change. Refuses a non-draft spec.
+   * `spec.deliver` (SPEC-024) — the explicit start of delivery, decoupled from approval. Approval parks
+   * a spec in the `approved` backlog; delivery fans out the task list (SPEC-009) and proposes downstream
+   * artefacts (SPEC-013) on a recorded delivery branch, and may run later, on any branch. Refuses a spec
+   * that is not `approved`, or one already delivering (no double-dispatch — `fanOut` is re-entrant).
    */
-  private async promoteSpec(specId: string): Promise<{ ok: boolean; specId?: string; status?: string; error?: string }> {
+  private async deliver(specId: string, branch?: string): Promise<{ ok: boolean; specId?: string; branch?: string; error?: string }> {
     const found = this.findSpecFile(specId);
     if (!found) return { ok: false, error: `no spec '${specId}'` };
     const cid = found.canonicalId;
-    const current = found.frontmatter.status ?? "draft";
-    if (current !== "draft") return { ok: false, specId: cid, error: `cannot promote: '${cid}' is '${current}', expected 'draft'` };
-    await this.trace.write({ kind: "spec.promote", projectId: this.projectId, specId: cid, from: "draft", to: "in-review" });
-    try {
-      writeFileSync(found.absPath, setFrontmatterStatus(found.text, "in-review"), "utf8");
-    } catch {
-      return { ok: false, specId: cid, error: "could not write spec frontmatter" };
-    }
-    this.specRecords.set(cid, { ...(this.specRecords.get(cid) ?? {}), status: "in-review" });
-    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId: cid, status: "in-review", reason: "promoted" } as DomainEvent);
-    return { ok: true, specId: cid, status: "in-review" };
+    const status = this.specRecords.get(cid)?.status ?? found.frontmatter.status ?? "draft";
+    if (status !== "approved") return { ok: false, specId: cid, error: `cannot deliver: '${cid}' is '${status}', expected 'approved'` };
+    // Re-delivery guard: a delivery already queued or with a live task session must not be re-dispatched.
+    const card = this.read.snapshot().find((c) => c.specId === cid);
+    const alreadyDelivering =
+      (this.fanoutQueues.get(cid)?.length ?? 0) > 0 ||
+      !!card?.sessions.some((s) => s.kind === "task" && (s.status === "running" || s.status === "idle"));
+    if (alreadyDelivering) return { ok: false, specId: cid, error: `'${cid}' is already delivering` };
+    const deliveryBranch = branch ?? found.frontmatter.branch ?? gitHeadBranch(this.root) ?? "";
+    await this.trace.write({ kind: "spec.deliver", projectId: this.projectId, specId: cid, branch: deliveryBranch });
+    this.fanoutHalted.delete(cid);
+    void this.fanOut(cid); // SPEC-009: fan the task list out concurrently
+    void this.generate(cid); // SPEC-013: propose downstream artefacts
+    return { ok: true, specId: cid, branch: deliveryBranch };
   }
 
   // ---- session detail: rescue / steering / diff-gate (SPEC-011) -----------
@@ -1170,6 +1344,18 @@ export class ProjectContext {
     if (current && current !== "draft") {
       return fail(`cannot approve: specification '${cid}' is '${current}', expected 'draft'`);
     }
+    // Well-formedness gate (SPEC-024) — the FIRST precondition. A draft may not advance out of `draft`
+    // unless it is structurally complete: a Requirements section, at least one SHALL/MUST statement, and
+    // at least one WHEN/THEN scenario. This runs ahead of the review-panel gate so an author is told the
+    // document is malformed before convening reviewers. Enforced server-side for every caller (board,
+    // CLI, direct op) — the UI's "looks done" is not the gate.
+    const wf = validateWellFormed(found.text);
+    if (!wf.ok) {
+      const reason = `specification is not well-formed — missing: ${wf.missing.join(", ")}`;
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.malformed", specId: cid, missing: wf.missing } as DomainEvent);
+      await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: false, reason: "spec.malformed" });
+      throw new Error(reason);
+    }
     // Finalisation gate (SPEC-007): a draft cannot be approved until at least one review panel has
     // completed for it. Enforced server-side so a direct approveDraft (CLI/op) can't bypass the UI.
     if (!this.completedReviews.has(cid)) {
@@ -1193,7 +1379,12 @@ export class ProjectContext {
     if (!gitAvailable()) return fail("git not found on PATH; cannot commit the approval");
     const head = gitHeadBranch(this.root);
     if (head === null) return fail("could not determine the git HEAD branch (not a git repository?)");
-    if (head !== fmBranch) return fail(`branch guard: HEAD is '${head}' but the spec's branch is '${fmBranch}'`);
+    if (head !== fmBranch) {
+      // SPEC-024: surface a TYPED branch-mismatch so a board/CLI caller that promoted from the wrong
+      // HEAD gets actionable guidance (check out the spec's branch), not just an opaque failure string.
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.branch-mismatch", specId: cid, frontmatterBranch: fmBranch, pushedBranch: head } as DomainEvent);
+      return fail(`branch guard: HEAD is '${head}' but the spec's branch is '${fmBranch}' — check out '${fmBranch}' before promoting`);
+    }
 
     const date = new Date().toISOString().slice(0, 10);
     const updated = appendChangeHistory(
@@ -1842,8 +2033,18 @@ export class ProjectContext {
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
       case "spec.fanout":
         return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
-      case "spec.promote":
-        return this.promoteSpec(String(a.specId ?? "")); // SPEC-010: human board correction draft→in-review
+      case "spec.deliver": // SPEC-024: explicit delivery (decoupled from approval) — fan out + generate
+        return this.deliver(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
+      case "spec.transition": { // SPEC-024: a human manual board move — one op, two triggers, one gate
+        const parsed = SpecStatus.safeParse(a.to);
+        if (!parsed.success) return { applied: "invalid-target", error: `invalid target status '${String(a.to)}'` };
+        return this.applyTransition(String(a.specId ?? ""), parsed.data, { kind: "human", actor: a.actor ? String(a.actor) : undefined });
+      }
+      case "governance.status": // SPEC-024: host-optional governance assurance level for the board badge
+        return this.governanceStatus();
+      // SPEC-024: the ungated `spec.promote` door is DELETED. Draft → in-review now has exactly one door —
+      // the gated `approveDraft` (well-formedness → review panel → no-running-session → branch → git).
+      // Board and CLI callers route through it; there is no path to `in-review` that skips the gate.
       case "revert": // SPEC-011 rescue
         return this.rescue("revert", String(a.sessionId ?? ""), a.messageId ? String(a.messageId) : undefined);
       case "unrevert":
@@ -2447,6 +2648,43 @@ export function gitCommit(cwd: string, relPath: string, message: string): { ok: 
       // treated as failure, and the bounded wait means a hung hook can't block forever.)
       spawnSync("git", ["reset", "-q", "--", relPath], gitOpts(cwd));
       return { ok: false, error: (commit.error?.message || commit.stderr || commit.stdout || "git commit failed").trim() };
+    }
+    const sha = spawnSync("git", ["rev-parse", "HEAD"], gitOpts(cwd));
+    return { ok: true, sha: (sha.stdout ?? "").trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The repo's mainline branch (SPEC-024 host-less delivery): the first of `main`/`master` that exists,
+ *  or null. Used as the merge target when there is no git host to define the default branch. */
+export function gitDefaultBranch(cwd: string): string | null {
+  for (const b of ["main", "master"]) {
+    if (spawnSync("git", ["rev-parse", "--verify", "-q", `refs/heads/${b}`], gitOpts(cwd)).status === 0) return b;
+  }
+  return null;
+}
+
+/**
+ * Merge `fromBranch` into `intoBranch` in `cwd` for host-less delivery (SPEC-024). Checks out the
+ * mainline, merges `--no-ff`, and — critically — aborts cleanly on conflict so no half-merged tree is
+ * ever left behind. Returns the new sha or a named failure (with `conflict` set when git reported one).
+ */
+export function gitMerge(
+  cwd: string,
+  intoBranch: string,
+  fromBranch: string,
+  message: string,
+): { ok: true; sha: string } | { ok: false; error: string; conflict?: boolean } {
+  try {
+    const co = spawnSync("git", ["checkout", intoBranch], gitOpts(cwd));
+    if (co.status !== 0) return { ok: false, error: (co.stderr || `could not checkout '${intoBranch}'`).trim() };
+    const merge = spawnSync("git", ["merge", "--no-ff", "-m", message, fromBranch], gitOpts(cwd));
+    if (merge.status !== 0) {
+      // Abort so the working tree/index is restored — never leave a conflicted, half-merged state.
+      spawnSync("git", ["merge", "--abort"], gitOpts(cwd));
+      const out = (merge.stderr || merge.stdout || "git merge failed").trim();
+      return { ok: false, error: out, conflict: /conflict/i.test(out) };
     }
     const sha = spawnSync("git", ["rev-parse", "HEAD"], gitOpts(cwd));
     return { ok: true, sha: (sha.stdout ?? "").trim() };

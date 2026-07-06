@@ -9,9 +9,22 @@ import { z } from "zod";
  * projects — they do not store the spec body, which lives in git.
  */
 
-/** Specification status, carried in frontmatter and tied to pull-request state (FR-5). */
-export const SpecStatus = z.enum(["draft", "in-review", "approved", "merged"]);
+/** Specification status, carried in frontmatter (FR-5). The terminal value is `delivered` (SPEC-024) —
+ *  it names the governance outcome (landed on the mainline as current truth), not the git mechanism, so
+ *  it stays correct for a PR merge or a local merge. Legacy on-disk `status: merged` is coerced to
+ *  `delivered` when frontmatter is read (see spec-doc.ts). */
+export const SpecStatus = z.enum(["draft", "in-review", "approved", "delivered"]);
 export type SpecStatus = z.infer<typeof SpecStatus>;
+
+/**
+ * Governance assurance level (SPEC-024, host-optional). The board surfaces this so a viewer knows how
+ * strongly the second-human approval invariant is enforced:
+ * - `host-enforced` — a git host is configured; PR review + branch protection enforce approver ≠ owner.
+ * - `team`          — no host, but an in-app approver identity (≠ owner) attests each approval.
+ * - `solo`          — no host and no distinct approver; self-approval is permitted but flagged + audited.
+ */
+export const GovernanceLevel = z.enum(["host-enforced", "team", "solo"]);
+export type GovernanceLevel = z.infer<typeof GovernanceLevel>;
 
 /**
  * Logical model tiers. Agents reference tiers, resolved per project to a gateway (FR-4, D10):

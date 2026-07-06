@@ -155,7 +155,7 @@ test("spec.library lists the project's specs from frontmatter", async () => {
   assert.deepEqual(lib[0].capabilities, ["demo"]);
 });
 
-test("PR opened → in-review; non-self approval → approved; merge → flatten + merged", async () => {
+test("PR opened → in-review; non-self approval → approved; merge → flatten + delivered", async () => {
   const dir = repo();
   const { c, port } = await start(dir);
   after(() => c.stop());
@@ -169,7 +169,7 @@ test("PR opened → in-review; non-self approval → approved; merge → flatten
   assert.equal((await libraryVia(port))[0].status, "approved");
 
   r = await hook(port, "pull_request", pr("closed", true)); // merged
-  assert.equal(r.routed[0].applied, "merged");
+  assert.equal(r.routed[0].applied, "delivered"); // SPEC-024: the git merge lands the spec as `delivered`
   const onDisk = readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8");
   assert.ok(!/delta:/i.test(onDisk), "delta tags flattened on merge");
   assert.ok(/approved — ADDED: 1/.test(onDisk), "Change history line appended");
@@ -244,18 +244,18 @@ test("approval is rejected (fail closed) when the spec has no owner to verify ag
   assert.equal((await libraryVia(port))[0].status, "in-review", "ungovernable approval does not advance");
 });
 
-test("spec.promote advances a draft to in-review and persists frontmatter (SPEC-010)", async () => {
+test("SPEC-024: the ungated spec.promote door is deleted — no path to in-review skips the gate", async () => {
   const dir = repo();
   const { c, port } = await start(dir);
   after(() => c.stop());
+  // The old ungated `spec.promote` op no longer exists: there is exactly one door to `in-review`
+  // (the gated `approveDraft`). A caller reaching for the removed op gets a structured unknown-op error.
   const r = await op(port, "spec.promote", { specId: "SPEC-LIFE" });
-  assert.equal(r.ok, true);
-  assert.equal(r.result.status, "in-review");
-  assert.ok(/status:\s*in-review/.test(readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8")));
-  assert.equal((await libraryVia(port))[0].status, "in-review");
-  // A second promote is refused (no longer a draft).
-  const r2 = await op(port, "spec.promote", { specId: "SPEC-LIFE" });
-  assert.equal(r2.result.ok, false);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /unknown op/);
+  // The spec is untouched — no ungated write advanced it.
+  assert.ok(/status:\s*draft/.test(readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8")));
+  assert.equal((await libraryVia(port))[0].status, "draft");
 });
 
 test("an empty-branch payload is ignored, not routed to an unrelated spec", async () => {
