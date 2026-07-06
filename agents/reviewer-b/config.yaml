@@ -1,11 +1,13 @@
 spec_version: 1
 name: reviewer-b
-description: "Independent critique on a different model, grounded in source."
+description: "Independent critique on a different model family, grounded in source."
 executor:
   type: omnigent
   config:
     harness: opencode-native
-    model: github-copilot/claude-sonnet-4.5
+    model: github-copilot/gpt-5.5
+    options:
+      reasoningEffort: xhigh
     auth:
       profile: opencode-local
 instructions: AGENTS.md

@@ -14,5 +14,7 @@ interaction:
   mode: subagent
 permission:
   read: allow
+  webfetch: allow
+  websearch: allow
   edit: deny
   bash: deny

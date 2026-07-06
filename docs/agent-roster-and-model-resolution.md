@@ -17,21 +17,28 @@ the committed specification.
 |------|---------|------|--------|---------|
 | `spec-author` | Co-authors the specification with the human: Why, Requirements, scenarios | capable | `docs/specifications/` | Authoring cockpit |
 | `architect` | Fills the Design depth: architecture, data model, interfaces, cross-cutting | capable | `docs/specifications/` (design sections) | Authoring cockpit |
-| `reviewer-a` | Independent critique of the spec, grounded in source | capable (model A) | nothing (proposes critiques) | Review panel |
-| `reviewer-b` | Independent critique on a **different** model, grounded in source | capable (model B) | nothing (proposes critiques) | Review panel |
+| `reviewer-a` | Independent critique of the spec, grounded in source | capable (model family A) | nothing (proposes critiques) | Review panel |
+| `reviewer-b` | Independent critique on a **different model family**, grounded in source | capable (model family B) | nothing (proposes critiques) | Review panel |
 | `implementer` | Executes the Tasks; writes code on the feature branch | mid | workspace (code) | Generation / board |
-| `researcher` | Gathers and summarises codebase + vendored context to ground authoring | mid | nothing (read-only) | Authoring (optional) |
+| `researcher` | Gathers and summarises codebase + vendored context to ground authoring, plus the open web | mid | nothing (read-only) | Authoring (optional) |
 
 Notes that keep the roster honest:
 
 - **Reviewers are read-only.** They propose critiques into the panel; the human adjudicates
   and accepted critiques feed back into the draft. They never commit.
-- **Two reviewers, two models.** `reviewer-a` and `reviewer-b` must resolve to *different*
-  models so the critique is genuinely independent. This is the one place the roster pins a
-  model distinction rather than just a tier.
+- **Two reviewers, two model *families*.** `reviewer-a` and `reviewer-b` must resolve to
+  different model **families** (e.g. Anthropic vs. OpenAI), not merely different sizes or
+  versions of the same family, so the critique is genuinely independent — same-family models
+  tend to share blind spots. This is the one place the roster pins a model distinction rather
+  than just a tier.
 - **The implementer is mid-tier on purpose.** A capable model authored the spec precisely so a
   mid model can implement it accurately and cheaply. If implementation needs the capable tier,
   the spec was probably underspecified.
+- **`researcher` and `spec-author` may reach the open web.** Both are granted `webfetch` and
+  `websearch` — `researcher` to ground findings the codebase and `.repos/` vendored references
+  can't answer (current library docs, external APIs, prior art), and `spec-author` for the same
+  reason when co-authoring directly with the human. Codebase and vendored sources are preferred
+  first; the web is the fallback, not the default.
 - **Projection is not an agent.** Writing spec state into systems of record (Jira, Azure DevOps)
   is deterministic plugin code reacting to events, not a roster role. Keep it out of the agents.
 - **The app is the conductor.** Do not give any harness its own orchestrator agent; the

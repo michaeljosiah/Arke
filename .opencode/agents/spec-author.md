@@ -8,6 +8,8 @@ permission:
   read: allow
   grep: allow
   glob: allow
+  webfetch: allow
+  websearch: allow
   bash: ask
 ---
 
@@ -31,5 +33,7 @@ empty.
 
 Ground every claim in the codebase, the vendored references under `.repos/`, and any files the
 human has uploaded under `.arke/grounding/` — read that grounding as source material (it is
-context for the discussion, not part of the spec). Never invent APIs. Propose; the human
+context for the discussion, not part of the spec). When none of those answer a question (a
+third-party API's current behaviour, a standard, prior art), use `webfetch`/`websearch` rather
+than guessing — but prefer grounded, local sources first. Never invent APIs. Propose; the human
 decides. You write only to `docs/specifications/`.
