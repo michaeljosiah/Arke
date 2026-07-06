@@ -56,6 +56,7 @@ are the plan, to be authored/reviewed/approved through the cockpit before implem
 | 022 | [Arke Desktop — a one-click, native Electron app](022.electron-desktop-app.md) | FR-3 (open project), FR-9/10 (attention); NFR-1/5; packages SPEC-003 + SPEC-016 + SPEC-018; sibling of SPEC-017 (CLI) | 2 | 8 |
 | 023 | [One card per specification — board fold & faithful session linkage](023.one-card-per-spec-board-fold.md) | FR-9; NFR-7; the urgent board fix — supersedes SPEC-010 Decision #4 (`sessionId` card key); amends SPEC-002/010/011 | 2 | 5 |
 | 024 | [Specification lifecycle gating — delivered, decoupled delivery, host-optional governance](024.specification-lifecycle-gating.md) | FR-5/12/16; NFR-1/7; implements the lifecycle governance contract ([`../specification-lifecycle-and-delivery.html`](../specification-lifecycle-and-delivery.html)); amends SPEC-008; depends on SPEC-023 | 2 | 8 |
+| 025 | [Project overview dashboard, live git/PR status & desktop chrome cleanup](025.project-overview-dashboard-and-chrome-cleanup.md) | FR-9/14/15 (client shell); new git-status coordinator capability; UI cleanup from the updated design template | 2 | 8 |
 
 **Folded in (not separate specs):** command palette (FR-13, *could*) rides in the cockpit
 (006) and board (010); settings / notifications / agent-roster viewer ride in the features
