@@ -1,14 +1,13 @@
-import { store, engine } from './store';
+import { store } from './store';
 import { ArkeTransport, type TransportState } from './transport';
 import { OutboundQueue } from './outbound-queue';
 
 /**
  * Live coordinator wiring (SPEC-003). Connects the client to the coordinator over
  * {@link ArkeTransport}, applies the `snapshot` frame and folds subsequent `event` frames into
- * the store so the board renders real delivery state. When no coordinator is reachable the
- * app stays on its mock data; the first snapshot flips `live` on and the mock engine stands
- * down. Column derivation mirrors the coordinator's read model (a card moves because the work
- * moved — never set by hand).
+ * the store so the board renders real delivery state. Until a coordinator is reachable the board
+ * is empty (there is no mock/demo fallback); the first snapshot flips `live` on. Column derivation
+ * mirrors the coordinator's read model (a card moves because the work moved — never set by hand).
  */
 
 /**
@@ -635,8 +634,8 @@ function applySnapshot(snap: any) {
     for (const s of sessions) sessionSpec.set(s.sessionId, c.specId);
     if (c.status) specStatus.set(c.specId, c.status);
   }
-  // Snapshot is authoritative; switch the UI to live and let the mock engine stand down. It also
-  // carries the onboarding state (SPEC-004): harness reachability + the project classification.
+  // Snapshot is authoritative; switch the UI to live. It also carries the onboarding state
+  // (SPEC-004): harness reachability + the project classification.
   reachByEndpoint.clear();
   store.set({
     cards: [...cards.values()],
@@ -655,7 +654,6 @@ function applySnapshot(snap: any) {
     gitBranches: Array.isArray(snap?.gitBranches) ? snap.gitBranches : [],
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
-  engine.stop();
   void refreshRecents(); // SPEC-018: populate the picker's real recents
   // Run a deferred cockpit-queue drain now that the post-reconnect snapshot has been applied.
   if (drainPending) {

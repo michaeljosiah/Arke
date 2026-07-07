@@ -14,7 +14,6 @@ import {
   type OpenCodeConfig,
 } from "@arke/adapter-opencode";
 import { Trace } from "./trace.js";
-import { MockAdapter } from "./mock-adapter.js";
 import { NullAdapter } from "./null-adapter.js";
 import { ClientConnection } from "./client-connection.js";
 import { CoordinatorSessionStore } from "./session-store.js";
@@ -34,7 +33,7 @@ import {
 } from "./global-config.js";
 import { resolveProcessSettings } from "./config-resolve.js";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
-import { hostAgentCatalog, type HostAgent } from "./host-agents.js";
+import { hostAgentCatalog, DEFAULT_OPENCODE_ENDPOINT, type HostAgent } from "./host-agents.js";
 import { browseDirectory, cloneIntoWorkspace, createProject, resolveWorkspaceRoot } from "./workspace.js";
 import type { InstanceConfig } from "./registry.js";
 
@@ -430,10 +429,17 @@ export class Coordinator {
       baseDir: this.defaultRoot,
       globalConfigPath: globalConfigPath(),
     });
+    // Always include the documented default prewarm endpoint (4096) so a locally running OpenCode
+    // is detected even when a different endpoint is persisted in global config (e.g. a remote host).
+    const configuredEndpoints = config?.baseUrl ? [config.baseUrl] : [];
+    const opencodeEndpoints = [
+      ...configuredEndpoints,
+      DEFAULT_OPENCODE_ENDPOINT,
+    ].filter((v, i, arr) => arr.indexOf(v) === i);
     return {
       agents: await hostAgentCatalog({
         probe: this.probe,
-        ...(config?.baseUrl ? { opencodeEndpoint: config.baseUrl } : {}),
+        opencodeEndpoints,
       }),
     };
   }
@@ -804,12 +810,6 @@ function redactRequest(msg: unknown): unknown {
   }
 }
 
-/** True only when mock data is explicitly opted into (ARKE_MOCK=1|true|yes). Off by default. */
-function mockEnabled(): boolean {
-  const v = (process.env.ARKE_MOCK ?? "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
-
 /** Read the `providers` map from a config file (SPEC-016 revised), tolerating an absent/invalid file. */
 function readProviders(path?: string): Record<string, ProviderProfile> {
   if (!path) return {};
@@ -841,9 +841,6 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   grants.load();
   const configPath = resolve(arke, "config.json");
   const agents = buildAgents(root);
-  if (mockEnabled()) {
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], agents };
-  }
   const config = loadOpenCodeConfig({ configPath, baseDir: root, globalConfigPath: globalConfigPath() });
   // SPEC-018 per-project harness runners: a MANAGED context whose root differs from the default
   // project gets its own OpenCode on a per-root port — this build cannot serve a non-primary
@@ -883,10 +880,6 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
   const agents = buildAgents(REPO_ROOT);
-  if (mockEnabled()) {
-    console.warn("[coordinator] ARKE_MOCK set — using MockAdapter (FABRICATED demo data, not real)");
-    return { adapter: new MockAdapter(), trace, grants, endpoints: [], agents };
-  }
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT, globalConfigPath: globalConfigPath() });
   if (!config) {
     const present = existsSync(CONFIG_PATH);
@@ -895,7 +888,7 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
         ? "[coordinator] .arke/config.json is present but invalid or has no OpenCode instance — " +
             "real mode, no harness (the client shows the reachability gate; fix or remove it to re-scaffold)"
         : "[coordinator] no harness configured in .arke/config.json — real mode, no harness " +
-            "(the client shows the reachability gate; set ARKE_MOCK=1 for demo data)",
+            "(the client shows the reachability gate; scaffold or connect a harness to begin)",
     );
     // Absent → greenfield: gateway defaults so it can scaffold (which writes the real config).
     // Present-but-invalid → surface the reason rather than silently presenting as scaffold-ready.
@@ -919,7 +912,7 @@ async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<Conte
     const reason = err instanceof Error ? err.message : String(err);
     // The config parsed fine; only the harness server failed — keep the config-derived tier mapping
     // (mirrors buildContextDeps) so the init screen and any child project seed the user's models.
-    console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
+    console.error(`[coordinator] harness init failed (${reason}); serving real empty state`);
     return {
       adapter: new NullAdapter(`harness init failed: ${reason}`),
       trace,
@@ -940,7 +933,7 @@ async function bootstrap(): Promise<void> {
     deps = await buildDefaultDeps(trace, grants);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[coordinator] harness init failed (${reason}); serving real empty state (set ARKE_MOCK=1 for demo data)`);
+    console.error(`[coordinator] harness init failed (${reason}); serving real empty state`);
     deps = { adapter: new NullAdapter(`harness init failed: ${reason}`), trace, grants, endpoints: [], agents: new AgentRegistry([]) };
   }
   // Process-wide settings (SPEC-019 R3): the global config `settings` block, with `ARKE_*` env

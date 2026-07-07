@@ -69,15 +69,9 @@ export function Root() {
   // Apply theme on change
   React.useEffect(() => { engine.applyTheme(); }, [s.theme, s.density, s.accent]);
 
-  // Attempt a live coordinator link once on boot. If a coordinator is up, its snapshot
-  // takes over the board (live mode); otherwise the app stays on mock data (SPEC-003).
+  // Attempt a live coordinator link once on boot. The board renders real coordinator state; until a
+  // snapshot arrives it stays empty (there is no mock/demo fallback — SPEC-003).
   React.useEffect(() => { startLive(); initDesktopBridge(); }, []);
-
-  // Start the live event engine once a project is open
-  React.useEffect(() => {
-    if (s.project) { engine.start(); } else { engine.stop(); }
-    return () => engine.stop();
-  }, [s.project]);
 
   const handleLaunchDone = React.useCallback(() => setBooting(false), []);
 

@@ -14,7 +14,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { posix, win32 } from "node:path";
 import { HarnessReachabilityProbe } from "./reachability.js";
 
 export interface HostAgent {
@@ -77,7 +77,10 @@ export function detectInstalledWith(
 ): boolean {
   const pathVar = env.PATH ?? env.Path ?? "";
   if (!pathVar) return false;
-  const dirs = pathVar.split(delimiter).filter(Boolean);
+  // Use the injected platform's delimiter/join so tests can exercise Windows paths on a POSIX host.
+  const pathDelimiter = platform === "win32" ? ";" : ":";
+  const pathJoin = platform === "win32" ? win32.join : posix.join;
+  const dirs = pathVar.split(pathDelimiter).filter(Boolean);
   // Windows resolves a bare name through PATHEXT; "" first so an extension-carrying name still matches.
   const exts =
     platform === "win32"
@@ -85,7 +88,7 @@ export function detectInstalledWith(
       : [""];
   for (const dir of dirs) {
     for (const ext of exts) {
-      if (exists(join(dir, binary + ext))) return true;
+      if (exists(pathJoin(dir, binary + ext))) return true;
     }
   }
   return false;
@@ -93,22 +96,25 @@ export function detectInstalledWith(
 
 /**
  * Build the host-agent catalog: for each known agent, whether its binary is installed and (for
- * OpenCode) whether a server answers. The OpenCode endpoint defaults to the documented local port
- * but can be overridden to match a host that configured a different one. Probing is skipped for an
- * agent whose binary is absent (nothing to be running) so an empty host resolves fast.
+ * OpenCode) whether a server answers. The OpenCode endpoint list defaults to the documented local
+ * port but can include a configured custom endpoint so both the default prewarm (127.0.0.1:4096)
+ * and any explicitly configured remote are probed. Probing is NOT gated on the binary being
+ * present — the server may be running even when the CLI is not on this process's PATH (launched
+ * via npx, container, different login PATH, etc.).
  */
 export async function hostAgentCatalog(opts?: {
   probe?: HarnessReachabilityProbe;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
-  opencodeEndpoint?: string;
+  /** One or more OpenCode base URLs to probe; first reachable wins. */
+  opencodeEndpoints?: string[];
   /** Injectable existence predicate for the PATH scan (test seam); defaults to real `existsSync`. */
   exists?: (p: string) => boolean;
 }): Promise<HostAgent[]> {
   const env = opts?.env ?? process.env;
   const platform = opts?.platform ?? process.platform;
   const probe = opts?.probe ?? new HarnessReachabilityProbe();
-  const opencodeEndpoint = opts?.opencodeEndpoint ?? DEFAULT_OPENCODE_ENDPOINT;
+  const opencodeEndpoints = opts?.opencodeEndpoints ?? [DEFAULT_OPENCODE_ENDPOINT];
   const exists = opts?.exists ?? existsSync;
 
   return Promise.all(
@@ -116,10 +122,12 @@ export async function hostAgentCatalog(opts?: {
       const installed = spec.binary ? detectInstalledWith(exists, spec.binary, env, platform) : undefined;
       let running = false;
       let endpoint: string | undefined;
-      if (spec.hasServer && installed) {
-        const { reachable } = await probe.anyReachable([opencodeEndpoint]);
+      // Probe the server regardless of PATH presence: the binary may be absent on this process's
+      // PATH while OpenCode was started another way (npx, container, different login shell, etc.).
+      if (spec.hasServer) {
+        const { reachable, results } = await probe.anyReachable(opencodeEndpoints);
         running = reachable;
-        if (reachable) endpoint = opencodeEndpoint;
+        if (reachable) endpoint = results.find((r) => r.reachable)?.endpoint;
       }
       return {
         id: spec.id,

@@ -28,6 +28,13 @@ export interface StartCoordinatorOptions {
   manageHarness?: boolean;
   /** Override the trace / grant-store paths (default: under `<root>/.arke/`). */
   paths?: { trace?: string; grants?: string };
+  /**
+   * Whether the project registry persists to the GLOBAL Arke home (`arkeHome()/projects.json`).
+   * Defaults to `true` for the real desktop (durable recents). Pass `false` for tests and throwaway
+   * embeddings so a temp `root` is NOT written into the user's real recents — otherwise every run
+   * accumulates `arke-desktop-*` junk in the global registry.
+   */
+  persistRegistry?: boolean;
 }
 
 /** A coordinator started in-process, with the bound URL + the SPEC-022 lifecycle handles. */
@@ -70,7 +77,9 @@ export async function startCoordinator(opts: StartCoordinatorOptions): Promise<R
 
   const coord = new Coordinator(new NullAdapter("no project open"), trace, grants, opts.port ?? 0, {
     projectRoot: root,
-    registry: new ProjectRegistry(), // persist recents so the app menu can list recent projects
+    // Persist recents to the global registry for the real desktop; opt out (persistRegistry:false) so
+    // tests/throwaway roots never pollute the user's real ~/arke/projects.json (SPEC-018).
+    registry: new ProjectRegistry(opts.persistRegistry === false ? { persist: false } : undefined),
   });
   const port = await coord.start();
 

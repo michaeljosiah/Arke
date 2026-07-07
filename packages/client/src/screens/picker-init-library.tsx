@@ -42,6 +42,7 @@ function HarnessSetup() {
   const connecting = useStore((s) => s.harnessConnecting);
   const error = useStore((s) => s.harnessConnectError);
   const hostAgents = useStore((s) => s.hostAgents);
+  const live = useStore((s) => s.live);
   const [sel, setSel] = React.useState<string>('opencode');
   const [showUrl, setShowUrl] = React.useState(false);
   const h = HARNESS_SETUP.find((x) => x.id === sel) ?? HARNESS_SETUP[0];
@@ -52,16 +53,25 @@ function HarnessSetup() {
     liveSend({ type: 'harness.connect', driver, endpoint, ...(mode ? { mode } : {}) });
   };
   // "Start OpenCode": Arke spawns `opencode serve` itself (managed, SPEC-016) at the documented port.
+  // Disable actions when the coordinator itself is not connected: liveSend would queue with no
+  // socket, setting harnessConnecting:true forever with nothing able to clear it.
+  const actionsDisabled = connecting || !live;
   const startManaged = () => send('opencode', 'opencode://127.0.0.1:4096', 'managed');
-  // Secondary: attach to a running host, or (Omnigent) validate a substrate URL.
-  const connectHost = (mode?: 'managed' | 'attach') => { const v = host.trim(); if (!v) return; send(h.driver, (h.scheme || '') + v, mode); };
+  // Secondary: attach to a running host, or (Omnigent) validate a substrate URL. Strip any leading
+  // scheme the user may have pasted (e.g. "opencode://127.0.0.1:4096") before prepending our own.
+  const connectHost = (mode?: 'managed' | 'attach') => {
+    const v = host.trim(); if (!v) return;
+    const scheme = h.scheme || '';
+    const endpoint = scheme && v.startsWith(scheme) ? v : scheme + v;
+    send(h.driver, endpoint, mode);
+  };
   const divider = (label: string) => e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 8px' } },
     e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
     e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, label),
     e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }));
   const hostRow = (mode: 'managed' | 'attach' | undefined, cta: string) => e('div', { style: { display: 'flex', gap: 8 } },
     e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
-    e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
+    e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: actionsDisabled || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
   // Per-agent host status (SPEC-019 follow-up): live-probed installed/running, or a substrate label.
   // A hollow dot = not installed; a filled neutral dot = installed-but-idle; a filled green dot = up.
   const statusLine = (id: string, substrate?: boolean) => {
@@ -97,8 +107,8 @@ function HarnessSetup() {
       ? e(React.Fragment, null, divider('Omnigent URL'), hostRow(undefined, 'Connect'))
       : e(React.Fragment, null,
           e('div', { style: { display: 'flex', alignItems: 'center', gap: 14 } },
-            e(Button, { disabled: connecting, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
-            e('button', { onClick: () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)' } }, 'Connect to a URL')),
+            e(Button, { disabled: actionsDisabled, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
+            e('button', { onClick: actionsDisabled ? undefined : () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: actionsDisabled ? 'default' : 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)', opacity: actionsDisabled ? 0.4 : 1 } }, 'Connect to a URL')),
           showUrl ? e('div', { style: { marginTop: 10 } }, hostRow('attach', 'Connect')) : null),
     error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
     e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
@@ -162,13 +172,9 @@ export function Picker() {
   const projectState = useStore((s) => s.projectState);
   const recents = useStore((s) => s.recents);
   const harnessReachable = useStore((s) => s.harnessReachable);
-  const reason = useStore((s) => s.harnessReachabilityReason);
-  const harnessSetup = useStore((s) => s.harnessSetup);
   const hostAgents = useStore((s) => s.hostAgents);
-  const [setup, setSetup] = React.useState(false);
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
-  const [reprobing, setReprobing] = React.useState(false);
   const [newOpen, setNewOpen] = React.useState(false);
   const [newName, setNewName] = React.useState('new-service');
   const [dest, setDest] = React.useState<string | null>(null); // clone/new destination; null = workspace root
@@ -194,18 +200,12 @@ export function Picker() {
   // it is host-global (not project-specific), matching where harness config actually lives.
   const opencodeHost = Array.isArray(hostAgents) ? hostAgents.find((a: any) => a.id === 'opencode') : null;
   const hostHarnessUp = !!opencodeHost?.running;
-  // First-run quick setup (SPEC-019): when live and NO harness is available anywhere — not configured
-  // (global or project) AND not detected running on the host — guide setup. A configured/running harness
-  // keeps the picker; a configured-but-unreachable one keeps the re-probe path.
-  const configured = harnessSetup?.configured !== false || hostHarnessUp;
-  const showQuickSetup = live && !configured && !ready;
   // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
   // project must be able to reach Initialisation even when the harness is unreachable, because the
   // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
   // project that's unreachable is a genuine harness-down situation and stays gated. (PR #10 review) A
   // running host harness also enables entry (opening a project spins up its own managed harness).
   const canScaffold = ready || hostHarnessUp || (!!projectState && projectState !== 'method-ready');
-  const endpoint = (cp && cp.endpoint) || 'opencode://localhost:4096';
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
   // Poll the host-agent catalog while on the launch screen (SPEC-019 follow-up). The desktop pre-warms
@@ -219,7 +219,6 @@ export function Picker() {
     return () => clearInterval(t);
   }, [live, hostHarnessUp]);
 
-  const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
   // Route into a just-opened project by its real folder state via the shared helper (SPEC-025):
   // method-ready → Overview, else the scaffold screen. The library stays reachable from the sidebar.
   const enter = (name: string, state: string | null) => routeOpenedProject(name, state);
@@ -281,47 +280,22 @@ export function Picker() {
 
       e(Card, { padding: 22 },
         // 1 · harness readiness
-        stepNum('1', 'Harness', ready ? e('button', { onClick: () => setSetup((o) => !o), style: linkBtn }, setup ? 'Hide' : 'Change host') : null),
+        stepNum('1', 'Harness'),
+        // Only the coordinator-down state gets a banner: the harness tiles below already show live
+        // per-agent reachability (OpenCode "Running", others "Not running/installed"), so a separate
+        // "Reachable" row would just repeat them. If the coordinator itself is unreachable the tiles
+        // can't load, so that one still needs surfacing.
         coordinatorDown
-          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
+          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 14 } },
               e('span', { style: { color: 'var(--destructive, #DC2626)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
               e('div', { style: { flex: 1, minWidth: 0 } },
                 e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, "Can't reach the coordinator"),
                 e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, 'The local coordinator isn’t responding — it may have stopped. Restart it (e.g. arke up); this reconnects automatically.')),
               e(Button, { variant: 'secondary', onClick: () => window.location.reload() }, 'Retry'))
-          : probe === 'checking'
-          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
-              e(StatusDot, { status: 'running', pulse: true }),
-              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'connecting to the coordinator…'))
-          : ready
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
-                e(StatusDot, { status: 'agree' }),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'Reachable'),
-                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, endpoint)),
-                cp && cp.harness ? e(Badge, { variant: 'secondary' }, cp.harness) : null)
-            : hostHarnessUp
-            // A harness is running on the host (e.g. the desktop pre-warm) though no project is connected
-            // yet — surface it as ready so the picker below is actionable, not a false "nothing running".
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
-                e(StatusDot, { status: 'agree' }),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'OpenCode running on this host'),
-                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, opencodeHost?.endpoint || 'http://127.0.0.1:4096')),
-                e(Badge, { variant: 'secondary' }, 'opencode'))
-            : e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--warning) 40%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--warning-bg, var(--secondary))', marginBottom: 12 } },
-                e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'No coding agent is running'),
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Start an installed agent below, or connect to a known URL.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
-        showQuickSetup
-          ? e(HarnessSetup)
-          : ((probe === 'unreachable') && !hostHarnessUp) || setup
-          ? e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
-              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.6, marginBottom: 10 } },
-                'The harness is configured in ', e('span', { style: { color: 'var(--foreground)' } }, '.arke/config.json'), ' on the host — the client never holds the endpoint or credentials. Start the harness, then re-probe.'),
-              e(Button, { variant: 'secondary', iconLeft: e(Icon, { name: 'refresh', size: 14 }), disabled: reprobing, onClick: reprobe }, reprobing ? 're-probing…' : 'Re-probe'))
           : null,
+        // The coding-agent roster + selection is ALWAYS present: the tiles carry live per-agent status,
+        // and the Start/Connect actions let you bring one up at any time.
+        e(HarnessSetup),
 
         // 2 · entry
         stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, canScaffold ? 'scaffold to configure a harness' : 'connect a harness first')),
