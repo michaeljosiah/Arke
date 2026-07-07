@@ -1,10 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, normalize, sep } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, nativeTheme, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { startCoordinator, type RunningCoordinator } from "@arke/coordinator";
 import { NotificationRouter, type RouterEvent } from "./notifications.js";
+
+// The client's theme store has no persistence yet (SPEC-022) — every boot starts in its hardcoded
+// default, 'light' (packages/client/src/store.ts). Match that here so the titlebar/background never
+// mismatch the very first paint; the renderer syncs arke:native-theme on mount and on every toggle
+// (packages/client/src/root.tsx), so this only needs to be right for the instant before that fires.
+nativeTheme.themeSource = "light";
 
 // Arke desktop shell — Electron main process (SPEC-022). Embeds the coordinator IN-PROCESS on a neutral
 // userData root (no managed harness / no `.arke/` under the app bundle until a real project opens),
@@ -159,6 +165,22 @@ async function createWindow(coordinatorUrl: string): Promise<void> {
     height: 900,
     show: false,
     icon: windowIcon(), // macOS uses the app-bundle icon; Windows/Linux use this
+    // Matches the client's default (light) theme so the window chrome never flashes the wrong
+    // color during load; root.tsx re-syncs both if the renderer ends up in a different theme.
+    backgroundColor: "#FFFFFF",
+    // On Windows: hide the native titlebar and paint the window control buttons (close/min/max)
+    // with an overlay that matches the app's background — fixes the white-titlebar-in-dark-mode
+    // issue (and the mirror case: a dark titlebar under light-theme content). The renderer adds
+    // -webkit-app-region:drag to its TopBar so the window is still draggable; height=56 matches
+    // the TopBar height declared in shell.tsx.
+    ...(process.platform === "win32" && {
+      titleBarStyle: "hidden" as const,
+      titleBarOverlay: {
+        color: "#FFFFFF",       // var(--background) light
+        symbolColor: "#525252", // var(--neutral-600)
+        height: 56,             // TopBar height
+      },
+    }),
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -166,7 +188,11 @@ async function createWindow(coordinatorUrl: string): Promise<void> {
       sandbox: true,
       // Injected into the sandboxed preload's process.argv, so the client reads these lazily (the
       // coordinator URL + the app version shown in Settings › About).
-      additionalArguments: [`--arke-coordinator-url=${coordinatorUrl}`, `--arke-app-version=${app.getVersion()}`],
+      additionalArguments: [
+        `--arke-coordinator-url=${coordinatorUrl}`,
+        `--arke-app-version=${app.getVersion()}`,
+        `--arke-platform=${process.platform}`,
+      ],
     },
   });
   // Deny any attempt to open external/remote content in a new window (NFR-5).
@@ -180,6 +206,17 @@ async function createWindow(coordinatorUrl: string): Promise<void> {
 
 /** Wire the native affordances (SPEC-022): folder dialog, notifications, work-in-flight quit gate. */
 function wireIpc(): void {
+  // Sync native titlebar overlay colour when the in-app theme toggle fires.
+  ipcMain.on("arke:native-theme", (_e, theme: "dark" | "light") => {
+    nativeTheme.themeSource = theme;
+    if (process.platform === "win32" && win) {
+      win.setTitleBarOverlay({
+        color: theme === "dark" ? "#0A0A0A" : "#FFFFFF",
+        symbolColor: theme === "dark" ? "#A1A1A1" : "#525252",
+      });
+    }
+  });
+
   ipcMain.handle("arke:open-project-dialog", async () => {
     const res = await dialog.showOpenDialog(win!, { properties: ["openDirectory"] });
     return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0];

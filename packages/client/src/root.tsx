@@ -1,7 +1,7 @@
 import React from 'react';
 import { store, useStore, engine } from './store';
 import { startLive } from './live';
-import { initDesktopBridge } from './desktop';
+import { initDesktopBridge, syncNativeTheme, isWindowsDesktop } from './desktop';
 import { Shell } from './shell';
 import { Picker, Initialisation, Library } from './screens/picker-init-library';
 import { Cockpit } from './screens/cockpit';
@@ -61,13 +61,27 @@ function ScreenContent({ view }: { view: string }) {
   return e(Comp, null);
 }
 
+// On Windows the native titlebar is hidden (apps/desktop/src/main.ts) — Shell's TopBar is the only
+// drag region that replaces it, so the launch/picker/init screens (rendered before Shell mounts,
+// i.e. before a project is open) would otherwise leave the window impossible to move. This thin
+// strip gives those screens a drag handle. It sits above ordinary content but below modals
+// (z-index 50 elsewhere in these screens), so an open modal's backdrop still takes priority.
+function WindowsDragFallback() {
+  if (!isWindowsDesktop()) return null;
+  return e('div', {
+    style: { position: 'fixed', top: 0, left: 0, right: 150, height: 32, WebkitAppRegion: 'drag', zIndex: 10 },
+  });
+}
+
 export function Root() {
   const s = useStore();
   const { view } = s;
   const [booting, setBooting] = React.useState(true);
 
-  // Apply theme on change
-  React.useEffect(() => { engine.applyTheme(); }, [s.theme, s.density, s.accent]);
+  // Apply theme on change. Also sync the native Windows titlebar overlay here (not just on toggle) —
+  // this fires on initial mount too, so a boot in light theme (the store default) doesn't leave the
+  // titlebar on its hardcoded-dark startup color while the app content renders light.
+  React.useEffect(() => { engine.applyTheme(); syncNativeTheme(s.theme); }, [s.theme, s.density, s.accent]);
 
   // Attempt a live coordinator link once on boot. The board renders real coordinator state; until a
   // snapshot arrives it stays empty (there is no mock/demo fallback — SPEC-003).
@@ -77,17 +91,21 @@ export function Root() {
 
   // Show launch screen on first boot
   if (booting) {
-    return e(LaunchScreen, { onDone: handleLaunchDone });
+    return e(React.Fragment, null,
+      e(WindowsDragFallback, null),
+      e(LaunchScreen, { onDone: handleLaunchDone }));
   }
 
   if (view === 'picker' || !s.project) {
     return e(React.Fragment, null,
+      e(WindowsDragFallback, null),
       e(Picker, null),
       e(Tweaks, null));
   }
 
   if (view === 'init') {
     return e(React.Fragment, null,
+      e(WindowsDragFallback, null),
       e(Initialisation, null),
       e(Tweaks, null));
   }

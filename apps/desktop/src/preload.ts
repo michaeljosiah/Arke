@@ -16,6 +16,10 @@ const arke = {
   coordinator: { url: argValue("--arke-coordinator-url=") ?? "" },
   /** The running app version (from the desktop package.json) shown in Settings › About. */
   app: { version: argValue("--arke-app-version=") ?? "" },
+  /** The host platform string (`"win32"` | `"darwin"` | `"linux"`); used by the renderer to adjust layout. */
+  platform: argValue("--arke-platform=") ?? "",
+  /** Tell the main process to sync the native titlebar/overlay colour with the app's current theme. */
+  setNativeTheme: (theme: "dark" | "light"): void => ipcRenderer.send("arke:native-theme", theme),
   /** Open a native folder dialog; resolves to the picked absolute path, or null if cancelled. */
   openProjectDialog: (): Promise<string | null> => ipcRenderer.invoke("arke:open-project-dialog"),
   /** Forward a normalised domain event to main's NotificationRouter (which de-dups + shows OS toasts). */

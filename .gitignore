@@ -49,3 +49,6 @@ Thumbs.db
 # Test / coverage
 coverage/
 .nyc_output/
+
+# Private research / analysis notes (not for the public repo)
+docs/analysis/sdd-frameworks-comparison.html
