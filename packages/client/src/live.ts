@@ -692,6 +692,18 @@ export async function refreshSpecs(): Promise<void> {
 }
 
 /**
+ * Refresh the host-agent catalog (SPEC-019 follow-up): per-agent installed/running, detected
+ * host-wide. Host-scoped op — works with NO active project, so the launch screen can call it before
+ * any project is opened. The desktop pre-warms OpenCode asynchronously, so the launch screen polls
+ * this until a harness comes up (see the picker). Leaves the store untouched on a failed request so a
+ * transient miss never blanks a good catalog.
+ */
+export async function refreshHostAgents(): Promise<void> {
+  const res = await liveRequest('harness.hostAgents');
+  if (res?.ok && Array.isArray(res.result?.agents)) store.set({ hostAgents: res.result.agents });
+}
+
+/**
  * Create a new blank-slate specification (SPEC-020) and open the cockpit on it. Returns the new
  * specId, or null on failure (surfaced to the caller).
  */

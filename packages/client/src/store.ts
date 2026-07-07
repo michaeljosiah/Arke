@@ -190,6 +190,9 @@ export const store = createStore({
   harnessSetup: { configured: true },
   harnessConnecting: false,
   harnessConnectError: null,
+  // Host-agent catalog for the launch screen (SPEC-019 follow-up): per-agent installed/running,
+  // detected host-wide (NOT project-scoped). null until the first harness.hostAgents response.
+  hostAgents: null,
   projectState: null,
   missingSentinels: [],
   tierDefaults: null,
