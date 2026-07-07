@@ -1,7 +1,7 @@
 import React from 'react';
 import { store, useStore, engine } from './store';
 import { startLive } from './live';
-import { initDesktopBridge } from './desktop';
+import { initDesktopBridge, syncNativeTheme } from './desktop';
 import { Shell } from './shell';
 import { Picker, Initialisation, Library } from './screens/picker-init-library';
 import { Cockpit } from './screens/cockpit';
@@ -66,8 +66,10 @@ export function Root() {
   const { view } = s;
   const [booting, setBooting] = React.useState(true);
 
-  // Apply theme on change
-  React.useEffect(() => { engine.applyTheme(); }, [s.theme, s.density, s.accent]);
+  // Apply theme on change. Also sync the native Windows titlebar overlay here (not just on toggle) —
+  // this fires on initial mount too, so a boot in light theme (the store default) doesn't leave the
+  // titlebar on its hardcoded-dark startup color while the app content renders light.
+  React.useEffect(() => { engine.applyTheme(); syncNativeTheme(s.theme); }, [s.theme, s.density, s.accent]);
 
   // Attempt a live coordinator link once on boot. The board renders real coordinator state; until a
   // snapshot arrives it stays empty (there is no mock/demo fallback — SPEC-003).

@@ -3,7 +3,7 @@ import { Icon } from './icons';
 import { StatusDot } from './ds';
 import { store, useStore, engine } from './store';
 import { ago } from './utils';
-import { isWindowsDesktop, syncNativeTheme } from './desktop';
+import { isWindowsDesktop } from './desktop';
 
 const e = React.createElement;
 
@@ -150,10 +150,11 @@ function RuntimeToggle() {
 function ThemeToggle() {
   const theme = useStore((s) => s.theme);
   return e('button', {
+    // The native titlebar overlay syncs centrally in root.tsx's theme effect — no need to call
+    // syncNativeTheme here too.
     onClick: () => {
       const next = theme === 'dark' ? 'light' : 'dark';
       store.set({ theme: next });
-      syncNativeTheme(next);
     },
     'aria-label': 'Toggle theme',
     style: { display: 'flex', width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--radius-md)', border: 'none', background: 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer', WebkitAppRegion: 'no-drag' } },

@@ -6,9 +6,11 @@ import { autoUpdater } from "electron-updater";
 import { startCoordinator, type RunningCoordinator } from "@arke/coordinator";
 import { NotificationRouter, type RouterEvent } from "./notifications.js";
 
-// Default to dark so the Windows titlebar matches the app's dark theme at launch; the renderer
-// sends arke:native-theme whenever the user toggles the in-app theme toggle.
-nativeTheme.themeSource = "dark";
+// The client's theme store has no persistence yet (SPEC-022) — every boot starts in its hardcoded
+// default, 'light' (packages/client/src/store.ts). Match that here so the titlebar/background never
+// mismatch the very first paint; the renderer syncs arke:native-theme on mount and on every toggle
+// (packages/client/src/root.tsx), so this only needs to be right for the instant before that fires.
+nativeTheme.themeSource = "light";
 
 // Arke desktop shell — Electron main process (SPEC-022). Embeds the coordinator IN-PROCESS on a neutral
 // userData root (no managed harness / no `.arke/` under the app bundle until a real project opens),
@@ -163,17 +165,19 @@ async function createWindow(coordinatorUrl: string): Promise<void> {
     height: 900,
     show: false,
     icon: windowIcon(), // macOS uses the app-bundle icon; Windows/Linux use this
-    // Dark background so the window chrome never flashes white during load.
-    backgroundColor: "#0A0A0A",
+    // Matches the client's default (light) theme so the window chrome never flashes the wrong
+    // color during load; root.tsx re-syncs both if the renderer ends up in a different theme.
+    backgroundColor: "#FFFFFF",
     // On Windows: hide the native titlebar and paint the window control buttons (close/min/max)
-    // with a dark overlay that matches the app's dark background — fixes the white-titlebar-in-
-    // dark-mode issue. The renderer adds -webkit-app-region:drag to its TopBar so the window is
-    // still draggable; height=56 matches the TopBar height declared in shell.tsx.
+    // with an overlay that matches the app's background — fixes the white-titlebar-in-dark-mode
+    // issue (and the mirror case: a dark titlebar under light-theme content). The renderer adds
+    // -webkit-app-region:drag to its TopBar so the window is still draggable; height=56 matches
+    // the TopBar height declared in shell.tsx.
     ...(process.platform === "win32" && {
       titleBarStyle: "hidden" as const,
       titleBarOverlay: {
-        color: "#0A0A0A",       // var(--background) dark
-        symbolColor: "#A1A1A1", // var(--neutral-400)
+        color: "#FFFFFF",       // var(--background) light
+        symbolColor: "#525252", // var(--neutral-600)
         height: 56,             // TopBar height
       },
     }),
