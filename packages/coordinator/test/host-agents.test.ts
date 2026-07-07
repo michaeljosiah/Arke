@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { delimiter, join } from "node:path";
+import { posix, win32 } from "node:path";
 import { detectInstalledWith, hostAgentCatalog, KNOWN_HOST_AGENTS } from "../src/host-agents.js";
 import { HarnessReachabilityProbe } from "../src/reachability.js";
 
@@ -8,16 +8,18 @@ import { HarnessReachabilityProbe } from "../src/reachability.js";
 // (running). Both are exercised deterministically here — no real filesystem or network.
 
 test("detectInstalled resolves a bare binary via a POSIX PATH entry", () => {
-  const env = { PATH: ["/usr/bin", "/opt/oc/bin"].join(delimiter) };
-  const present = new Set([join("/opt/oc/bin", "opencode")]);
+  // Use explicit `:` delimiter and posix.join so this test is portable across host OSes.
+  const env = { PATH: "/usr/bin:/opt/oc/bin" };
+  const present = new Set([posix.join("/opt/oc/bin", "opencode")]);
   const exists = (p: string) => present.has(p);
   assert.equal(detectInstalledWith(exists, "opencode", env, "linux"), true);
   assert.equal(detectInstalledWith(exists, "claude", env, "linux"), false);
 });
 
 test("detectInstalled honours Windows PATHEXT (bare name resolves to .cmd/.exe)", () => {
-  const env = { PATH: ["C:\\tools", "C:\\oc"].join(delimiter), PATHEXT: ".COM;.EXE;.CMD" };
-  const present = new Set([join("C:\\oc", "opencode.cmd")]);
+  // Use explicit `;` delimiter and win32.join so this test exercises Windows behaviour on any host.
+  const env = { PATH: "C:\\tools;C:\\oc", PATHEXT: ".COM;.EXE;.CMD" };
+  const present = new Set([win32.join("C:\\oc", "opencode.cmd")]);
   // Windows filesystem lookups are case-insensitive, so PATHEXT's uppercase `.CMD` must match an
   // on-disk `opencode.cmd`. Mirror that in the fake predicate (a case-sensitive Set would not).
   const exists = (p: string) => [...present].some((q) => q.toLowerCase() === p.toLowerCase());
@@ -46,13 +48,13 @@ function fakeProbe(up: Set<string>): HarnessReachabilityProbe {
 
 test("catalog: OpenCode installed + server up → running with endpoint; others installed-only", async () => {
   const env = { PATH: "/bin" };
-  const present = new Set([join("/bin", "opencode"), join("/bin", "claude"), join("/bin", "copilot")]);
+  const present = new Set([posix.join("/bin", "opencode"), posix.join("/bin", "claude"), posix.join("/bin", "copilot")]);
   const agents = await hostAgentCatalog({
     env,
     platform: "linux",
     exists: (p) => present.has(p),
     probe: fakeProbe(new Set(["http://127.0.0.1:4096"])),
-    opencodeEndpoint: "http://127.0.0.1:4096",
+    opencodeEndpoints: ["http://127.0.0.1:4096"],
   });
   const ids = agents.map((a) => a.id);
   assert.deepEqual(ids, KNOWN_HOST_AGENTS.map((a) => a.id), "every known agent appears, in order");
@@ -80,13 +82,13 @@ test("catalog: OpenCode installed + server up → running with endpoint; others 
 });
 
 test("catalog: OpenCode installed but server DOWN → installed:true, running:false, no endpoint", async () => {
-  const present = new Set([join("/bin", "opencode")]);
+  const present = new Set([posix.join("/bin", "opencode")]);
   const agents = await hostAgentCatalog({
     env: { PATH: "/bin" },
     platform: "linux",
     exists: (p) => present.has(p),
     probe: fakeProbe(new Set()), // nothing reachable
-    opencodeEndpoint: "http://127.0.0.1:4096",
+    opencodeEndpoints: ["http://127.0.0.1:4096"],
   });
   const opencode = agents.find((a) => a.id === "opencode");
   assert.equal(opencode?.installed, true);
@@ -94,15 +96,30 @@ test("catalog: OpenCode installed but server DOWN → installed:true, running:fa
   assert.equal(opencode?.endpoint, undefined, "no endpoint reported when not running");
 });
 
-test("catalog: OpenCode NOT installed → never probed, running:false", async () => {
-  const agents = await hostAgentCatalog({
+test("catalog: OpenCode NOT on PATH but server running → running:true (binary off PATH is not a blocker)", async () => {
+  // The binary may be absent from this process's PATH while OpenCode was launched another way
+  // (npx, container, different login shell). The probe runs regardless of `installed`.
+  const agentsUp = await hostAgentCatalog({
     env: { PATH: "/bin" },
     platform: "linux",
-    exists: () => false, // nothing installed
-    probe: fakeProbe(new Set(["http://127.0.0.1:4096"])), // server would answer, but we must not probe
-    opencodeEndpoint: "http://127.0.0.1:4096",
+    exists: () => false, // nothing on PATH
+    probe: fakeProbe(new Set(["http://127.0.0.1:4096"])),
+    opencodeEndpoints: ["http://127.0.0.1:4096"],
   });
-  const opencode = agents.find((a) => a.id === "opencode");
-  assert.equal(opencode?.installed, false);
-  assert.equal(opencode?.running, false, "an absent binary is never reported running even if a server answers");
+  const opencodeUp = agentsUp.find((a) => a.id === "opencode");
+  assert.equal(opencodeUp?.installed, false);
+  assert.equal(opencodeUp?.running, true, "server running even when binary is off PATH");
+  assert.equal(opencodeUp?.endpoint, "http://127.0.0.1:4096");
+
+  // When neither binary nor server is present, running stays false.
+  const agentsDown = await hostAgentCatalog({
+    env: { PATH: "/bin" },
+    platform: "linux",
+    exists: () => false,
+    probe: fakeProbe(new Set()),
+    opencodeEndpoints: ["http://127.0.0.1:4096"],
+  });
+  const opencodeDown = agentsDown.find((a) => a.id === "opencode");
+  assert.equal(opencodeDown?.installed, false);
+  assert.equal(opencodeDown?.running, false, "no server → not running regardless of PATH");
 });

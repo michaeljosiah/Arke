@@ -33,7 +33,7 @@ import {
 } from "./global-config.js";
 import { resolveProcessSettings } from "./config-resolve.js";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
-import { hostAgentCatalog, type HostAgent } from "./host-agents.js";
+import { hostAgentCatalog, DEFAULT_OPENCODE_ENDPOINT, type HostAgent } from "./host-agents.js";
 import { browseDirectory, cloneIntoWorkspace, createProject, resolveWorkspaceRoot } from "./workspace.js";
 import type { InstanceConfig } from "./registry.js";
 
@@ -429,10 +429,17 @@ export class Coordinator {
       baseDir: this.defaultRoot,
       globalConfigPath: globalConfigPath(),
     });
+    // Always include the documented default prewarm endpoint (4096) so a locally running OpenCode
+    // is detected even when a different endpoint is persisted in global config (e.g. a remote host).
+    const configuredEndpoints = config?.baseUrl ? [config.baseUrl] : [];
+    const opencodeEndpoints = [
+      ...configuredEndpoints,
+      DEFAULT_OPENCODE_ENDPOINT,
+    ].filter((v, i, arr) => arr.indexOf(v) === i);
     return {
       agents: await hostAgentCatalog({
         probe: this.probe,
-        ...(config?.baseUrl ? { opencodeEndpoint: config.baseUrl } : {}),
+        opencodeEndpoints,
       }),
     };
   }

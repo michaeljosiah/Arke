@@ -42,6 +42,7 @@ function HarnessSetup() {
   const connecting = useStore((s) => s.harnessConnecting);
   const error = useStore((s) => s.harnessConnectError);
   const hostAgents = useStore((s) => s.hostAgents);
+  const live = useStore((s) => s.live);
   const [sel, setSel] = React.useState<string>('opencode');
   const [showUrl, setShowUrl] = React.useState(false);
   const h = HARNESS_SETUP.find((x) => x.id === sel) ?? HARNESS_SETUP[0];
@@ -52,16 +53,25 @@ function HarnessSetup() {
     liveSend({ type: 'harness.connect', driver, endpoint, ...(mode ? { mode } : {}) });
   };
   // "Start OpenCode": Arke spawns `opencode serve` itself (managed, SPEC-016) at the documented port.
+  // Disable actions when the coordinator itself is not connected: liveSend would queue with no
+  // socket, setting harnessConnecting:true forever with nothing able to clear it.
+  const actionsDisabled = connecting || !live;
   const startManaged = () => send('opencode', 'opencode://127.0.0.1:4096', 'managed');
-  // Secondary: attach to a running host, or (Omnigent) validate a substrate URL.
-  const connectHost = (mode?: 'managed' | 'attach') => { const v = host.trim(); if (!v) return; send(h.driver, (h.scheme || '') + v, mode); };
+  // Secondary: attach to a running host, or (Omnigent) validate a substrate URL. Strip any leading
+  // scheme the user may have pasted (e.g. "opencode://127.0.0.1:4096") before prepending our own.
+  const connectHost = (mode?: 'managed' | 'attach') => {
+    const v = host.trim(); if (!v) return;
+    const scheme = h.scheme || '';
+    const endpoint = scheme && v.startsWith(scheme) ? v : scheme + v;
+    send(h.driver, endpoint, mode);
+  };
   const divider = (label: string) => e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 8px' } },
     e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
     e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, label),
     e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }));
   const hostRow = (mode: 'managed' | 'attach' | undefined, cta: string) => e('div', { style: { display: 'flex', gap: 8 } },
     e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
-    e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
+    e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: actionsDisabled || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
   // Per-agent host status (SPEC-019 follow-up): live-probed installed/running, or a substrate label.
   // A hollow dot = not installed; a filled neutral dot = installed-but-idle; a filled green dot = up.
   const statusLine = (id: string, substrate?: boolean) => {
@@ -97,8 +107,8 @@ function HarnessSetup() {
       ? e(React.Fragment, null, divider('Omnigent URL'), hostRow(undefined, 'Connect'))
       : e(React.Fragment, null,
           e('div', { style: { display: 'flex', alignItems: 'center', gap: 14 } },
-            e(Button, { disabled: connecting, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
-            e('button', { onClick: () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)' } }, 'Connect to a URL')),
+            e(Button, { disabled: actionsDisabled, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
+            e('button', { onClick: actionsDisabled ? undefined : () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: actionsDisabled ? 'default' : 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)', opacity: actionsDisabled ? 0.4 : 1 } }, 'Connect to a URL')),
           showUrl ? e('div', { style: { marginTop: 10 } }, hostRow('attach', 'Connect')) : null),
     error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
     e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
