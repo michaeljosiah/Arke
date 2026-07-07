@@ -269,8 +269,12 @@ export function Picker() {
       e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: primary ? 'rgba(255,255,255,0.7)' : 'var(--muted-foreground)' } }, sub)),
     e('span', { style: { display: 'flex', color: primary ? 'var(--background)' : 'var(--neutral-400)' } }, e(Icon, { name: 'arrowRight', size: 16 })));
 
-  // Real recents from the coordinator registry (SPEC-018 project.list), most-recent-first.
-  const recentList = ready ? (recents || []) : [];
+  // Real recents from the coordinator registry (SPEC-018 project.list), most-recent-first. These are
+  // HOST-GLOBAL registry data — independent of harness reachability — so they render as soon as the
+  // coordinator answers, even on the neutral default context where no harness is up yet (opening a
+  // recent spins up its own managed harness). Only a genuinely down coordinator hides them, since
+  // they can't be opened and may be stale.
+  const recentList = coordinatorDown ? [] : (recents || []);
 
   return e('div', { style: { height: '100%', width: '100%', background: 'var(--muted)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', overflow: 'auto' } },
     e('div', { style: { width: 540, padding: '40px 32px 64px' } },
@@ -327,7 +331,7 @@ export function Picker() {
                     e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, (STATE_LABEL[p.lastState] || p.lastState || 'unknown') + (p.root ? ' · ' + p.root : ''))),
                   e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 16 }))))))
           : e('div', { style: { padding: '16px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)', textAlign: 'center', fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } },
-              ready ? 'No recent projects — open a folder to begin' : canScaffold ? 'Scaffold a new project to begin' : 'Connect a harness to see your project'),
+              coordinatorDown ? 'Reconnect to see your recent projects' : 'No recent projects yet — open a folder or scaffold one to begin'),
       ),
       e('p', { style: { textAlign: 'center', margin: '16px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', lineHeight: 1.6 } }, 'the client never holds credentials · the host is the trust boundary'),
     ),
