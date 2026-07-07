@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -27,7 +27,7 @@ function firstSnapshot(url: string, ms = 4000): Promise<any> {
 test("startCoordinator binds an ephemeral port and returns its ws:// URL", async () => {
   const root = mkdtempSync(join(tmpdir(), "arke-desktop-"));
   const co = await startCoordinator({ root, persistRegistry: false });
-  after(() => co.stop());
+  after(async () => { await co.stop(); rmSync(root, { recursive: true, force: true }); });
   assert.match(co.url, /^ws:\/\/127\.0\.0\.1:\d+$/);
   // the URL is reachable and yields a snapshot
   const snap = await firstSnapshot(co.url);
@@ -37,7 +37,7 @@ test("startCoordinator binds an ephemeral port and returns its ws:// URL", async
 test("the default context is a neutral NullAdapter — no harness, no work in flight", async () => {
   const root = mkdtempSync(join(tmpdir(), "arke-desktop-"));
   const co = await startCoordinator({ root, persistRegistry: false });
-  after(() => co.stop());
+  after(async () => { await co.stop(); rmSync(root, { recursive: true, force: true }); });
   const snap = await firstSnapshot(co.url);
   // NullAdapter surfaces as harness id "none" (no opencode spawned for the neutral root).
   assert.equal(snap.harness, "none");
@@ -47,7 +47,7 @@ test("the default context is a neutral NullAdapter — no harness, no work in fl
 test("startCoordinator writes its state UNDER the given root (SPEC-022 packaged-app trap)", async () => {
   const root = mkdtempSync(join(tmpdir(), "arke-desktop-"));
   const co = await startCoordinator({ root, persistRegistry: false });
-  after(() => co.stop());
+  after(async () => { await co.stop(); rmSync(root, { recursive: true, force: true }); });
   await firstSnapshot(co.url);
   // the neutral root's `.arke/` (trace + grants) is created under `root`, so a packaged app writes to
   // its userData dir, never process.cwd() (which in a package is the read-only resources dir).
@@ -57,6 +57,7 @@ test("startCoordinator writes its state UNDER the given root (SPEC-022 packaged-
 
 test("stop() resolves and closes the listener", async () => {
   const root = mkdtempSync(join(tmpdir(), "arke-desktop-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
   const co = await startCoordinator({ root, persistRegistry: false });
   await firstSnapshot(co.url);
   await co.stop(); // must resolve (transitive Trace.drain + context stop)
