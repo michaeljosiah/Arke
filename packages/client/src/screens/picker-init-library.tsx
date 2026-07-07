@@ -18,9 +18,9 @@ const e = React.createElement;
  * brand mark comes from `HarnessLogo` (keyed by id); its installed/running status is live-probed via the
  * `harness.hostAgents` op (SPEC-019 follow-up), not hard-coded here.
  *
- * Claude Code and Codex are listed for roster visibility (design parity) but are `comingSoon: true` —
- * there is no harness adapter for either yet (that's a build on the scale of the OpenCode adapter,
- * SPEC-002, not a UI change), so their tiles are inert and never selectable.
+ * Claude Code, Codex, and GitHub Copilot are listed for roster visibility (design parity) but are
+ * `comingSoon: true` — there is no harness adapter for any of them yet (each is a build on the scale of
+ * the OpenCode adapter, SPEC-002, not a UI change), so their tiles are inert and never selectable.
  */
 const HARNESS_SETUP = [
   { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', note: 'open source · self-hostable · the reference harness' },
@@ -28,6 +28,7 @@ const HARNESS_SETUP = [
   // only so the union shape matches the other entries (avoids `as any` at every shared-field access site).
   { id: 'claude-code', name: 'Claude Code', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
   { id: 'codex', name: 'Codex', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
+  { id: 'github-copilot', name: 'GitHub Copilot', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
   { id: 'omnigent', name: 'Omnigent', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
 ] as const;
 

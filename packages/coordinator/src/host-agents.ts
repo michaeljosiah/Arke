@@ -39,13 +39,15 @@ interface AgentSpec {
 
 /**
  * The agents shown on the launch screen. OpenCode is the only one with a runnable adapter; Claude
- * Code and Codex are detected for presence (so a user sees "installed, not yet supported") but have
- * no server to probe. Omnigent is a URL substrate — no binary, so no `installed` signal.
+ * Code, Codex, and GitHub Copilot are detected for presence (so a user sees "installed, not yet
+ * supported") but have no server to probe. Omnigent is a URL substrate — no binary, so no `installed`
+ * signal. Ids MUST match the client's HARNESS_SETUP entries (the launch screen joins status by id).
  */
 export const KNOWN_HOST_AGENTS: readonly AgentSpec[] = [
   { id: "opencode", name: "OpenCode", binary: "opencode", hasServer: true },
   { id: "claude-code", name: "Claude Code", binary: "claude" },
   { id: "codex", name: "Codex", binary: "codex" },
+  { id: "github-copilot", name: "GitHub Copilot", binary: "copilot" },
   { id: "omnigent", name: "Omnigent" },
 ];
 

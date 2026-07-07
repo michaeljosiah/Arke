@@ -46,7 +46,7 @@ function fakeProbe(up: Set<string>): HarnessReachabilityProbe {
 
 test("catalog: OpenCode installed + server up → running with endpoint; others installed-only", async () => {
   const env = { PATH: "/bin" };
-  const present = new Set([join("/bin", "opencode"), join("/bin", "claude")]);
+  const present = new Set([join("/bin", "opencode"), join("/bin", "claude"), join("/bin", "copilot")]);
   const agents = await hostAgentCatalog({
     env,
     platform: "linux",
@@ -56,6 +56,8 @@ test("catalog: OpenCode installed + server up → running with endpoint; others 
   });
   const ids = agents.map((a) => a.id);
   assert.deepEqual(ids, KNOWN_HOST_AGENTS.map((a) => a.id), "every known agent appears, in order");
+  // The four core harnesses (+ Omnigent substrate) the launch screen joins status onto by id.
+  assert.deepEqual(ids, ["opencode", "claude-code", "codex", "github-copilot", "omnigent"]);
 
   const opencode = agents.find((a) => a.id === "opencode");
   assert.deepEqual(opencode, { id: "opencode", name: "OpenCode", installed: true, running: true, endpoint: "http://127.0.0.1:4096" });
@@ -64,6 +66,10 @@ test("catalog: OpenCode installed + server up → running with endpoint; others 
   assert.equal(claude?.installed, true, "Claude Code binary detected");
   assert.equal(claude?.running, false, "no adapter/server → never running, even when installed");
   assert.equal(claude?.endpoint, undefined);
+
+  const copilot = agents.find((a) => a.id === "github-copilot");
+  assert.equal(copilot?.installed, true, "GitHub Copilot binary detected");
+  assert.equal(copilot?.running, false, "no adapter/server → never running, even when installed");
 
   const codex = agents.find((a) => a.id === "codex");
   assert.equal(codex?.installed, false, "Codex binary absent");
