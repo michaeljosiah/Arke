@@ -406,7 +406,9 @@ function LiveCockpit() {
           e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 } },
             // Attach button — leftmost, matching OpenCode's toolbar position. Unlike OpenCode (which
             // opens the native file picker directly), clicking here opens a small menu first so the
-            // single "Add images or file" entry is explicit before the OS dialog appears.
+            // "Add file" entry is explicit before the OS dialog appears. Text only: grounding.upload
+            // (project-context.ts) reads every file as a string and writes it back as utf8, which
+            // corrupts binary content — so the picker doesn't advertise (or accept) images here.
             e('div', { ref: attachRef, style: { position: 'relative' } },
               e('button', { onClick: () => setAttachOpen((o) => !o), disabled: uploading, title: 'Attach',
                 style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 'var(--radius-md)', border: 'none', background: attachOpen ? 'var(--accent)' : 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer', flex: 'none' } },
@@ -414,8 +416,8 @@ function LiveCockpit() {
               attachOpen ? e('div', { style: { position: 'absolute', bottom: 34, left: 0, minWidth: 168, background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-lg)', padding: 4, zIndex: 60 } },
                 e('button', { onClick: () => { setAttachOpen(false); fileInput.current?.click(); },
                   style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 9px', border: 'none', background: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)', textAlign: 'left' } },
-                  e(Icon, { name: 'image', size: 14 }), 'Add images or file')) : null,
-              e('input', { ref: fileInput, type: 'file', multiple: true, style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) })),
+                  e(Icon, { name: 'file', size: 14 }), 'Add file')) : null,
+              e('input', { ref: fileInput, type: 'file', multiple: true, accept: '.txt,.md,.markdown,.json,.yaml,.yml,.csv,.log,text/plain', style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) })),
             e('div', { style: { position: 'relative' } },
               e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: (v: any) => { setRole(v); setEditingModel(false); } }),
               editingModel ? e(AgentModelEditor, {
