@@ -165,10 +165,8 @@ export function Picker() {
   const reason = useStore((s) => s.harnessReachabilityReason);
   const harnessSetup = useStore((s) => s.harnessSetup);
   const hostAgents = useStore((s) => s.hostAgents);
-  const [setup, setSetup] = React.useState(false);
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
-  const [reprobing, setReprobing] = React.useState(false);
   const [newOpen, setNewOpen] = React.useState(false);
   const [newName, setNewName] = React.useState('new-service');
   const [dest, setDest] = React.useState<string | null>(null); // clone/new destination; null = workspace root
@@ -194,11 +192,9 @@ export function Picker() {
   // it is host-global (not project-specific), matching where harness config actually lives.
   const opencodeHost = Array.isArray(hostAgents) ? hostAgents.find((a: any) => a.id === 'opencode') : null;
   const hostHarnessUp = !!opencodeHost?.running;
-  // First-run quick setup (SPEC-019): when live and NO harness is available anywhere — not configured
-  // (global or project) AND not detected running on the host — guide setup. A configured/running harness
-  // keeps the picker; a configured-but-unreachable one keeps the re-probe path.
+  // A harness is "available" when configured (global or project) OR detected running on the host. The
+  // agent roster/selection is always shown regardless; this only tunes the state row's copy.
   const configured = harnessSetup?.configured !== false || hostHarnessUp;
-  const showQuickSetup = live && !configured && !ready;
   // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
   // project must be able to reach Initialisation even when the harness is unreachable, because the
   // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
@@ -219,7 +215,6 @@ export function Picker() {
     return () => clearInterval(t);
   }, [live, hostHarnessUp]);
 
-  const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
   // Route into a just-opened project by its real folder state via the shared helper (SPEC-025):
   // method-ready → Overview, else the scaffold screen. The library stays reachable from the sidebar.
   const enter = (name: string, state: string | null) => routeOpenedProject(name, state);
@@ -281,7 +276,7 @@ export function Picker() {
 
       e(Card, { padding: 22 },
         // 1 · harness readiness
-        stepNum('1', 'Harness', ready ? e('button', { onClick: () => setSetup((o) => !o), style: linkBtn }, setup ? 'Hide' : 'Change host') : null),
+        stepNum('1', 'Harness'),
         coordinatorDown
           ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
               e('span', { style: { color: 'var(--destructive, #DC2626)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
@@ -294,7 +289,7 @@ export function Picker() {
               e(StatusDot, { status: 'running', pulse: true }),
               e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'connecting to the coordinator…'))
           : ready
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
+            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 12 } },
                 e(StatusDot, { status: 'agree' }),
                 e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'Reachable'),
@@ -303,7 +298,7 @@ export function Picker() {
             : hostHarnessUp
             // A harness is running on the host (e.g. the desktop pre-warm) though no project is connected
             // yet — surface it as ready so the picker below is actionable, not a false "nothing running".
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
+            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 12 } },
                 e(StatusDot, { status: 'agree' }),
                 e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'OpenCode running on this host'),
@@ -314,14 +309,10 @@ export function Picker() {
                 e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'No coding agent is running'),
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Start an installed agent below, or connect to a known URL.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
-        showQuickSetup
-          ? e(HarnessSetup)
-          : ((probe === 'unreachable') && !hostHarnessUp) || setup
-          ? e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
-              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.6, marginBottom: 10 } },
-                'The harness is configured in ', e('span', { style: { color: 'var(--foreground)' } }, '.arke/config.json'), ' on the host — the client never holds the endpoint or credentials. Start the harness, then re-probe.'),
-              e(Button, { variant: 'secondary', iconLeft: e(Icon, { name: 'refresh', size: 14 }), disabled: reprobing, onClick: reprobe }, reprobing ? 're-probing…' : 'Re-probe'))
-          : null,
+        // The coding-agent roster + selection is ALWAYS present (not gated behind first-run setup):
+        // the state row above says whether one is reachable; these tiles say what's on the host and
+        // let you start/connect one at any time.
+        e(HarnessSetup),
 
         // 2 · entry
         stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, canScaffold ? 'scaffold to configure a harness' : 'connect a harness first')),
