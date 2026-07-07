@@ -4,8 +4,9 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs, Badge } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend, liveRequest, openProjectLive, createSpecLive } from '../live';
+import { liveSend, liveRequest, openProjectLive, createSpecLive, refreshHostAgents } from '../live';
 import { routeOpenedProject } from '../nav';
+import { HarnessLogo } from '../harness-logos';
 
 const e = React.createElement;
 
@@ -13,19 +14,21 @@ const e = React.createElement;
  * The supported coding agents for first-run quick setup (SPEC-019). Only OpenCode and Omnigent are
  * actually connectable in this build. OpenCode can be **started** for you (Arke spawns `opencode serve`
  * — managed, SPEC-016) or attached to an existing host. Omnigent is a substrate choice: it prompts for
- * an Omnigent URL the coordinator validates. `driver` is sent verbatim to `harness.connect`.
+ * an Omnigent URL the coordinator validates. `driver` is sent verbatim to `harness.connect`. Each tile's
+ * brand mark comes from `HarnessLogo` (keyed by id); its installed/running status is live-probed via the
+ * `harness.hostAgents` op (SPEC-019 follow-up), not hard-coded here.
  *
  * Claude Code and Codex are listed for roster visibility (design parity) but are `comingSoon: true` —
  * there is no harness adapter for either yet (that's a build on the scale of the OpenCode adapter,
  * SPEC-002, not a UI change), so their tiles are inert and never selectable.
  */
 const HARNESS_SETUP = [
-  { id: 'opencode', name: 'OpenCode', icon: 'server', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', recommended: true, note: 'open source · self-hostable · the reference harness', install: 'curl -fsSL https://opencode.ai/install | sh', start: 'opencode serve --port 4096' },
+  { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', note: 'open source · self-hostable · the reference harness' },
   // comingSoon entries are never selectable, so `driver`/`scheme`/`host`/`note` are unused filler kept
   // only so the union shape matches the other entries (avoids `as any` at every shared-field access site).
-  { id: 'claude-code', name: 'Claude Code', icon: 'sparkle', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
-  { id: 'codex', name: 'Codex', icon: 'cpu', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
-  { id: 'omnigent', name: 'Omnigent', icon: 'layers', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
+  { id: 'claude-code', name: 'Claude Code', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
+  { id: 'codex', name: 'Codex', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
+  { id: 'omnigent', name: 'Omnigent', driver: 'omnigent', substrate: true, scheme: '', host: '', note: 'meta-harness substrate — enter your Omnigent URL to validate & connect', placeholder: 'https://omnigent.internal:8790' },
 ] as const;
 
 /**
@@ -37,10 +40,12 @@ const HARNESS_SETUP = [
 function HarnessSetup() {
   const connecting = useStore((s) => s.harnessConnecting);
   const error = useStore((s) => s.harnessConnectError);
+  const hostAgents = useStore((s) => s.hostAgents);
   const [sel, setSel] = React.useState<string>('opencode');
+  const [showUrl, setShowUrl] = React.useState(false);
   const h = HARNESS_SETUP.find((x) => x.id === sel) ?? HARNESS_SETUP[0];
   const [host, setHost] = React.useState<string>(h.host);
-  React.useEffect(() => { setHost(h.host); }, [sel]);
+  React.useEffect(() => { setHost(h.host); setShowUrl(false); }, [sel]);
   const send = (driver: string, endpoint: string, mode?: 'managed' | 'attach') => {
     store.set({ harnessConnecting: true, harnessConnectError: null });
     liveSend({ type: 'harness.connect', driver, endpoint, ...(mode ? { mode } : {}) });
@@ -49,11 +54,6 @@ function HarnessSetup() {
   const startManaged = () => send('opencode', 'opencode://127.0.0.1:4096', 'managed');
   // Secondary: attach to a running host, or (Omnigent) validate a substrate URL.
   const connectHost = (mode?: 'managed' | 'attach') => { const v = host.trim(); if (!v) return; send(h.driver, (h.scheme || '') + v, mode); };
-  const Cmd = ({ label, cmd }: any) => e('div', { style: { marginBottom: 10 } },
-    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 4 } }, label),
-    e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, background: 'var(--neutral-950)', borderRadius: 'var(--radius-md)', padding: '8px 11px' } },
-      e('span', { style: { flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#86EFAC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, '$ ' + cmd),
-      e('span', { style: { display: 'flex', color: '#737373', cursor: 'pointer' }, onClick: () => { try { void navigator.clipboard?.writeText(cmd); } catch { /* ignore */ } } }, e(Icon, { name: 'copy', size: 13 }))));
   const divider = (label: string) => e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 8px' } },
     e('span', { style: { flex: 1, height: 1, background: 'var(--border)' } }),
     e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, label),
@@ -61,32 +61,44 @@ function HarnessSetup() {
   const hostRow = (mode: 'managed' | 'attach' | undefined, cta: string) => e('div', { style: { display: 'flex', gap: 8 } },
     e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: h.scheme || undefined, placeholder: (h as any).placeholder, value: host, onChange: (ev: any) => setHost(ev.target.value) })),
     e(Button, { variant: 'secondary', style: { flex: 'none' }, disabled: connecting || !host.trim(), onClick: () => connectHost(mode) }, connecting ? 'Connecting…' : cta));
+  // Per-agent host status (SPEC-019 follow-up): live-probed installed/running, or a substrate label.
+  // A hollow dot = not installed; a filled neutral dot = installed-but-idle; a filled green dot = up.
+  const statusLine = (id: string, substrate?: boolean) => {
+    if (substrate) return { color: 'var(--muted-foreground)', hollow: false, label: 'substrate', dot: false };
+    const ha = Array.isArray(hostAgents) ? hostAgents.find((a: any) => a.id === id) : null;
+    if (!ha) return { color: 'var(--neutral-300)', hollow: false, label: 'checking…', dot: true };
+    if (ha.running) return { color: '#10B981', hollow: false, label: 'Running', dot: true };
+    if (ha.installed) return { color: 'var(--neutral-400)', hollow: false, label: 'Not running', dot: true };
+    return { color: 'var(--neutral-400)', hollow: true, label: 'Not installed', dot: true };
+  };
   return e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
     e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, marginBottom: 8 } }, 'Coding agents on this host'),
     e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 } },
       HARNESS_SETUP.map((x) => {
         const selected = sel === x.id;
-        const disabled = !!(x as any).comingSoon;
-        const caption = disabled ? 'Coming soon' : (x as any).recommended ? 'recommended' : (x as any).substrate ? 'substrate' : '';
-        return e('button', { key: x.id, onClick: disabled ? undefined : () => setSel(x.id), disabled,
-          style: { display: 'flex', flexDirection: 'column', gap: 8, width: 118, padding: '11px 12px', borderRadius: 'var(--radius-lg)', border: '1px solid ' + (selected ? 'var(--foreground)' : 'var(--border)'), background: disabled ? 'var(--muted)' : 'var(--card)', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 } },
+        const selectable = !(x as any).comingSoon;
+        const st = statusLine(x.id, (x as any).substrate);
+        return e('button', { key: x.id, onClick: selectable ? () => setSel(x.id) : undefined, disabled: !selectable,
+          style: { display: 'flex', flexDirection: 'column', gap: 8, width: 118, padding: '11px 12px', borderRadius: 'var(--radius-lg)', border: '1px solid ' + (selected ? 'var(--foreground)' : 'var(--border)'), background: 'var(--card)', cursor: selectable ? 'pointer' : 'default', opacity: selectable ? 1 : 0.82 } },
           e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' } },
-            e('span', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 'var(--radius-md)', background: 'var(--secondary)', color: 'var(--muted-foreground)' } }, e(Icon, { name: (x as any).icon, size: 15 })),
+            e('span', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28 } }, e(HarnessLogo, { id: x.id, size: 28 })),
             selected ? e('span', { style: { display: 'flex', color: 'var(--foreground)' } }, e(Icon, { name: 'check', size: 14 })) : null),
           e('div', { style: { textAlign: 'left' } },
             e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' } }, x.name),
-            caption ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 } }, caption) : null));
+            e('div', { style: { display: 'flex', alignItems: 'center', gap: 5, marginTop: 3 } },
+              st.dot ? e('span', { style: { width: 7, height: 7, borderRadius: 999, flex: 'none', background: st.hollow ? 'transparent' : st.color, border: st.hollow ? '1.5px solid ' + st.color : 'none' } }) : null,
+              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)' } }, st.label))));
       })),
     e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note),
-    // OpenCode: install/start reference + a primary "Start OpenCode" (managed) + a secondary attach row.
+    // OpenCode: a primary "Start OpenCode" (managed) with a quiet "Connect to a URL" escape hatch that
+    // reveals the attach input. Omnigent is a substrate — its whole flow IS a URL, so show it directly.
     (h as any).substrate
       ? e(React.Fragment, null, divider('Omnigent URL'), hostRow(undefined, 'Connect'))
       : e(React.Fragment, null,
-          e(Cmd, { label: 'Install', cmd: (h as any).install }),
-          e(Cmd, { label: 'Start', cmd: (h as any).start }),
-          e(Button, { style: { width: '100%', marginTop: 4 }, disabled: connecting, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
-          divider('or point at an existing host'),
-          hostRow('attach', 'Connect')),
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 14 } },
+            e(Button, { disabled: connecting, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
+            e('button', { onClick: () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)' } }, 'Connect to a URL')),
+          showUrl ? e('div', { style: { marginTop: 10 } }, hostRow('attach', 'Connect')) : null),
     error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
     e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
 }
@@ -151,6 +163,7 @@ export function Picker() {
   const harnessReachable = useStore((s) => s.harnessReachable);
   const reason = useStore((s) => s.harnessReachabilityReason);
   const harnessSetup = useStore((s) => s.harnessSetup);
+  const hostAgents = useStore((s) => s.hostAgents);
   const [setup, setSetup] = React.useState(false);
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
@@ -173,18 +186,37 @@ export function Picker() {
   const connecting = !live && (connection === 'connecting' || connection === 'reconnecting' || connection === 'offline');
   const probe = live ? (harnessReachable ? 'reachable' : 'unreachable') : (connecting ? 'checking' : 'unreachable');
   const ready = !coordinatorDown && probe === 'reachable';
-  // First-run quick setup (SPEC-019): when live and NO harness is configured anywhere (global or
-  // project), guide setup (choose an agent / point at a host) instead of the configured-but-down
-  // re-probe card. A configured-but-unreachable harness keeps the re-probe path.
-  const configured = harnessSetup?.configured !== false;
+  // Host-wide harness detection (SPEC-019 follow-up): a running OpenCode on the HOST means a harness
+  // is available even though the neutral default context's NullAdapter always reports itself not-ready
+  // (it manages nothing at the userData root by design). This is the signal that lets an already-running
+  // harness — e.g. the desktop's launch pre-warm — fold the launch screen WITHOUT a manual connect, and
+  // it is host-global (not project-specific), matching where harness config actually lives.
+  const opencodeHost = Array.isArray(hostAgents) ? hostAgents.find((a: any) => a.id === 'opencode') : null;
+  const hostHarnessUp = !!opencodeHost?.running;
+  // First-run quick setup (SPEC-019): when live and NO harness is available anywhere — not configured
+  // (global or project) AND not detected running on the host — guide setup. A configured/running harness
+  // keeps the picker; a configured-but-unreachable one keeps the re-probe path.
+  const configured = harnessSetup?.configured !== false || hostHarnessUp;
   const showQuickSetup = live && !configured && !ready;
   // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
   // project must be able to reach Initialisation even when the harness is unreachable, because the
   // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
-  // project that's unreachable is a genuine harness-down situation and stays gated. (PR #10 review)
-  const canScaffold = ready || (!!projectState && projectState !== 'method-ready');
+  // project that's unreachable is a genuine harness-down situation and stays gated. (PR #10 review) A
+  // running host harness also enables entry (opening a project spins up its own managed harness).
+  const canScaffold = ready || hostHarnessUp || (!!projectState && projectState !== 'method-ready');
   const endpoint = (cp && cp.endpoint) || 'opencode://localhost:4096';
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
+
+  // Poll the host-agent catalog while on the launch screen (SPEC-019 follow-up). The desktop pre-warms
+  // OpenCode asynchronously, so a fetch on mount may catch it still starting; poll until a harness is up
+  // (then the effect re-runs with `hostHarnessUp` true and stops). Only runs once `live`.
+  React.useEffect(() => {
+    if (!live) return;
+    void refreshHostAgents();
+    if (hostHarnessUp) return;
+    const t = setInterval(() => { void refreshHostAgents(); }, 2500);
+    return () => clearInterval(t);
+  }, [live, hostHarnessUp]);
 
   const reprobe = () => { setReprobing(true); liveSend({ type: 'harness.probe' }); setTimeout(() => setReprobing(false), 1000); };
   // Route into a just-opened project by its real folder state via the shared helper (SPEC-025):
@@ -267,6 +299,15 @@ export function Picker() {
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'Reachable'),
                   e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, endpoint)),
                 cp && cp.harness ? e(Badge, { variant: 'secondary' }, cp.harness) : null)
+            : hostHarnessUp
+            // A harness is running on the host (e.g. the desktop pre-warm) though no project is connected
+            // yet — surface it as ready so the picker below is actionable, not a false "nothing running".
+            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: setup ? 12 : 18 } },
+                e(StatusDot, { status: 'agree' }),
+                e('div', { style: { flex: 1, minWidth: 0 } },
+                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'OpenCode running on this host'),
+                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, opencodeHost?.endpoint || 'http://127.0.0.1:4096')),
+                e(Badge, { variant: 'secondary' }, 'opencode'))
             : e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--warning) 40%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--warning-bg, var(--secondary))', marginBottom: 12 } },
                 e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
                 e('div', { style: { flex: 1, minWidth: 0 } },
@@ -274,7 +315,7 @@ export function Picker() {
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Start an installed agent below, or connect to a known URL.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
         showQuickSetup
           ? e(HarnessSetup)
-          : (probe === 'unreachable') || setup
+          : ((probe === 'unreachable') && !hostHarnessUp) || setup
           ? e('div', { style: { border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 14, marginBottom: 18, background: 'var(--background)' } },
               e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.6, marginBottom: 10 } },
                 'The harness is configured in ', e('span', { style: { color: 'var(--foreground)' } }, '.arke/config.json'), ' on the host — the client never holds the endpoint or credentials. Start the harness, then re-probe.'),

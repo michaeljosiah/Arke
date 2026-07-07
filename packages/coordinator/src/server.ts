@@ -34,6 +34,7 @@ import {
 } from "./global-config.js";
 import { resolveProcessSettings } from "./config-resolve.js";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "./reachability.js";
+import { hostAgentCatalog, type HostAgent } from "./host-agents.js";
 import { browseDirectory, cloneIntoWorkspace, createProject, resolveWorkspaceRoot } from "./workspace.js";
 import type { InstanceConfig } from "./registry.js";
 
@@ -416,6 +417,27 @@ export class Coordinator {
     return { ok: true, driver };
   }
 
+  /**
+   * Host-agent catalog for the launch screen (SPEC-019 follow-up) — a HOST-level question, not a
+   * project one, so it runs with no active project and never touches a context. Reports, per known
+   * agent, whether its CLI is installed and (for OpenCode) whether a server answers. The OpenCode
+   * running-probe targets the host's configured endpoint (global config, merged) or the documented
+   * local default. No credential is read or returned (NFR-1).
+   */
+  private async hostAgents(): Promise<{ agents: HostAgent[] }> {
+    const config = loadOpenCodeConfig({
+      configPath: resolve(this.defaultRoot, ".arke", "config.json"),
+      baseDir: this.defaultRoot,
+      globalConfigPath: globalConfigPath(),
+    });
+    return {
+      agents: await hostAgentCatalog({
+        probe: this.probe,
+        ...(config?.baseUrl ? { opencodeEndpoint: config.baseUrl } : {}),
+      }),
+    };
+  }
+
   /** Permissive reachability check (any HTTP response means a server is listening) for feedback only. */
   private async validateEndpoint(base: string): Promise<{ ok: boolean; reason?: string }> {
     const controller = new AbortController();
@@ -594,11 +616,13 @@ export class Coordinator {
     const id = msg.id;
     const op = String(msg.op ?? "");
     try {
-      const result = op.startsWith("project.")
-        ? await this.handleProjectOp(conn, ws, op, msg.args)
-        : op.startsWith("workspace.")
-          ? await this.handleWorkspaceOp(op, msg.args)
-          : await this.activeCtx(conn).dispatch(op, msg.args);
+      const result = op === "harness.hostAgents"
+        ? await this.hostAgents()
+        : op.startsWith("project.")
+          ? await this.handleProjectOp(conn, ws, op, msg.args)
+          : op.startsWith("workspace.")
+            ? await this.handleWorkspaceOp(op, msg.args)
+            : await this.activeCtx(conn).dispatch(op, msg.args);
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "response", id, ok: true, result }));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
