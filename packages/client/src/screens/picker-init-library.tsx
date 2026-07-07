@@ -162,8 +162,6 @@ export function Picker() {
   const projectState = useStore((s) => s.projectState);
   const recents = useStore((s) => s.recents);
   const harnessReachable = useStore((s) => s.harnessReachable);
-  const reason = useStore((s) => s.harnessReachabilityReason);
-  const harnessSetup = useStore((s) => s.harnessSetup);
   const hostAgents = useStore((s) => s.hostAgents);
   const [cloneOpen, setCloneOpen] = React.useState(false);
   const [cloneUrl, setCloneUrl] = React.useState('');
@@ -192,16 +190,12 @@ export function Picker() {
   // it is host-global (not project-specific), matching where harness config actually lives.
   const opencodeHost = Array.isArray(hostAgents) ? hostAgents.find((a: any) => a.id === 'opencode') : null;
   const hostHarnessUp = !!opencodeHost?.running;
-  // A harness is "available" when configured (global or project) OR detected running on the host. The
-  // agent roster/selection is always shown regardless; this only tunes the state row's copy.
-  const configured = harnessSetup?.configured !== false || hostHarnessUp;
   // Scaffolding is the remedy for a project that has no harness yet: a greenfield/has-code/partial
   // project must be able to reach Initialisation even when the harness is unreachable, because the
   // `config` scaffold step is what writes .arke/config.json and brings the harness up. A method-ready
   // project that's unreachable is a genuine harness-down situation and stays gated. (PR #10 review) A
   // running host harness also enables entry (opening a project spins up its own managed harness).
   const canScaffold = ready || hostHarnessUp || (!!projectState && projectState !== 'method-ready');
-  const endpoint = (cp && cp.endpoint) || 'opencode://localhost:4096';
   const STATE_LABEL: Record<string, string> = { 'method-ready': 'method-ready', 'partial-scaffold': 'partial scaffold', 'has-code': 'existing code', 'empty': 'empty · ready to scaffold' };
 
   // Poll the host-agent catalog while on the launch screen (SPEC-019 follow-up). The desktop pre-warms
@@ -277,41 +271,20 @@ export function Picker() {
       e(Card, { padding: 22 },
         // 1 · harness readiness
         stepNum('1', 'Harness'),
+        // Only the coordinator-down state gets a banner: the harness tiles below already show live
+        // per-agent reachability (OpenCode "Running", others "Not running/installed"), so a separate
+        // "Reachable" row would just repeat them. If the coordinator itself is unreachable the tiles
+        // can't load, so that one still needs surfacing.
         coordinatorDown
-          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
+          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--destructive, #DC2626) 45%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 14 } },
               e('span', { style: { color: 'var(--destructive, #DC2626)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
               e('div', { style: { flex: 1, minWidth: 0 } },
                 e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, "Can't reach the coordinator"),
                 e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, 'The local coordinator isn’t responding — it may have stopped. Restart it (e.g. arke up); this reconnects automatically.')),
               e(Button, { variant: 'secondary', onClick: () => window.location.reload() }, 'Retry'))
-          : probe === 'checking'
-          ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 18 } },
-              e(StatusDot, { status: 'running', pulse: true }),
-              e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'connecting to the coordinator…'))
-          : ready
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 12 } },
-                e(StatusDot, { status: 'agree' }),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'Reachable'),
-                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, endpoint)),
-                cp && cp.harness ? e(Badge, { variant: 'secondary' }, cp.harness) : null)
-            : hostHarnessUp
-            // A harness is running on the host (e.g. the desktop pre-warm) though no project is connected
-            // yet — surface it as ready so the picker below is actionable, not a false "nothing running".
-            ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--background)', marginBottom: 12 } },
-                e(StatusDot, { status: 'agree' }),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'OpenCode running on this host'),
-                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, opencodeHost?.endpoint || 'http://127.0.0.1:4096')),
-                e(Badge, { variant: 'secondary' }, 'opencode'))
-            : e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', border: '1px solid color-mix(in srgb, var(--warning) 40%, var(--border))', borderRadius: 'var(--radius-lg)', background: 'var(--warning-bg, var(--secondary))', marginBottom: 12 } },
-                e('span', { style: { color: 'var(--warning, #B45309)', display: 'flex' } }, e(Icon, { name: 'alert', size: 16 })),
-                e('div', { style: { flex: 1, minWidth: 0 } },
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 600 } }, 'No coding agent is running'),
-                  e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--muted-foreground)' } }, !configured ? 'Start an installed agent below, or connect to a known URL.' : reason ? 'reason: ' + reason : 'Arke runs on a coding agent on the host. Start one (e.g. opencode serve), then re-probe.'))),
-        // The coding-agent roster + selection is ALWAYS present (not gated behind first-run setup):
-        // the state row above says whether one is reachable; these tiles say what's on the host and
-        // let you start/connect one at any time.
+          : null,
+        // The coding-agent roster + selection is ALWAYS present: the tiles carry live per-agent status,
+        // and the Start/Connect actions let you bring one up at any time.
         e(HarnessSetup),
 
         // 2 · entry
