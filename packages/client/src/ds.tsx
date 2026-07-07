@@ -101,11 +101,11 @@ export function Textarea({ value, onChange, placeholder, rows, onKeyDown }: any)
   return e('textarea', {
     value, onChange, placeholder, rows: rows || 3, onKeyDown,
     style: {
-      width: '100%', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-      background: 'var(--background)', color: 'var(--foreground)',
-      fontFamily: 'var(--font-sans)', fontSize: 13, padding: '9px 10px',
+      width: '100%', border: 'none', borderRadius: 0,
+      background: 'transparent', color: 'var(--foreground)',
+      fontFamily: 'var(--font-sans)', fontSize: 14, padding: '4px 2px',
       resize: 'none', outline: 'none', boxSizing: 'border-box',
-      lineHeight: 1.5,
+      lineHeight: 1.55,
     },
   });
 }
@@ -176,22 +176,20 @@ export function Switch({ checked, onChange }: any) {
 }
 
 // ---------- AgentMessage ----------
+// Agent turns: no bubble — flowing 14px text beneath a small icon+name header.
+// User (human) turns: right-aligned subtle pill, matching OpenCode's bg-layer-02 pattern.
 export function AgentMessage({ children, role, agent, model }: any) {
   const isAgent = role === 'agent';
-  return e('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, alignItems: isAgent ? 'flex-start' : 'flex-end' } },
-    isAgent ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
-      e('span', { style: { width: 24, height: 24, borderRadius: 'var(--radius-sm)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
-        e(Icon, { name: 'bot', size: 13 })),
-      e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } }, agent || 'Agent'),
+  return e('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, alignItems: isAgent ? 'flex-start' : 'flex-end' } },
+    isAgent ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+      e('span', { style: { width: 20, height: 20, borderRadius: 'var(--radius-sm)', background: 'var(--secondary)', color: 'var(--muted-foreground)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' } },
+        e(Icon, { name: 'bot', size: 11 })),
+      e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)' } }, agent || 'Agent'),
       model ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)' } }, model) : null,
     ) : null,
-    e('div', {
-      style: {
-        maxWidth: '85%', padding: '10px 13px', borderRadius: isAgent ? '4px 12px 12px 12px' : '12px 4px 12px 12px',
-        background: isAgent ? 'var(--secondary)' : 'var(--primary)', color: isAgent ? 'var(--foreground)' : 'var(--primary-foreground)',
-        fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.55,
-      },
-    }, children),
+    isAgent
+      ? e('div', { style: { paddingLeft: 26, fontFamily: 'var(--font-sans)', fontSize: 14, lineHeight: 1.6, color: 'var(--foreground)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, children)
+      : e('div', { style: { maxWidth: 'min(82%, 64ch)', padding: '8px 12px', borderRadius: 10, background: 'var(--secondary)', fontFamily: 'var(--font-sans)', fontSize: 14, lineHeight: 1.55, color: 'var(--foreground)', wordBreak: 'break-word' } }, children),
   );
 }
 
@@ -251,13 +249,16 @@ export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
   );
 }
 
-// inject pulse animation globally once
+// inject shared animation keyframes globally once
 if (typeof document !== 'undefined') {
   const styleId = 'so-ds-pulse';
   if (!document.getElementById(styleId)) {
     const s = document.createElement('style');
     s.id = styleId;
-    s.textContent = '@keyframes soPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }';
+    s.textContent = [
+      '@keyframes soPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }',
+      '@keyframes arkeSpinner { to { transform: rotate(360deg); } }',
+    ].join('\n');
     document.head.appendChild(s);
   }
 }

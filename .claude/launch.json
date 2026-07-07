@@ -24,6 +24,18 @@
       "runtimeExecutable": "dotnet",
       "runtimeArgs": ["run", "--project", "C:/Users/mjosi/source/repos/RfpExtractor/src/RfpExtractor.Cli", "-c", "Release", "--no-build", "--", "serve", "--port=5199", "--no-browser"],
       "port": 5199
+    },
+    {
+      "name": "rfpx-ui-azure",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "C:/Users/mjosi/source/repos/RfpExtractor/src/RfpExtractor.Cli", "-c", "Release", "--no-build", "--", "serve", "--port=5198", "--provider=azure", "--engine=telerik", "--model=gpt-4o", "--no-browser"],
+      "port": 5198
+    },
+    {
+      "name": "rfpx-ui-debug",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "C:/Users/mjosi/source/repos/RfpExtractor/src/RfpExtractor.Cli", "-c", "Debug", "--", "serve", "--port=5196", "--provider=openai", "--no-browser"],
+      "port": 5196
     }
   ]
 }

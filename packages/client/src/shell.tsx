@@ -3,6 +3,7 @@ import { Icon } from './icons';
 import { StatusDot } from './ds';
 import { store, useStore, engine } from './store';
 import { ago } from './utils';
+import { isWindowsDesktop, syncNativeTheme } from './desktop';
 
 const e = React.createElement;
 
@@ -117,7 +118,7 @@ function NotifBell() {
     document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h);
   }, []);
   const KIND_ICON = { permission: 'lock', review: 'users', diff: 'diff', projection: 'link', merge: 'merge' };
-  return e('div', { ref, style: { position: 'relative' } },
+  return e('div', { ref, style: { position: 'relative', WebkitAppRegion: 'no-drag' } },
     e('button', { onClick: () => setOpen((o) => !o), 'aria-label': 'Notifications', style: { position: 'relative', display: 'flex', width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--radius-md)', border: 'none', background: open ? 'var(--accent)' : 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer' } },
       e(Icon, { name: 'bell', size: 18 }),
       unread ? e('span', { style: { position: 'absolute', top: 6, right: 6, width: 7, height: 7, borderRadius: 999, background: 'var(--destructive)', boxShadow: '0 0 0 2px var(--background)' } }) : null,
@@ -141,32 +142,48 @@ function RuntimeToggle() {
   const sup = mode === 'supervised';
   return e('button', { onClick: () => store.set({ runtimeMode: sup ? 'full-access' : 'supervised' }),
     title: 'Runtime mode — ' + (sup ? 'supervised (gates on)' : 'full access'),
-    style: { display: 'flex', alignItems: 'center', gap: 7, padding: '5px 10px 5px 9px', borderRadius: 999, border: '1px solid var(--border)', background: 'var(--card)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 500, color: 'var(--foreground)' } },
+    style: { display: 'flex', alignItems: 'center', gap: 7, padding: '5px 10px 5px 9px', borderRadius: 999, border: '1px solid var(--border)', background: 'var(--card)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 500, color: 'var(--foreground)', WebkitAppRegion: 'no-drag' } },
     e('span', { style: { display: 'flex', color: sup ? 'var(--foreground)' : 'var(--warning)' } }, e(Icon, { name: sup ? 'shield' : 'zap', size: 14 })),
     sup ? 'Supervised' : 'Full access');
 }
 
 function ThemeToggle() {
   const theme = useStore((s) => s.theme);
-  return e('button', { onClick: () => store.set({ theme: theme === 'dark' ? 'light' : 'dark' }), 'aria-label': 'Toggle theme',
-    style: { display: 'flex', width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--radius-md)', border: 'none', background: 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer' } },
+  return e('button', {
+    onClick: () => {
+      const next = theme === 'dark' ? 'light' : 'dark';
+      store.set({ theme: next });
+      syncNativeTheme(next);
+    },
+    'aria-label': 'Toggle theme',
+    style: { display: 'flex', width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 'var(--radius-md)', border: 'none', background: 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer', WebkitAppRegion: 'no-drag' } },
     e(Icon, { name: theme === 'dark' ? 'sun' : 'moon', size: 18 }));
 }
 
 function TopBar({ crumbs, actions }: any) {
-  return e('div', { style: { height: 56, flex: 'none', background: 'var(--background)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', padding: '0 18px', gap: 12 } },
+  // On Windows desktop the native window control buttons (close/min/max) are painted over the
+  // top-right corner of the content area at ~138px wide — pad to keep our controls clear of them.
+  const winPad = isWindowsDesktop() ? 150 : 18;
+  return e('div', {
+    style: {
+      height: 56, flex: 'none', background: 'var(--background)', borderBottom: '1px solid var(--border)',
+      display: 'flex', alignItems: 'center', padding: `0 ${winPad}px 0 18px`, gap: 12,
+      // Allow the blank areas of the topbar to drag the window when using a hidden titlebar.
+      WebkitAppRegion: 'drag',
+    },
+  },
     e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
       (crumbs || []).map((c, i) => e(React.Fragment, { key: i },
         i > 0 ? e('span', { style: { color: 'var(--neutral-400)', display: 'flex' } }, e(Icon, { name: 'chevron', size: 14 })) : null,
         e('span', { style: { fontFamily: i === crumbs.length - 1 ? 'var(--font-sans)' : 'var(--font-mono)', fontSize: i === crumbs.length - 1 ? 15 : 12, fontWeight: i === crumbs.length - 1 ? 600 : 400, letterSpacing: i === crumbs.length - 1 ? '-0.01em' : 0, color: i === crumbs.length - 1 ? 'var(--foreground)' : 'var(--muted-foreground)', whiteSpace: 'nowrap' } }, c))),
     ),
     e('div', { style: { flex: 1 } }),
-    actions || null,
+    actions ? e('div', { style: { WebkitAppRegion: 'no-drag' } }, actions) : null,
     e('div', { style: { width: 1, height: 22, background: 'var(--border)', margin: '0 2px' } }),
     e(RuntimeToggle, null),
     e(ThemeToggle, null),
     e(NotifBell, null),
-    e('div', { style: { width: 30, height: 30, borderRadius: 999, background: 'var(--secondary)', color: 'var(--foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, marginLeft: 2 } }, 'PN'),
+    e('div', { style: { width: 30, height: 30, borderRadius: 999, background: 'var(--secondary)', color: 'var(--foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, marginLeft: 2, WebkitAppRegion: 'no-drag' } }, 'PN'),
   );
 }
 

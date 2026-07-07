@@ -17,6 +17,8 @@ interface ArkeBridge {
   onMenu?: (cb: (action: string) => void) => void;
   notify?: (event: unknown) => void;
   app?: { version?: string };
+  platform?: string;
+  setNativeTheme?: (theme: 'dark' | 'light') => void;
   updates?: {
     status: () => Promise<DesktopUpdateStatus>;
     check: () => Promise<DesktopUpdateStatus>;
@@ -43,6 +45,16 @@ export function desktopVersion(): string | undefined {
 /** The electron-updater surface (Settings › About), or undefined in a browser / when unavailable. */
 export function desktopUpdates(): ArkeBridge['updates'] | undefined {
   return bridge()?.updates;
+}
+
+/** True when running in the Windows Electron shell (used to add drag region padding). */
+export function isWindowsDesktop(): boolean {
+  return bridge()?.platform === 'win32';
+}
+
+/** Sync the app theme with the native Windows titlebar overlay. No-op in a browser or on macOS. */
+export function syncNativeTheme(theme: 'dark' | 'light'): void {
+  bridge()?.setNativeTheme?.(theme);
 }
 
 /**

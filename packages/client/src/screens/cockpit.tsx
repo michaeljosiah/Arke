@@ -136,6 +136,16 @@ function LiveCockpit() {
   const [grounding, setGrounding] = React.useState<any[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const fileInput = React.useRef<any>(null);
+  // Attach button opens a small context menu (rather than OpenCode's direct file-picker) so the
+  // single "Add images or file" entry stays discoverable without crowding the toolbar.
+  const [attachOpen, setAttachOpen] = React.useState(false);
+  const attachRef = React.useRef<any>(null);
+  React.useEffect(() => {
+    if (!attachOpen) return;
+    const h = (ev: any) => { if (attachRef.current && !attachRef.current.contains(ev.target)) setAttachOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [attachOpen]);
   const refreshGrounding = React.useCallback(() => {
     void liveRequest('grounding.list').then((res: any) => { if (res?.ok && Array.isArray(res.result)) setGrounding(res.result); });
   }, []);
@@ -347,13 +357,21 @@ function LiveCockpit() {
   const showThinking = (sending || inFlight) && !streamingWithText;
   const lastLiveTool: any = liveTools[liveTools.length - 1];
   const thinkingLabel = liveTools.length ? `using ${lastLiveTool?.name ?? lastLiveTool}…` : 'thinking…';
-  const ThinkingDots = () => e('span', { style: { display: 'inline-flex', gap: 4, alignItems: 'center' } },
-    [0, 1, 2].map((i) => e('span', { key: i, style: { width: 5, height: 5, borderRadius: 999, background: 'var(--muted-foreground)', animation: 'soPulse 1.2s ease-in-out infinite', animationDelay: (i * 0.2) + 's' } })));
-  // Small mono chips naming the tools an agent turn used, indented to align under the bubble.
+  // CSS spinner replacing the old 3-dot pulse — matches OpenCode's tool-status style.
+  const ThinkingDots = () => e('span', {
+    style: { width: 13, height: 13, borderRadius: 999, border: '2px solid var(--border)', borderTopColor: 'var(--foreground)', display: 'inline-block', animation: 'arkeSpinner 0.7s linear infinite', flex: 'none' },
+  });
+  // Tool rows: semi-transparent card per tool, indented to align under the agent icon.
   const ToolChips = ({ tools }: any) => (tools && tools.length)
-    ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5, margin: '2px 0 0 31px' } },
-        tools.map((tc: any, i: number) => e('span', { key: i + String(tc?.name ?? tc), style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '1px 7px' } },
-          e(Icon, { name: 'terminal', size: 10 }), (tc?.name ?? tc))))
+    ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, margin: '4px 0 0 26px' } },
+        tools.map((tc: any, i: number) => {
+          const name = tc?.name ?? String(tc);
+          const path = tc?.input?.path ?? tc?.input?.file_path ?? '';
+          return e('div', { key: i + name, style: { display: 'flex', alignItems: 'center', gap: 6, background: 'color-mix(in srgb, var(--secondary) 60%, transparent)', border: '0.5px solid var(--border)', borderRadius: 6, padding: '3px 8px' } },
+            e('span', { style: { display: 'flex', color: 'var(--neutral-400)', flex: 'none' } }, e(Icon, { name: 'terminal', size: 11 })),
+            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', fontWeight: 500 } }, name),
+            path ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, path) : null);
+        }))
     : null;
 
   return e('div', { style: { display: 'flex', height: '100%' } },
@@ -364,50 +382,68 @@ function LiveCockpit() {
         e('div', { style: { flex: 1 } }),
         e(Button, { variant: 'outline', size: 'sm', iconLeft: e(Icon, { name: 'users', size: 14 }), disabled: !specId || !file?.exists || !(doc?.requirements?.length), onClick: () => void convene() }, 'Convene review')),
       cockpit?.notice ? e('div', { style: { padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--secondary)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, cockpit.notice) : null,
-      e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 } },
+      e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 22 } },
         turns.length === 0 && !showThinking ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
           : turns.map((m: any) => e('div', { key: m.key },
               e(AgentMessage, { role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'),
               m.kind === 'agent' ? e(ToolChips, { tools: m.toolCalls }) : null)),
-        showThinking ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, alignItems: 'flex-start' } },
-          e('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
-            e('span', { style: { width: 24, height: 24, borderRadius: 'var(--radius-sm)', background: 'var(--primary)', color: 'var(--primary-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' } }, e(Icon, { name: 'bot', size: 13 })),
-            e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--foreground)' } }, lastSentRole.current ?? role),
-            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)' } }, thinkingLabel)),
-          e('div', { style: { padding: '12px 14px', borderRadius: '4px 12px 12px 12px', background: 'var(--secondary)' } }, e(ThinkingDots))) : null),
-      e('div', { style: { padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--background)' } },
-        grounding.length ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
-          e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
-          grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
-            e(Icon, { name: 'file', size: 11 }), g.name))) : null,
-        e('div', { style: { position: 'relative', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
-          e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: (v: any) => { setRole(v); setEditingModel(false); } }),
-          // The model is the agent's own (SPEC-016 revised). Click to edit it (provider → model →
-          // effort from the harness catalog); the choice persists to the agent's image.
-          e('button', { onClick: openModelEditor, title: 'Change this agent’s model — writes to its image (agents/<name>/config.yaml)',
-            style: { display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '3px 9px', cursor: 'pointer' } },
-            e(Icon, { name: 'cpu', size: 11 }), agentModelLabel || 'model set by agent',
-            e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'chevronDown', size: 11 }))),
-          editingModel ? e(AgentModelEditor, {
-            role,
-            current: rosterEntry,
-            catalog,
-            onClose: () => setEditingModel(false),
-            onSave: async (provider: string, model: string, effort?: string) => {
-              const res = await configureAgent(role, provider, model, effort);
-              if (res.ok) setEditingModel(false);
-              return res;
-            },
-          }) : null),
-        e(Textarea, { rows: 2, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
-        e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 9 } },
-          e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, '⌘↵ to send'),
-          e('button', { onClick: () => fileInput.current?.click(), disabled: uploading, title: 'Upload files as grounding for the discussion',
-            style: { display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)' } },
-            e(Icon, { name: 'file', size: 13 }), uploading ? 'Uploading…' : 'Attach files'),
-          e('input', { ref: fileInput, type: 'file', multiple: true, style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) }),
-          e('div', { style: { flex: 1 } }),
-          e(Button, { size: 'sm', disabled: !specId || sending, onClick: () => void send() }, sending ? 'Sending…' : 'Send'))),
+        // Thinking indicator: agent icon+name header with a spinner + status label inline.
+        showThinking ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+            e('span', { style: { width: 20, height: 20, borderRadius: 'var(--radius-sm)', background: 'var(--secondary)', color: 'var(--muted-foreground)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' } }, e(Icon, { name: 'bot', size: 11 })),
+            e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)' } }, lastSentRole.current ?? role)),
+          e('div', { style: { paddingLeft: 26, display: 'flex', alignItems: 'center', gap: 7 } },
+            e(ThinkingDots),
+            e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)' } }, thinkingLabel))) : null),
+      // Floating dock card wrapping the composer — rounded card with shadow.
+      e('div', { style: { padding: '8px 12px 12px', flexShrink: 0 } },
+        e('div', { style: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, boxShadow: 'var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.12))', padding: '12px 14px 10px' } },
+          grounding.length ? e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
+            e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', alignSelf: 'center' } }, 'grounding:'),
+            grounding.map((g: any) => e('span', { key: g.name, title: (g.size ?? 0) + ' bytes', style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } },
+              e(Icon, { name: 'file', size: 11 }), g.name))) : null,
+          e(Textarea, { rows: 3, value: draft, placeholder: 'Direct the agents…', onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } }),
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 } },
+            // Attach button — leftmost, matching OpenCode's toolbar position. Unlike OpenCode (which
+            // opens the native file picker directly), clicking here opens a small menu first so the
+            // single "Add images or file" entry is explicit before the OS dialog appears.
+            e('div', { ref: attachRef, style: { position: 'relative' } },
+              e('button', { onClick: () => setAttachOpen((o) => !o), disabled: uploading, title: 'Attach',
+                style: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 'var(--radius-md)', border: 'none', background: attachOpen ? 'var(--accent)' : 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer', flex: 'none' } },
+                e(Icon, { name: 'plus', size: 16 })),
+              attachOpen ? e('div', { style: { position: 'absolute', bottom: 34, left: 0, minWidth: 168, background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-lg)', padding: 4, zIndex: 60 } },
+                e('button', { onClick: () => { setAttachOpen(false); fileInput.current?.click(); },
+                  style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 9px', border: 'none', background: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)', textAlign: 'left' } },
+                  e(Icon, { name: 'image', size: 14 }), 'Add images or file')) : null,
+              e('input', { ref: fileInput, type: 'file', multiple: true, style: { display: 'none' }, onChange: (ev: any) => void onFiles(ev.target.files) })),
+            e('div', { style: { position: 'relative' } },
+              e(MiniSelect, { value: role, icon: 'bot', options: LIVE_ROLES, onChange: (v: any) => { setRole(v); setEditingModel(false); } }),
+              editingModel ? e(AgentModelEditor, {
+                role,
+                current: rosterEntry,
+                catalog,
+                onClose: () => setEditingModel(false),
+                onSave: async (provider: string, model: string, effort?: string) => {
+                  const res = await configureAgent(role, provider, model, effort);
+                  if (res.ok) setEditingModel(false);
+                  return res;
+                },
+              }) : null),
+            e('button', { onClick: openModelEditor, title: 'Change this agent\'s model — writes to its image (agents/<name>/config.yaml)',
+              style: { display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', background: 'var(--secondary)', border: '1px solid var(--border)', borderRadius: 999, padding: '3px 9px', cursor: 'pointer' } },
+              e(Icon, { name: 'cpu', size: 11 }), agentModelLabel || 'model set by agent',
+              e('span', { style: { display: 'flex', color: 'var(--neutral-400)' } }, e(Icon, { name: 'chevronDown', size: 11 }))),
+            e('div', { style: { flex: 1 } }),
+            // Submit button — rightmost icon-only square, matching OpenCode's arrow-up send button.
+            e('button', { onClick: () => void send(), disabled: !specId || sending || !draft.trim(), title: 'Send (⌘⏎)',
+              style: {
+                display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: (!specId || sending || !draft.trim()) ? 'var(--secondary)' : 'var(--primary)',
+                color: (!specId || sending || !draft.trim()) ? 'var(--neutral-400)' : 'var(--primary-foreground)',
+                cursor: (!specId || sending || !draft.trim()) ? 'default' : 'pointer', flex: 'none',
+              } },
+              sending ? e('span', { style: { width: 13, height: 13, borderRadius: 999, border: '2px solid color-mix(in srgb, currentColor 30%, transparent)', borderTopColor: 'currentColor', display: 'inline-block', animation: 'arkeSpinner 0.7s linear infinite' } }) : e(Icon, { name: 'arrowUp', size: 15 }))))),
     ),
     e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId) }),
   );
