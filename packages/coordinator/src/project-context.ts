@@ -1212,7 +1212,8 @@ export class ProjectContext {
     // the PR itself once every task is done — otherwise the prompt says nothing about PRs and delivery
     // stops at the human diff-review gate (SPEC-011). The agent runs on `<featureBranch>--delivery` (the
     // worktree, below), so the PR targets the FEATURE branch (SPEC-031): delivery → feature, which then
-    // merges to mainline = delivered (SPEC-024). The base is shell-quoted in `buildDeliveryPrompt`.
+    // merges to mainline = delivered (SPEC-024). `buildDeliveryPrompt` only interpolates the base branch
+    // when it is metacharacter-free (else it falls back to gh's default base).
     const autoOpenPr = loadAutoOpenPr(this.deliveryConfigPath());
     await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch, autoOpenPr });
     try {

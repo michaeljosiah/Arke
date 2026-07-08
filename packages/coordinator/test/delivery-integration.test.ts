@@ -414,7 +414,7 @@ test("with auto-PR configured on, the delivery prompt instructs the implementer 
   await sleep(200);
   const text = implementerDispatches(adapter)[0]!.text;
   assert.match(text, /open a pull request/i);
-  // The delivery runs on `<BRANCH>--delivery` in the worktree, so the PR targets the shell-quoted FEATURE
-  // branch (delivery → feature → mainline = delivered, SPEC-024).
-  assert.ok(text.includes(`gh pr create --base '${BRANCH}' --fill`), "targets the feature branch, single-quoted");
+  // The delivery runs on `<BRANCH>--delivery` in the worktree, so the PR targets the FEATURE branch
+  // (delivery → feature → mainline = delivered, SPEC-024). BRANCH is metacharacter-free → interpolated bare.
+  assert.ok(text.includes(`gh pr create --base ${BRANCH} --fill`), "targets the feature branch");
 });

@@ -86,17 +86,24 @@ export interface DeliveryPromptOptions {
    * The branch an auto-opened PR should target (SPEC-031) — the spec's FEATURE branch. With the delivery
    * worktree wired into the harness cwd (SPEC-028), the agent runs on `<featureBranch>--delivery`, so the
    * PR should merge that back into the feature branch (which then merges to mainline = `delivered`,
-   * SPEC-024), NOT jump straight to the repo default. The value is shell-quoted into the command, so a
-   * crafted `branch:` frontmatter value cannot inject shell syntax. Omitted → no `--base` (gh's default).
+   * SPEC-024), NOT jump straight to the repo default. Only interpolated when it passes
+   * {@link isShellSafeBranch} (no shell/Markdown metacharacters); an unusual/crafted `branch:` value is
+   * dropped and the instruction falls back to gh's default base. Omitted → no `--base`.
    */
   baseBranch?: string;
 }
 
-/** POSIX single-quote a value so it is safe to embed literally in a shell command (handles an embedded
- *  `'`). Git branch names allow `$`, `(`, `)`, `'`, etc., so a base branch MUST be quoted before it lands
- *  in the `gh pr create` command shown to the agent. */
-export function shSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+/**
+ * A branch name safe to embed literally — in a shell command AND a Markdown code span, in ANY shell —
+ * without escaping: alphanumerics plus the ref punctuation git branches actually use (`.`, `_`, `/`, `-`).
+ * This is deliberately STRICTER than git's own ref rules, which also permit `$ ( ) ' \` & ~` etc. Rather
+ * than shell-escape an untrusted `branch:` value correctly for POSIX sh, `cmd.exe`, PowerShell, and
+ * Markdown all at once (they disagree — a POSIX single-quote is wrong in `cmd.exe`; a backtick breaks a
+ * Markdown code span even when shell-quoted), we only interpolate a branch with no special characters at
+ * all, and fall back to the repository default otherwise (see {@link buildDeliveryPrompt}).
+ */
+export function isShellSafeBranch(name: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(name);
 }
 
 /**
@@ -118,16 +125,21 @@ export function buildDeliveryPrompt(specPath: string, tasks: ParsedTask[], opts:
   ];
   if (opts.autoOpenPr) {
     // Target the feature branch when known (SPEC-031): the agent is on `<featureBranch>--delivery`, so the
-    // PR merges delivery → feature (which then merges to mainline = delivered). The base is shell-quoted.
-    const baseFlag = opts.baseBranch ? ` --base ${shSingleQuote(opts.baseBranch)}` : "";
-    const target = opts.baseBranch ? `the \`${opts.baseBranch}\` branch` : "the repository's default branch";
+    // PR merges delivery → feature (which then merges to mainline = delivered). Only interpolate a branch
+    // with no special characters (isShellSafeBranch) — a crafted one is dropped, falling back to gh's
+    // default base — so it is inert in every shell (POSIX/cmd/PowerShell) AND in the Markdown below.
+    const base = opts.baseBranch && isShellSafeBranch(opts.baseBranch) ? opts.baseBranch : undefined;
+    const baseFlag = base ? ` --base ${base}` : "";
+    const target = base ? `the ${base} branch` : "the repository's default branch";
+    // Push BOTH the current (delivery) branch AND the base: after a host-less/local approval the feature
+    // branch may not be on the remote yet, and `gh pr create --base` needs the base to exist there.
     lines.push(
       "",
       "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
-      `and merged: push your current branch if it has no remote yet, then run \`gh pr create${baseFlag} --fill\``,
-      `(it opens a PR from your current branch against ${target}). This project is configured to open the PR`,
-      "automatically on delivery — the engineer has pre-authorised it, so do not stop to ask for a separate",
-      "diff approval first.",
+      `and merged: make sure both your current branch and ${target} are pushed to the remote (push whichever`,
+      `is missing), then run \`gh pr create${baseFlag} --fill\` (it opens a PR from your current branch into`,
+      `${target}). This project is configured to open the PR automatically on delivery — the engineer has`,
+      "pre-authorised it, so do not stop to ask for a separate diff approval first.",
     );
   }
   lines.push("", "--- TASKS ---", list);
