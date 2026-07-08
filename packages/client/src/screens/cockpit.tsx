@@ -194,23 +194,24 @@ function LiveCockpit() {
     void send('This is a brand-new blank specification the engineer just created. Greet them briefly and ask what they want to achieve with this change — one or two focused questions to draw out the goal and who it is for. Do not write to the specification file yet.');
   }, [cockpit?.kickoffFor, specId, sending, convo.length]);
 
-  // Resolve the live AUTHORING session for this spec. Authoring sessions are spec-kind sessions for
-  // this spec (id !== specId) — NOT the spec status card and NOT implementation task sessions, which
-  // must stay out of the authoring conversation/in-flight state (PR #18 review round 6). Prefer the
-  // session we created; otherwise reuse an existing running/idle authoring session (e.g. after a
-  // reload) so follow-ups continue the same session rather than splitting context (round 6).
+  // Resolve the live AUTHORING session for this spec. Since the SPEC-023 board fold, a spec is ONE
+  // card (id === specId) with its harness sessions nested in `sessions[]` — they are NOT top-level
+  // cards. Authoring sessions are the spec-kind sessions on that card (implementation runs are
+  // kind:'task' and must stay out of the authoring conversation/in-flight state). Prefer the session
+  // we created; otherwise reuse an existing running/idle authoring session (e.g. after a reload) so
+  // follow-ups continue the same session rather than splitting context (PR #18 review round 6).
   const specStatusCard = cards.find((c: any) => c.id === specId);
-  const authoringSessions = cards.filter((c: any) => c.specId === specId && c.id !== specId && c.kind === 'spec');
+  const authoringSessions: any[] = (specStatusCard?.sessions ?? []).filter((s: any) => s.kind === 'spec');
   // A session is REUSABLE for follow-ups only while idle/running — a terminal (done/error/interrupted)
   // session would be rejected by the coordinator's stale-session guard, so we create a fresh one
   // instead (PR #18 review round 7).
-  const reusableSession = authoringSessions.find((c: any) => c.status === 'running')
-    ?? authoringSessions.find((c: any) => c.status === 'idle');
-  const authoringCard = sessionId ? cards.find((c: any) => c.id === sessionId) : null;
+  const reusableSession = authoringSessions.find((s: any) => s.status === 'running')
+    ?? authoringSessions.find((s: any) => s.status === 'idle');
+  const authoringCard = sessionId ? authoringSessions.find((s: any) => s.sessionId === sessionId) : null;
   // For display, fall back to the most recent authoring session (even terminal) so its transcript
-  // stays visible, then the spec status card.
-  const liveCard = authoringCard ?? reusableSession ?? authoringSessions[authoringSessions.length - 1] ?? specStatusCard;
-  const inFlight = authoringSessions.some((c: any) => c.status === 'running');
+  // stays visible. The transcript lives on the nested session, not the folded spec card.
+  const liveCard = authoringCard ?? reusableSession ?? authoringSessions[authoringSessions.length - 1] ?? null;
+  const inFlight = authoringSessions.some((s: any) => s.status === 'running');
   const transcript = liveCard?.transcript ?? [];
   // Drop user-role echoes: the human turn is already shown optimistically, so a harness echo of the
   // user message must not reappear as a spec-author/architect reply (PR #18 final review).
@@ -281,7 +282,7 @@ function LiveCockpit() {
       // creating a new one, so follow-ups continue the same harness session/history (PR #18 review
       // rounds 6–7). A terminal tracked session is not reused (it would be rejected as stale).
       const trackedUsable = authoringCard && (authoringCard.status === 'idle' || authoringCard.status === 'running');
-      let sid = (trackedUsable ? sessionId : null) ?? reusableSession?.id ?? null;
+      let sid = (trackedUsable ? sessionId : null) ?? reusableSession?.sessionId ?? null;
       if (!sid) {
         // Don't attempt session.create while offline — it would time out and the message would be
         // lost. Keep the draft in the composer and tell the engineer to reconnect (PR #18 review).
