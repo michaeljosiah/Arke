@@ -53,13 +53,17 @@ export class OpenCodeHttp {
     this.directory = resolveDirectory(config.projectRoot);
   }
 
-  /** Build an absolute URL, always scoping to the validated project directory. */
-  url(path: string): string {
+  /**
+   * Build an absolute URL, scoping to a directory. Defaults to the validated primary project directory;
+   * a per-request `directory` override (already root-validated by the caller — SPEC-028 delivery worktree)
+   * scopes just that request elsewhere. Both go on the wire in forward-slash form.
+   */
+  url(path: string, directory?: string): string {
     const u = new URL(path, this.config.baseUrl);
     // Send the directory in forward-slash form: OpenCode ≥1.17.13 validates the param with
     // POSIX-style isAbsolute and 500s ("Path is not absolute") on `C:\...`, while `C:/...` passes.
     // The canonical Windows form stays internal for filesystem work; only the wire form changes.
-    u.searchParams.set("directory", this.directory.replaceAll("\\", "/"));
+    u.searchParams.set("directory", (directory ?? this.directory).replaceAll("\\", "/"));
     return u.toString();
   }
 
@@ -74,9 +78,12 @@ export class OpenCodeHttp {
     return h;
   }
 
-  /** JSON request; throws {@link OpenCodeError} (with body detail) on a non-2xx status. */
-  async req<T>(method: string, path: string, body?: unknown, init?: { signal?: AbortSignal }): Promise<T> {
-    const res = await fetch(this.url(path), {
+  /**
+   * JSON request; throws {@link OpenCodeError} (with body detail) on a non-2xx status. An optional
+   * `directory` override scopes this one request to a non-primary directory (SPEC-028 worktree).
+   */
+  async req<T>(method: string, path: string, body?: unknown, init?: { signal?: AbortSignal; directory?: string }): Promise<T> {
+    const res = await fetch(this.url(path, init?.directory), {
       method,
       headers: this.headers(),
       body: body === undefined ? undefined : JSON.stringify(body),

@@ -25,6 +25,14 @@ test("parseTasks returns [] when there is no Tasks section", () => {
   assert.deepEqual(parseTasks("# Spec\n\n## Design\nstuff\n"), []);
 });
 
+test("parseTasks handles CRLF line endings (a git worktree checkout on Windows — SPEC-028)", () => {
+  const crlf = TASKS_MD.replace(/\n/g, "\r\n");
+  const tasks = parseTasks(crlf);
+  assert.equal(tasks.length, 3, "CRLF must not swallow the task lines");
+  assert.deepEqual(tasks.map((t) => t.done), [false, true, false]);
+  assert.equal(tasks[0]!.text, "First task", "no trailing \\r leaks into the task text");
+});
+
 test("parseTasks ignores list items outside the Tasks section", () => {
   const md = "## Requirements\n- [ ] not a task\n\n## Tasks\n- [ ] real task\n";
   const t = parseTasks(md);

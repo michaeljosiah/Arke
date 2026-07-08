@@ -22,7 +22,10 @@ export interface ParsedTask {
  * `- [ ]` / `- [x]` items.
  */
 export function parseTasks(md: string): ParsedTask[] {
-  const lines = md.split("\n");
+  // Split on CRLF *or* LF: a git worktree checkout on Windows (core.autocrlf) yields `\r\n`, and a
+  // trailing `\r` breaks the task-line regex below (`.` never matches `\r`, and `$` won't match before
+  // it) — so a delivery running in a CRLF worktree would parse zero tasks and never complete (SPEC-028).
+  const lines = md.split(/\r?\n/);
   let inTasks = false;
   const out: ParsedTask[] = [];
   let idx = 0;

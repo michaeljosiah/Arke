@@ -12,10 +12,14 @@ import type { PermissionAck, PermissionDecision, PermissionVerb } from "@arke/co
 
 /** The minimal server surface the coordinator needs (stubbed in tests). */
 export interface PermissionClient {
-  /** POST the decision (verb + optional message). Confirmation is via the event, not status. */
-  reply(permissionId: string, decision: PermissionVerb, message?: string): Promise<void>;
-  /** Ids the server currently lists as pending (GET /permission/). */
-  pending(): Promise<string[]>;
+  /**
+   * POST the decision (verb + optional message). Confirmation is via the event, not status. The
+   * optional `directory` scopes the reply to the OpenCode directory the permission belongs to — a
+   * delivery session runs in its worktree (SPEC-028), so its permissions live there, not the primary.
+   */
+  reply(permissionId: string, decision: PermissionVerb, message?: string, directory?: string): Promise<void>;
+  /** Ids the server currently lists as pending (GET /permission/), optionally scoped to a `directory`. */
+  pending(directory?: string): Promise<string[]>;
 }
 
 interface Waiter {
@@ -26,6 +30,9 @@ interface Waiter {
 export class PermissionCoordinator {
   private readonly client: PermissionClient;
   private readonly timeoutMs: number;
+  /** Resolves the OpenCode directory a permission belongs to (its session's worktree cwd, SPEC-028),
+   *  or undefined for the primary project directory. */
+  private readonly directoryOf: (permissionId: string) => string | undefined;
   /** Ids confirmed by a `permission.replied` event. */
   private readonly confirmed = new Set<string>();
   /** Decisions awaiting their confirming event. */
@@ -33,9 +40,14 @@ export class PermissionCoordinator {
   /** In-flight decide() calls, so a duplicate submission rides the same promise. */
   private readonly inflight = new Map<string, Promise<PermissionAck>>();
 
-  constructor(client: PermissionClient, timeoutMs: number) {
+  constructor(
+    client: PermissionClient,
+    timeoutMs: number,
+    directoryOf: (permissionId: string) => string | undefined = () => undefined,
+  ) {
     this.client = client;
     this.timeoutMs = timeoutMs;
+    this.directoryOf = directoryOf;
   }
 
   /** Called by the event loop when a `permission.replied` arrives — confirms the decision. */
@@ -68,14 +80,17 @@ export class PermissionCoordinator {
 
   private async run(decision: PermissionDecision): Promise<PermissionAck> {
     const id = decision.permissionId;
+    // Scope pending/reply to the directory the permission belongs to (its session's worktree, SPEC-028),
+    // so a worktree-scoped permission isn't checked against, or replied to, the primary directory.
+    const directory = this.directoryOf(id);
 
     // Stale pre-check: a decision for an id the server no longer lists as pending is stale.
-    const before = await this.client.pending().catch(() => null);
+    const before = await this.client.pending(directory).catch(() => null);
     if (before && !before.includes(id) && !this.confirmed.has(id)) {
       return { permissionId: id, status: "stale" };
     }
 
-    await this.client.reply(id, decision.decision, decision.message);
+    await this.client.reply(id, decision.decision, decision.message, directory);
 
     return await new Promise<PermissionAck>((resolve) => {
       // The confirming event may have raced ahead of the reply round-trip.
@@ -104,10 +119,18 @@ export class PermissionCoordinator {
    */
   async reconcile(): Promise<void> {
     if (this.waiters.size === 0) return;
-    const pendingIds = await this.client.pending().catch(() => null);
-    if (!pendingIds) return;
+    // Fetch pending once per DISTINCT directory among the waiters (a worktree session's permissions
+    // live in its own directory, SPEC-028): querying only the primary directory would miss them and
+    // wrongly resolve those waiters unconfirmed. A directory whose fetch fails is skipped (null), so its
+    // waiters stay pending rather than being force-resolved on a transient error.
+    const byDir = new Map<string | undefined, string[] | null>();
+    for (const id of this.waiters.keys()) {
+      const dir = this.directoryOf(id);
+      if (!byDir.has(dir)) byDir.set(dir, await this.client.pending(dir).catch(() => null));
+    }
     for (const [id, w] of [...this.waiters]) {
-      if (!pendingIds.includes(id) && !this.confirmed.has(id)) {
+      const pendingIds = byDir.get(this.directoryOf(id));
+      if (pendingIds && !pendingIds.includes(id) && !this.confirmed.has(id)) {
         clearTimeout(w.timer);
         this.waiters.delete(id);
         w.resolve({ permissionId: id, status: "unconfirmed" });

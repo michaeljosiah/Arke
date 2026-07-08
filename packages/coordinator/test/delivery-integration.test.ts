@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,6 +15,19 @@ import { deliveryWorktreeBranch } from "../src/delivery.js";
 
 const BRANCH = "feat/single-session-demo";
 const DELIVERY_BRANCH = deliveryWorktreeBranch(BRANCH);
+
+/** The worktree's checked-out copy of the spec file — where the implementer (running in the worktree,
+ *  SPEC-028) checks tasks off, and where the completion oracle reads. Mirrors the coordinator's own
+ *  deterministic path derivation (`.arke/worktrees/<sha1(deliveryBranch)[:16]>`). */
+function worktreeSpecPath(dir: string): string {
+  const hash = createHash("sha1").update(DELIVERY_BRANCH).digest("hex").slice(0, 16);
+  return resolve(dir, ".arke", "worktrees", hash, "docs", "specifications", "deliver.md");
+}
+/** Simulate the implementer checking a task off IN ITS WORKTREE (a real checkout exists there). */
+function checkOffInWorktree(dir: string, from: string, to: string): void {
+  const p = worktreeSpecPath(dir);
+  writeFileSync(p, readFileSync(p, "utf8").replace(from, to), "utf8");
+}
 
 function git(cwd: string, ...args: string[]) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -63,12 +77,14 @@ function repo(tasksSection: string = DEFAULT_TASKS): { dir: string; specPath: st
 class DeliverMockAdapter implements HarnessAdapter {
   readonly id = "DeliverMock";
   readonly dispatched: Array<{ sessionId: string; agent?: string; text: string }> = [];
+  readonly created: Array<{ specId: string; cwd?: string }> = [];
   private q: DomainEvent[] = [];
   private n = 0;
   capabilities(): ReadonlySet<Capability> {
     return new Set<Capability>(["events", "diff"]);
   }
   async createSession(i: CreateSessionInput): Promise<SessionRef> {
+    this.created.push({ specId: i.specId, cwd: i.cwd });
     return { sessionId: `${i.specId}-delivery-${++this.n}` };
   }
   async sendMessage(i: SendMessageInput): Promise<SendReceipt> {
@@ -206,8 +222,8 @@ test("a spec with no actionable tasks dispatches nothing", async () => {
   assert.equal(implementerDispatches(adapter).length, 0);
 });
 
-test("the delivery session is marked done only once every task is checked off — not on every idle turn", async () => {
-  const { dir, specPath } = repo();
+test("the delivery session runs in a worktree cwd, and completes only once every task is checked off THERE", async () => {
+  const { dir } = repo();
   const adapter = new DeliverMockAdapter();
   const { c, port } = await start(dir, adapter);
   after(() => c.stop());
@@ -218,9 +234,13 @@ test("the delivery session is marked done only once every task is checked off �
   assert.equal(mine.length, 1);
   const sessionId = mine[0]!.sessionId;
 
-  // First turn: the agent checks off one of the two remaining tasks. The session stays steerable —
-  // there is no artificial "one turn = done" signal, unlike the old one-shot fan-out task dispatch.
-  writeFileSync(specPath, readFileSync(specPath, "utf8").replace("- [ ] Build the thing", "- [x] Build the thing"), "utf8");
+  // SPEC-028: the delivery session is created with a cwd pointing at its own worktree.
+  const create = adapter.created.find((s) => s.cwd);
+  assert.ok(create, "the delivery session was created with a cwd");
+  assert.match(create!.cwd!.replaceAll("\\", "/"), /\.arke\/worktrees\//, "the cwd is the delivery worktree");
+
+  // First turn: the agent checks off one of the two remaining tasks IN THE WORKTREE. Steerable, not done.
+  checkOffInWorktree(dir, "- [ ] Build the thing", "- [x] Build the thing");
   adapter.pushTurnSettled(sessionId);
   await sleep(200);
   let snap = await op(port, "session.list", {});
@@ -228,14 +248,43 @@ test("the delivery session is marked done only once every task is checked off �
   let sess = card.sessions.find((s: any) => s.sessionId === sessionId);
   assert.equal(sess.status, "running", "one task still unchecked — not done yet");
 
-  // Second turn: the last task is checked off — NOW the checklist is complete.
-  writeFileSync(specPath, readFileSync(specPath, "utf8").replace("- [ ] Test the thing", "- [x] Test the thing"), "utf8");
+  // Second turn: the last task is checked off in the worktree — NOW the checklist is complete.
+  checkOffInWorktree(dir, "- [ ] Test the thing", "- [x] Test the thing");
   adapter.pushTurnSettled(sessionId);
   await sleep(200);
   snap = await op(port, "session.list", {});
   card = snap.result.find((c: any) => c.specId === "SPEC-DELIVER");
   sess = card.sessions.find((s: any) => s.sessionId === sessionId);
-  assert.equal(sess.status, "done", "all tasks checked → board surfaces diff review");
+  assert.equal(sess.status, "done", "all tasks checked in the worktree → board surfaces diff review");
+});
+
+test("the completion oracle reads the WORKTREE, not the primary checkout — checking off in the primary does NOT complete the delivery", async () => {
+  const { dir, specPath } = repo();
+  const adapter = new DeliverMockAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+
+  await op(port, "spec.deliver", { specId: "SPEC-DELIVER" });
+  await sleep(200);
+  const sessionId = implementerDispatches(adapter)[0]!.sessionId;
+
+  // Check EVERY task off in the PRIMARY checkout (the human's copy) — the wrong file. The agent works in
+  // the worktree, so this must NOT be read as completion (guards the regression the cwd wiring introduces).
+  writeFileSync(specPath, readFileSync(specPath, "utf8").replaceAll("- [ ]", "- [x]"), "utf8");
+  adapter.pushTurnSettled(sessionId);
+  await sleep(200);
+  let snap = await op(port, "session.list", {});
+  let sess = snap.result.find((c: any) => c.specId === "SPEC-DELIVER").sessions.find((s: any) => s.sessionId === sessionId);
+  assert.equal(sess.status, "running", "primary-checkout checkmarks are ignored — the oracle reads the worktree");
+
+  // Now check them off in the worktree — completion fires.
+  checkOffInWorktree(dir, "- [ ] Build the thing", "- [x] Build the thing");
+  checkOffInWorktree(dir, "- [ ] Test the thing", "- [x] Test the thing");
+  adapter.pushTurnSettled(sessionId);
+  await sleep(200);
+  snap = await op(port, "session.list", {});
+  sess = snap.result.find((c: any) => c.specId === "SPEC-DELIVER").sessions.find((s: any) => s.sessionId === sessionId);
+  assert.equal(sess.status, "done", "worktree checkmarks complete the delivery");
 });
 
 test("a harness-reported error releases the delivery claim and cleans up the worktree/branch so a retry actually redispatches", async () => {
@@ -306,6 +355,8 @@ test("delivery ownership survives a coordinator restart — the checklist oracle
   adapterB.pushRunning(sessionId, "SPEC-DELIVER");
   await sleep(100);
 
+  // Post-restart the in-memory worktree mapping is lost, so the completion oracle falls back to the
+  // PRIMARY checkout (SPEC-028 documented restart behaviour) — hence the checkmarks go to specPath here.
   writeFileSync(specPath, readFileSync(specPath, "utf8").replace("- [ ] Build the thing", "- [x] Build the thing").replace("- [ ] Test the thing", "- [x] Test the thing"), "utf8");
   adapterB.pushTurnSettled(sessionId);
   await sleep(200);
@@ -313,7 +364,7 @@ test("delivery ownership survives a coordinator restart — the checklist oracle
   const snap = await op(portB, "session.list", {});
   const card = snap.result.find((c: any) => c.specId === "SPEC-DELIVER");
   const sess = card.sessions.find((s: any) => s.sessionId === sessionId);
-  assert.equal(sess.status, "done", "the fresh coordinator recovered delivery ownership from the read model and completed the checklist oracle, despite never having dispatched this session itself");
+  assert.equal(sess.status, "done", "the fresh coordinator recovered delivery ownership from the read model and completed the checklist oracle (reading the primary checkout, worktree mapping lost on restart)");
 });
 
 // ---- SPEC-030: auto-PR configuration -------------------------------------------------------------

@@ -1211,12 +1211,14 @@ export class ProjectContext {
     // SPEC-030: when the project has opted into auto-PR, the delivery prompt tells the implementer to open
     // the PR itself once every task is done — otherwise the prompt says nothing about PRs and delivery
     // stops at the human diff-review gate (SPEC-011). The instruction leaves the PR base to `gh`'s default
-    // (the current feature branch → the repo default branch, i.e. the SPEC-024 delivery PR), since the
-    // harness runs in the project checkout on the feature branch, not the delivery worktree.
+    // (`gh pr create --fill`); with the worktree wired (below) the agent's current branch is the delivery
+    // branch, so that opens `<featureBranch>--delivery` → the repo default branch.
     const autoOpenPr = loadAutoOpenPr(this.deliveryConfigPath());
     await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch, autoOpenPr });
     try {
-      const ref = await this.adapter.createSession({ specId: cid, parent: cid });
+      // SPEC-028: the delivery session runs IN the worktree (`cwd`), so the implementer's edits, git ops,
+      // and diff all happen on the `--delivery` branch in isolation, never in the human's own checkout.
+      const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
       await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true } : {}) }] });
@@ -1229,6 +1231,20 @@ export class ProjectContext {
       this.removeDeliveryWorktree(cid);
       await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
       return { ok: false, error: "dispatch-failed" };
+    }
+  }
+
+  /** The delivery spec's on-disk `## Tasks` source, read from its WORKTREE when one is recorded (SPEC-028
+   *  — the implementer edits the checklist there, not in the primary checkout), else the primary content.
+   *  Best-effort: an unreadable worktree file (e.g. removed) falls back to the primary checkout's text, as
+   *  does the post-restart case where the worktree mapping was lost (in-memory only). */
+  private deliverySpecText(specId: string, found: { relPath: string; text: string }): string {
+    const wt = this.deliveryWorktrees.get(specId);
+    if (!wt) return found.text;
+    try {
+      return readFileSync(resolve(wt.wtPath, found.relPath), "utf8");
+    } catch {
+      return found.text;
     }
   }
 
@@ -1292,7 +1308,9 @@ export class ProjectContext {
     if (!specId) return;
     const found = this.findSpecFile(specId);
     if (!found) return;
-    const tasks = parseTasks(found.text);
+    // SPEC-028: the implementer checks tasks off in ITS WORKTREE's copy of the spec (it runs there now),
+    // not the human's primary checkout — so the completion oracle must read the worktree's file.
+    const tasks = parseTasks(this.deliverySpecText(specId, found));
     if (tasks.length === 0 || !tasks.every((t) => t.done)) return;
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: event.sessionId, specId, kind: "task", status: "done" } as DomainEvent);
     await this.trace.write({ kind: "delivery.complete", projectId: this.projectId, specId, sessionId: event.sessionId });
