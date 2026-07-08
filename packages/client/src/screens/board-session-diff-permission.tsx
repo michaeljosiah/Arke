@@ -283,14 +283,15 @@ export function Session() {
   // cockpit uses, addressed at this session instead. Restricted to kind:'task': a card also folds
   // kind:'spec' (authoring) sessions, and the send path below always addresses `agent: 'implementer'`
   // — sending that into an authoring session would inject the wrong agent into the wrong conversation.
-  // `running` only, not `idle`: for a fanned-out task session `idle` is the coordinator's TERMINAL
-  // completion signal (observeTaskCompletion drains the fan-out queue on it, since live OpenCode never
-  // emits a distinct `done`), so an idle task has already finished — steering it further would mutate a
-  // completed run/branch. (Authoring sessions, where idle is legitimately "ready for the next turn", are
-  // excluded from this composer entirely by the kind check above, so that distinction doesn't apply here.)
+  // `idle` IS steerable here (SPEC-009 revised, single-session delivery): the coordinator no longer
+  // dispatches one task per turn with idle as an artificial terminal signal — the whole task list goes
+  // to ONE session that may take several turns, so idle just means "ready for the next one," exactly
+  // like an authoring session. The board only marks a delivery `done` once every task in the spec's
+  // checklist is checked off (observeDeliveryProgress on the coordinator); only `error`/`done`/etc. — a
+  // genuinely terminal status — should disable this composer.
   const isLive = !!session.sessionId;
   const isTask = session.kind === 'task';
-  const canSteer = isLive && isTask && session.status === 'running';
+  const canSteer = isLive && isTask && (session.status === 'running' || session.status === 'idle');
   const [draft, setDraft] = React.useState('');
   const [sending, setSending] = React.useState(false);
   const [sendError, setSendError] = React.useState<string | null>(null);

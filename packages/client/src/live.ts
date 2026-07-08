@@ -61,10 +61,13 @@ const specStatus = new Map<string, string>();
 const reachByEndpoint = new Map<string, { reachable: boolean; reason?: string; partial?: boolean }>();
 let evSeq = 0;
 
+// `idle` counts as implementing, not just `running` (SPEC-028, mirrors read-model.ts's deriveColumn): a
+// single-session delivery may sit `idle` between human-steered turns while its checklist is still
+// incomplete — that must not bounce the card back to the `approved` backlog lane.
 function deriveColumn(card: LiveCard): Col {
   const tasks = card.sessions.filter((s) => s.kind === 'task');
   if (card.needsHuman || tasks.some((s) => FAILED_STATUSES.has(s.status))) return 'needs-human';
-  if (tasks.some((s) => s.status === 'running')) return 'implementing';
+  if (tasks.some((s) => s.status === 'running' || s.status === 'idle')) return 'implementing';
   if (tasks.some((s) => s.status === 'done')) return 'diff';
   switch (card.status) {
     case 'draft': return 'authoring';

@@ -334,17 +334,22 @@ public sealed class SpecListCommand : AsyncCommand<SpecListCommand.Settings>
         Ops.RunAsync(s, "spec.library", new { });
 }
 
-/// <summary>`arke spec fanout` — fan an approved spec's task list into concurrent worktree sessions (SPEC-009).</summary>
-public sealed class SpecFanoutCommand : AsyncCommand<SpecFanoutCommand.Settings>
+/// <summary>`arke spec deliver` — start delivery: one implementer session over the full task checklist,
+/// plus downstream-artefact generation, on a recorded branch (SPEC-028, SPEC-024). Replaces the removed
+/// `spec.fanout` op (SPEC-009, superseded).</summary>
+public sealed class SpecDeliverCommand : AsyncCommand<SpecDeliverCommand.Settings>
 {
     public sealed class Settings : GlobalSettings
     {
         [CommandArgument(0, "<SPEC_ID>")]
         public string SpecId { get; set; } = "";
+
+        [CommandOption("--branch <BRANCH>")]
+        public string? Branch { get; set; }
     }
 
     protected override Task<int> ExecuteAsync(CommandContext context, Settings s, CancellationToken ct) =>
-        Ops.RunAsync(s, "spec.fanout", new { specId = s.SpecId });
+        Ops.RunAsync(s, "spec.deliver", new { specId = s.SpecId, branch = s.Branch });
 }
 
 /// <summary>`arke session revert` — roll a session back to a checkpoint (SPEC-011 rescue).</summary>

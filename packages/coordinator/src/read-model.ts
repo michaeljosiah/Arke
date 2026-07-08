@@ -269,14 +269,22 @@ export class ReadModel {
   /**
    * Compute the board column from the specification status and the aggregate of its sessions (FR-9,
    * SPEC-023). Precedence: any open human gate or any FAILED delivery session → needs-human; else any
-   * running delivery session → implementing; else any done delivery session → diff; else the spec's
-   * frontmatter status. Only `task` (delivery) sessions drive implementing/diff — an authoring session
-   * running during `draft` keeps the card in `authoring`.
+   * running-or-idle delivery session → implementing; else any done delivery session → diff; else the
+   * spec's frontmatter status. Only `task` (delivery) sessions drive implementing/diff — an authoring
+   * session running during `draft` keeps the card in `authoring`.
+   *
+   * `idle` counts as implementing, not just `running` (SPEC-028): a single-session delivery may take
+   * several human-steered turns, and OpenCode's own turn-settle ordering emits `session.status: idle`
+   * BEFORE the non-streaming `message.updated` the completion oracle (`observeDeliveryProgress`) reads —
+   * so an in-progress, steerable delivery sits in `idle` between turns whenever its checklist isn't yet
+   * complete. Treating idle as anything but `implementing` would bounce the card back to the spec's
+   * `approved` backlog lane mid-delivery. Once the checklist actually IS complete, the coordinator emits
+   * an explicit `done` status that takes over on the very next recompute.
    */
   private deriveColumn(card: CardState): BoardColumn {
     const tasks = card.sessions.filter((s) => s.kind === "task");
     if (card.needsHuman || tasks.some((s) => FAILED_STATUSES.has(s.status))) return "needs-human";
-    if (tasks.some((s) => s.status === "running")) return "implementing";
+    if (tasks.some((s) => s.status === "running" || s.status === "idle")) return "implementing";
     if (tasks.some((s) => s.status === "done")) return "diff";
     switch (card.status) {
       case "draft":
