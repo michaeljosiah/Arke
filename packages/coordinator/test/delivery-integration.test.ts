@@ -85,6 +85,18 @@ class DeliverMockAdapter implements HarnessAdapter {
   pushError(sessionId: string, specId: string) {
     this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId, kind: "task", status: "error" } as DomainEvent);
   }
+  /** Simulate the harness resolving a still-live session's identity after a coordinator restart (mirrors
+   *  adapter-opencode's `rebuildSessionGraph` + live reconnect) — a plain `session.status` catch-up event
+   *  that lets the read model re-learn sessionId → specId with no dispatch ever having happened here. */
+  pushRunning(sessionId: string, specId: string) {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId, kind: "task", status: "running" } as DomainEvent);
+  }
+  /** Simulate OpenCode's real turn-settle ordering: `session.status: idle` arrives BEFORE the finalising
+   *  `message.updated` (normalize.ts) — pushed separately so a test can assert on the board column in the
+   *  gap between the two, before the completion oracle has had a chance to see the settled turn. */
+  pushIdle(sessionId: string, specId: string) {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId, kind: "task", status: "idle" } as DomainEvent);
+  }
   async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
     while (!signal?.aborted) {
       const next = this.q.shift();
@@ -226,7 +238,7 @@ test("the delivery session is marked done only once every task is checked off �
   assert.equal(sess.status, "done", "all tasks checked → board surfaces diff review");
 });
 
-test("a harness-reported error releases the delivery claim so a fresh deliver() can retry", async () => {
+test("a harness-reported error releases the delivery claim and cleans up the worktree/branch so a retry actually redispatches", async () => {
   const { dir } = repo();
   const adapter = new DeliverMockAdapter();
   const { c, port } = await start(dir, adapter);
@@ -237,10 +249,69 @@ test("a harness-reported error releases the delivery claim so a fresh deliver() 
   const mine = implementerDispatches(adapter);
   assert.equal(mine.length, 1);
   const sessionId = mine[0]!.sessionId;
+  assert.ok(git(dir, "branch", "--list").includes(DELIVERY_BRANCH), "the first delivery's branch exists");
 
   adapter.pushError(sessionId, "SPEC-DELIVER");
   await sleep(200);
 
   const r2 = await op(port, "spec.deliver", { specId: "SPEC-DELIVER" });
   assert.equal(r2.result.ok, true, "the claim was released on error — a retry is not refused as 'already delivering'");
+  await sleep(200);
+
+  // The bug this guards: without cleanup, the deterministic `<featureBranch>--delivery` branch from the
+  // errored attempt lingers, so the retry's `deliverImplementation` trips its OWN branch-collision guard
+  // and silently dispatches nothing — `ok: true` above would be a false promise. Assert the retry actually
+  // produced a SECOND implementer session, not just an accepted-but-inert op response.
+  assert.equal(implementerDispatches(adapter).length, 2, "the retry actually redispatched a new implementer session, not silently blocked by a stale branch");
+});
+
+test("an idle delivery session with an incomplete checklist keeps the card in 'implementing', not the approved backlog", async () => {
+  const { dir, specPath } = repo();
+  const adapter = new DeliverMockAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+
+  await op(port, "spec.deliver", { specId: "SPEC-DELIVER" });
+  await sleep(200);
+  const sessionId = implementerDispatches(adapter)[0]!.sessionId;
+
+  // OpenCode's real turn-settle ordering emits `session.status: idle` BEFORE the finalising
+  // `message.updated` (normalize.ts) — simulate that ordering directly rather than via pushTurnSettled.
+  writeFileSync(specPath, readFileSync(specPath, "utf8").replace("- [ ] Build the thing", "- [x] Build the thing"), "utf8");
+  adapter.pushIdle(sessionId, "SPEC-DELIVER"); // one of two tasks checked — checklist still incomplete
+  await sleep(200);
+
+  const snap = await op(port, "session.list", {});
+  const card = snap.result.find((c: any) => c.specId === "SPEC-DELIVER");
+  assert.equal(card.column, "implementing", "idle-but-incomplete must not bounce the card back to the approved backlog lane");
+});
+
+test("delivery ownership survives a coordinator restart — the checklist oracle still resolves via the read model", async () => {
+  const { dir, specPath } = repo();
+  const adapterA = new DeliverMockAdapter();
+  const { c: cA, port: portA } = await start(dir, adapterA);
+
+  await op(portA, "spec.deliver", { specId: "SPEC-DELIVER" });
+  await sleep(200);
+  const sessionId = implementerDispatches(adapterA)[0]!.sessionId;
+  await cA.stop(); // simulate the coordinator process going away mid-delivery
+
+  // A fresh ProjectContext (a new Coordinator over the same repo) with its OWN mock adapter instance —
+  // `deliverySessionOwner` starts empty, exactly like a real restart. Its event stream first resolves the
+  // still-live session's identity via a `session.status` catch-up event, mirroring how adapter-opencode's
+  // `rebuildSessionGraph()` + live reconnect recovers ownership from the harness's own durable state.
+  const adapterB = new DeliverMockAdapter();
+  const { c: cB, port: portB } = await start(dir, adapterB);
+  after(() => cB.stop());
+  adapterB.pushRunning(sessionId, "SPEC-DELIVER");
+  await sleep(100);
+
+  writeFileSync(specPath, readFileSync(specPath, "utf8").replace("- [ ] Build the thing", "- [x] Build the thing").replace("- [ ] Test the thing", "- [x] Test the thing"), "utf8");
+  adapterB.pushTurnSettled(sessionId);
+  await sleep(200);
+
+  const snap = await op(portB, "session.list", {});
+  const card = snap.result.find((c: any) => c.specId === "SPEC-DELIVER");
+  const sess = card.sessions.find((s: any) => s.sessionId === sessionId);
+  assert.equal(sess.status, "done", "the fresh coordinator recovered delivery ownership from the read model and completed the checklist oracle, despite never having dispatched this session itself");
 });

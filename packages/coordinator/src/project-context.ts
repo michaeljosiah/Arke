@@ -180,6 +180,10 @@ export class ProjectContext {
   private readonly deliverySessions = new Map<string, string>();
   /** delivery sessionId → specId, so a settled turn is routed back to its completion check. */
   private readonly deliverySessionOwner = new Map<string, string>();
+  /** specId → the delivery's worktree path + branch, so a harness-reported error (observeDeliveryProgress)
+   *  can remove the worktree/branch the same way a pre-dispatch failure does — otherwise the deterministic
+   *  branch name lingers and every retry trips the branch-collision guard. */
+  private readonly deliveryWorktrees = new Map<string, { wtPath: string; branch: string }>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
   /** Specs currently being auto-renamed after titling, so the per-turn trigger is not re-entrant (SPEC-020). */
@@ -1191,6 +1195,10 @@ export class ProjectContext {
       await fail(`git worktree add failed: ${(add.stderr || add.stdout || "").toString().trim().slice(0, 200)}`);
       return { ok: false, error: "worktree-failed" };
     }
+    // Recorded so a LATER harness-reported error (observeDeliveryProgress, once the session is live) can
+    // remove this same worktree/branch — otherwise the deterministic branch name lingers and every retry
+    // trips the branch-collision guard above.
+    this.deliveryWorktrees.set(cid, { wtPath, branch: deliveryBranch });
     await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch });
     try {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid });
@@ -1203,11 +1211,47 @@ export class ProjectContext {
     } catch (err) {
       // The worktree was created but the session never started: remove it so a retry is clean rather
       // than tripping the collision guard on the orphaned branch.
-      spawnSync("git", ["worktree", "remove", "--force", wtPath], gitOpts(this.root));
-      spawnSync("git", ["branch", "-D", deliveryBranch], gitOpts(this.root));
+      this.removeDeliveryWorktree(cid);
       await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
       return { ok: false, error: "dispatch-failed" };
     }
+  }
+
+  /** Best-effort removal of a delivery's worktree + branch (a failed/errored delivery must not leave the
+   *  deterministic `<featureBranch>--delivery` branch behind — it would trip the collision guard on every
+   *  subsequent retry). Safe to call when there is nothing recorded (e.g. failure occurred before the
+   *  worktree was created) — it is then a no-op. */
+  private removeDeliveryWorktree(specId: string): void {
+    const wt = this.deliveryWorktrees.get(specId);
+    if (!wt) return;
+    spawnSync("git", ["worktree", "remove", "--force", wt.wtPath], gitOpts(this.root));
+    spawnSync("git", ["branch", "-D", wt.branch], gitOpts(this.root));
+    this.deliveryWorktrees.delete(specId);
+  }
+
+  /**
+   * Resolve which spec owns a delivery session, rehydrating `deliverySessionOwner` from the read model
+   * when the in-memory claim is missing (SPEC-028 restart recovery). `deliverySessions`/
+   * `deliverySessionOwner` are process-lifetime-only maps; a coordinator restart empties them even
+   * though a delivery session may still be running in the harness. The read model's own
+   * `specForSession` index recovers independently once the harness's live event stream resumes for
+   * that still-running session (adapter-side identity resolution survives restart via the harness's own
+   * durable session titles — `rebuildSessionGraph()`) — so lazily re-adopt ownership from there rather
+   * than losing the checklist completion oracle for the rest of that delivery's lifetime. Only re-adopts
+   * a `task`-kind session that is still live (`running`/`waiting`/`idle`); a session already `done`,
+   * `error`, or `interrupted` is not a delivery to resume tracking.
+   */
+  private resolveDeliveryOwner(sessionId: string): string | undefined {
+    const known = this.deliverySessionOwner.get(sessionId);
+    if (known) return known;
+    const specId = this.read.specForSession(sessionId);
+    if (!specId) return undefined;
+    const card = this.read.snapshot().find((c) => c.specId === specId);
+    const sess = card?.sessions.find((s) => s.sessionId === sessionId);
+    if (!sess || sess.kind !== "task" || !(sess.status === "running" || sess.status === "waiting" || sess.status === "idle")) return undefined;
+    this.deliverySessionOwner.set(sessionId, specId);
+    this.deliverySessions.set(specId, sessionId);
+    return specId;
   }
 
   /**
@@ -1216,18 +1260,20 @@ export class ProjectContext {
    * a human via the board's task composer — so on each settled assistant turn, check whether every task
    * in the spec's `## Tasks` list is now checked off; that checklist is the completion oracle. Marks the
    * session `done` (surfacing the board's diff-review column) only once every task is checked. A
-   * harness-reported error releases the claim so a fresh `spec.deliver` can retry.
+   * harness-reported error releases the claim — AND removes the delivery's worktree/branch, the same
+   * cleanup a pre-dispatch failure gets — so a fresh `spec.deliver` can retry cleanly.
    */
   private async observeDeliveryProgress(event: DomainEvent): Promise<void> {
     if (event.type === "session.status" && event.status === "error") {
-      const specId = this.deliverySessionOwner.get(event.sessionId);
+      const specId = this.resolveDeliveryOwner(event.sessionId);
       if (!specId) return;
+      this.removeDeliveryWorktree(specId);
       this.deliverySessions.delete(specId);
       this.deliverySessionOwner.delete(event.sessionId);
       return;
     }
     if (event.type !== "message.updated" || event.isStreaming || event.role !== "assistant") return;
-    const specId = this.deliverySessionOwner.get(event.sessionId);
+    const specId = this.resolveDeliveryOwner(event.sessionId);
     if (!specId) return;
     const found = this.findSpecFile(specId);
     if (!found) return;
