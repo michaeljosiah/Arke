@@ -279,38 +279,45 @@ export function Session() {
   const session: any = sessions.find((s) => s.sessionId === activeSession) || sessions[0] || { status: 'running', harness: 'Claude Code', model: 'Sonnet', transcript: [] };
   const [tab, setTab] = React.useState('transcript');
 
-  // Interactive composer: steer a real (non-demo) task session — same prompt.send op the authoring
-  // cockpit uses, addressed at this session instead. Gated on the same idle/running check the
-  // coordinator enforces server-side, so the button's enabled state never promises more than the
-  // server will actually accept.
+  // Interactive composer: steer a real (non-demo) TASK session — same prompt.send op the authoring
+  // cockpit uses, addressed at this session instead. Restricted to kind:'task': a card also folds
+  // kind:'spec' (authoring) sessions, and the send path below always addresses `agent: 'implementer'`
+  // — sending that into an authoring session would inject the wrong agent into the wrong conversation.
+  // `running` only, not `idle`: for a fanned-out task session `idle` is the coordinator's TERMINAL
+  // completion signal (observeTaskCompletion drains the fan-out queue on it, since live OpenCode never
+  // emits a distinct `done`), so an idle task has already finished — steering it further would mutate a
+  // completed run/branch. (Authoring sessions, where idle is legitimately "ready for the next turn", are
+  // excluded from this composer entirely by the kind check above, so that distinction doesn't apply here.)
   const isLive = !!session.sessionId;
-  const canSteer = isLive && (session.status === 'idle' || session.status === 'running');
+  const isTask = session.kind === 'task';
+  const canSteer = isLive && isTask && session.status === 'running';
   const [draft, setDraft] = React.useState('');
   const [sending, setSending] = React.useState(false);
   const [sendError, setSendError] = React.useState<string | null>(null);
-  // A single ordered turn list: human sends are shown optimistically (cleared/rolled back on
-  // rejection), agent/tool turns are merged in from the live transcript as they arrive/update — same
-  // pattern as the authoring cockpit's `convo`, simplified because a task session has one fixed agent
-  // (the implementer) rather than a switchable role.
+  // A single ordered turn list merged from the FULL live transcript — both human and agent/tool turns,
+  // not just what this composer itself sends. A user-role entry can already be there on open (a
+  // reload, or another client's earlier follow-up), so it must be shown as a human turn, not dropped:
+  // dropping it would silently hide real history compared to what this screen rendered before this
+  // composer existed.
   const [turns, setTurns] = React.useState<any[]>([]);
   const scroller = React.useRef<any>(null);
-  const agentTranscript = (session.transcript || []).filter((t: any) => t.role !== 'user');
-  const transcriptSig = agentTranscript.map((t: any) => `${t.messageId}:${textSig(t.text ?? '')}:${t.isStreaming ? 1 : 0}`).join('|');
-  // Merge the live agent/tool transcript into `turns`, resetting it first when the ACTIVE SESSION
-  // itself changed (so a previously-viewed task's turns don't linger into a newly opened one). Both
-  // concerns share one effect deliberately: two separate effects (merge; reset-on-switch) both fire on
-  // the same mount/switch commit, and since React runs effects in declaration order, a later "reset"
-  // effect would clobber the merge effect's just-populated state every time.
+  const liveTranscript = session.transcript || [];
+  const transcriptSig = liveTranscript.map((t: any) => `${t.messageId}:${textSig(t.text ?? '')}:${t.isStreaming ? 1 : 0}`).join('|');
+  // Merge the transcript into `turns`, resetting it (and the draft/error) first when the ACTIVE SESSION
+  // itself changed (so a previously-viewed task's turns/draft don't linger into a newly opened one).
+  // Both concerns share one effect deliberately: two separate effects (merge; reset-on-switch) both
+  // fire on the same mount/switch commit, and since React runs effects in declaration order, a later
+  // "reset" effect would clobber the merge effect's just-populated state every time.
   const lastSessionId = React.useRef<string | undefined>(session.sessionId);
   React.useEffect(() => {
     const switched = lastSessionId.current !== session.sessionId;
     lastSessionId.current = session.sessionId;
-    if (switched) setSendError(null);
+    if (switched) { setSendError(null); setDraft(''); }
     setTurns((prev) => {
       let next = switched ? [] : prev;
-      for (const t of agentTranscript) {
-        const key = 'a:' + t.messageId;
-        const entry = { key, kind: 'agent', tool: t.role === 'tool', text: t.text, streaming: t.isStreaming };
+      for (const t of liveTranscript) {
+        const key = 'm:' + t.messageId;
+        const entry = { key, kind: t.role === 'user' ? 'human' : 'agent', tool: t.role === 'tool', text: t.text, streaming: t.isStreaming };
         const idx = next.findIndex((x: any) => x.key === key);
         if (idx === -1) next = [...next, entry];
         else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) { next = next.slice(); next[idx] = { ...next[idx], ...entry }; }
@@ -325,14 +332,11 @@ export function Session() {
     if (!text || sending || !canSteer) return;
     setSending(true);
     setSendError(null);
-    const key = 'h:' + Date.now();
-    setTurns((t) => [...t, { key, kind: 'human', text }]);
     setDraft('');
     try {
       const res = await steerTaskLive({ sessionId: session.sessionId, specId: card.specId ?? card.id, message: text });
       const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
       if (err) {
-        setTurns((t) => t.filter((x: any) => x.key !== key)); // undo the optimistic turn
         setDraft((d) => d || text); // restore the text if the composer is still empty
         setSendError(err);
       }
@@ -360,7 +364,7 @@ export function Session() {
             ? turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind === 'human' ? 'user' : 'agent', agent: m.tool ? 'Tool' : 'Implementation', model: session.model || card.model || 'mid-tier' }, (m.text || '…') + (m.streaming ? ' ▍' : '')))
             : TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text))),
           e(Callout, { variant: 'default', label: 'Runtime receipts' }, 'The board reacts to typed receipts — turn quiescence, diff finalisation — captured around each agent turn, with automatic git checkpoints for rescue and audit.')),
-        isLive ? e('div', { style: { padding: '10px 22px', borderTop: '1px solid var(--border)' } },
+        (isLive && isTask) ? e('div', { style: { padding: '10px 22px', borderTop: '1px solid var(--border)' } },
           e('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-end' } },
             e('div', { style: { flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', background: canSteer ? 'var(--background)' : 'var(--secondary)' } },
               e(Textarea, { rows: 2, value: draft, placeholder: canSteer ? 'Steer the implementer…' : `session is ${session.status} — no longer steerable`, onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } })),
