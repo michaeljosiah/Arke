@@ -1002,6 +1002,18 @@ export function transitionSpecLive(specId: string, to: string, actor?: string): 
   return liveRequest("spec.transition", { specId, to, actor }, 30000);
 }
 
+/**
+ * Steer a fanned-out task session mid-run: send a follow-up prompt to the `implementer` agent while it
+ * works, the same `prompt.send` op the authoring cockpit uses, just addressed at a task session instead
+ * of a spec session. Governed-command discipline like promote/deliver/move — refused (not queued) while
+ * offline, since a replayed steer against a task that has since moved on (or finished) could land on the
+ * wrong turn entirely.
+ */
+export function steerTaskLive(args: { sessionId: string; specId?: string | null; message: string }): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to send" });
+  return liveRequest("prompt.send", { sessionId: args.sessionId, specId: args.specId, agent: "implementer", message: args.message }, PROMPT_TIMEOUT_MS);
+}
+
 /** Fetch the host-optional governance assurance level (SPEC-024) into the store for the board badge. */
 export async function fetchGovernance(): Promise<void> {
   const res = await liveRequest("governance.status");
