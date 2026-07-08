@@ -27,6 +27,7 @@ import {
   DEFAULT_RECONNECT_BASE_MS,
   DEFAULT_RECONNECT_MAX_MS,
   type OpenCodeConfig,
+  resolveDirectory,
 } from "./config.js";
 import { OpenCodeError, OpenCodeHttp } from "./http.js";
 import { HarnessProcess } from "./harness-process.js";
@@ -119,6 +120,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
    * agent the live catalog confirms (keep adapters honest about the backend's real surface).
    */
   private knownAgents: Set<string> | null = null;
+  /**
+   * sessionId → the (root-validated, canonical) working directory this session runs in, when it differs
+   * from the primary project directory (SPEC-028 delivery worktree). Every request for a mapped session
+   * is scoped to this directory; an unmapped session uses the primary directory. In-memory: a coordinator
+   * restart loses these bindings (post-restart requests fall back to the primary directory).
+   */
+  private readonly sessionCwd = new Map<string, string>();
   // Correlation state for the split transcript model (role on message.updated, text on the parts).
   private readonly normState: NormalizeState = createNormalizeState();
 
@@ -409,10 +417,19 @@ export class OpenCodeAdapter implements HarnessAdapter {
     // OpenCode session, so it must never be sent as parentID. Only forward a genuine "ses_…" ref; the
     // task otherwise becomes a root session whose title still encodes the spec for ownership recovery.
     const parentID = input.parent && isOpenCodeSessionId(input.parent) ? input.parent : undefined;
-    const session = await this.http.req<{ id: string }>("POST", "/session", {
-      ...(parentID ? { parentID } : {}),
-      title: input.specId, // title encodes the spec_id so REST resync can recover ownership
-    });
+    // SPEC-028: a delivery runs in its own git worktree. Validate the requested cwd is within the project
+    // root (never trust a caller path verbatim — NFR-1) and scope this session's requests to it.
+    const cwd = input.cwd ? resolveDirectory(this.http.directory, input.cwd) : undefined;
+    const session = await this.http.req<{ id: string }>(
+      "POST",
+      "/session",
+      {
+        ...(parentID ? { parentID } : {}),
+        title: input.specId, // title encodes the spec_id so REST resync can recover ownership
+      },
+      cwd ? { directory: cwd } : undefined,
+    );
+    if (cwd) this.sessionCwd.set(session.id, cwd);
     this.store.upsert({
       sessionId: session.id,
       kind: input.parent ? "task" : "spec", // logical kind follows the caller's intent, not the wire parentID
@@ -420,6 +437,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
       parentSessionId: input.parent, // keep the logical grouping (may be a canonical spec id)
     });
     return { sessionId: session.id };
+  }
+
+  /** The per-request `directory` override for a session (its worktree cwd), or undefined for the primary. */
+  private dirFor(sessionId: string): string | undefined {
+    return this.sessionCwd.get(sessionId);
   }
 
   // ---- prompting ----------------------------------------------------------
@@ -454,12 +476,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
    */
   private async postMessage(path: string, input: SendMessageInput, correlationId: string): Promise<void> {
     const body = this.messageBody(input, correlationId);
+    const directory = this.dirFor(input.sessionId); // SPEC-028: a delivery session's turns run in its worktree
     try {
-      await this.http.req("POST", path, body);
+      await this.http.req("POST", path, body, { directory });
     } catch (err) {
       if (!(err instanceof OpenCodeError) || err.status < 500 || !body.agent) throw err;
       const { agent: droppedAgent, ...withoutAgent } = body;
-      await this.http.req("POST", path, withoutAgent);
+      await this.http.req("POST", path, withoutAgent, { directory });
       this.onLifecycleEvent?.({
         kind: "agent.fallback",
         harness: this.id,
@@ -524,14 +547,19 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const todos = await this.http.req<Array<{ id: string; text: string; completed: boolean }>>(
       "GET",
       `/session/${ref.sessionId}/todo`,
+      undefined,
+      { directory: this.dirFor(ref.sessionId) },
     );
     return (todos ?? []).map((t) => ({ id: t.id, text: t.text, done: t.completed }));
   }
 
   async getDiff(ref: SessionRef): Promise<DiffSummary> {
+    // SPEC-028: a delivery session's diff is the change set in its worktree, so scope this to its cwd.
     const files = await this.http.req<Array<{ additions?: number; deletions?: number }>>(
       "GET",
       `/session/${ref.sessionId}/diff`,
+      undefined,
+      { directory: this.dirFor(ref.sessionId) },
     );
     const list = files ?? [];
     return {
@@ -543,12 +571,12 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
   /** Roll a session back to the checkpoint before `messageId`'s turn (capability: revert, SPEC-011). */
   async revert(ref: SessionRef, messageId: string): Promise<void> {
-    await this.http.req("POST", `/session/${ref.sessionId}/revert`, { messageID: messageId });
+    await this.http.req("POST", `/session/${ref.sessionId}/revert`, { messageID: messageId }, { directory: this.dirFor(ref.sessionId) });
   }
 
   /** Undo the most recent revert (capability: revert, SPEC-011). */
   async unrevert(ref: SessionRef): Promise<void> {
-    await this.http.req("POST", `/session/${ref.sessionId}/unrevert`);
+    await this.http.req("POST", `/session/${ref.sessionId}/unrevert`, undefined, { directory: this.dirFor(ref.sessionId) });
   }
 
   /** Answer an agent elicitation question (SPEC-012; maps to OpenCode `POST /question/:id/reply`). */
@@ -592,10 +620,12 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   async runCommand(ref: SessionRef, command: string, args?: string[]): Promise<void> {
-    await this.http.req("POST", `/session/${ref.sessionId}/command`, {
-      command,
-      arguments: args ?? [],
-    });
+    await this.http.req(
+      "POST",
+      `/session/${ref.sessionId}/command`,
+      { command, arguments: args ?? [] },
+      { directory: this.dirFor(ref.sessionId) },
+    );
   }
 
   // ---- event stream -------------------------------------------------------

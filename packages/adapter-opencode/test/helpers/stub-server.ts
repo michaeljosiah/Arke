@@ -25,6 +25,8 @@ export class StubOpenCodeServer {
   readonly counts = new Map<string, number>();
   /** Last request body seen per route key, e.g. lastBodies.get("POST /session/:id/message"). */
   readonly lastBodies = new Map<string, unknown>();
+  /** Last `directory` query param seen per route key (SPEC-028 per-session worktree cwd). */
+  readonly lastDirectories = new Map<string, string | null>();
   /** Agent names served by GET /agent, or null to 404 (backend without an agent catalog). */
   agentCatalog: string[] | null = null;
   /** When true, a message/prompt body that NAMES an agent 500s (OpenCode's flaky per-dir agents). */
@@ -98,9 +100,10 @@ export class StubOpenCodeServer {
 
   // ---- request handling ----
 
-  private bump(method: string, pathname: string): void {
+  private bump(method: string, pathname: string, directory?: string | null): void {
     const key = `${method} ${pathname}`;
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
+    if (directory !== undefined) this.lastDirectories.set(key, directory);
   }
 
   private async body(req: IncomingMessage): Promise<unknown> {
@@ -120,6 +123,7 @@ export class StubOpenCodeServer {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const path = url.pathname;
     const method = req.method ?? "GET";
+    const directory = url.searchParams.get("directory"); // SPEC-028: captured per route via bump()
 
     // SSE
     if (method === "GET" && (path === "/global/event" || path === "/event")) {
@@ -151,7 +155,7 @@ export class StubOpenCodeServer {
     }
 
     if (method === "POST" && path === "/session") {
-      this.bump(method, "/session");
+      this.bump(method, "/session", directory);
       const b = (await this.body(req)) as { parentID?: string; title?: string };
       this.lastBodies.set("POST /session", b);
       const id = `ses_${++this.seq}`;
@@ -179,11 +183,11 @@ export class StubOpenCodeServer {
         return this.json(res, 200, this.todos.get(id) ?? []);
       }
       if (method === "GET" && sub === "diff") {
-        this.bump("GET", "/session/:id/diff");
+        this.bump("GET", "/session/:id/diff", directory);
         return this.json(res, 200, this.diffs.get(id) ?? []);
       }
       if (method === "POST" && sub === "message") {
-        this.bump("POST", "/session/:id/message");
+        this.bump("POST", "/session/:id/message", directory);
         const msgBody = (await this.body(req)) as { agent?: string } | undefined;
         this.lastBodies.set("POST /session/:id/message", msgBody);
         if (this.failMessagesNamingAgent && msgBody?.agent) {
@@ -192,7 +196,7 @@ export class StubOpenCodeServer {
         return this.json(res, 200, { id: `msg_${++this.seq}`, role: "assistant" });
       }
       if (method === "POST" && sub === "prompt_async") {
-        this.bump("POST", "/session/:id/prompt_async");
+        this.bump("POST", "/session/:id/prompt_async", directory);
         await this.body(req);
         res.writeHead(204);
         return void res.end();

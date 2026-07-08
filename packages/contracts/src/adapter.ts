@@ -31,6 +31,12 @@ export interface CreateSessionInput {
   /** Parent session id — a task is a child of its spec session (FR-8). */
   parent?: string;
   specId: string;
+  /**
+   * The working directory this session runs in, when it differs from the harness's primary project
+   * directory (SPEC-028 delivery worktree). An absolute path that MUST be within the project root; the
+   * adapter validates it and scopes every request for this session to it. Omitted → the primary directory.
+   */
+  cwd?: string;
 }
 
 export interface MessagePart {
