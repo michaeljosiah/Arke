@@ -1,9 +1,9 @@
 import React from 'react';
 import { Icon } from '../icons';
-import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage } from '../ds';
+import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage, Textarea } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance } from '../live';
+import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance, steerTaskLive } from '../live';
 import { openCard } from '../nav';
 
 const e = React.createElement;
@@ -263,6 +263,14 @@ const TRANSCRIPT = [
   { role: 'agent', agent: 'Implementation', model: 'mid-tier', text: 'Migration written. Guarding handle_retry so a seen key returns a no-op. Running typecheck and checks next.' },
 ];
 
+/** Cheap djb2 content fingerprint (mirrors cockpit.tsx's textSig): changes whenever the text changes,
+ *  regardless of length, so a same-length streamed correction still invalidates the signature. */
+function textSig(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
 export function Session() {
   const { activeCard, activeSession, cards } = useStore();
   const card: any = cards.find((c) => c.id === activeCard) || { id: 'T-4', title: 'Guard the retry handler', sessions: [] };
@@ -270,6 +278,69 @@ export function Session() {
   const sessions: any[] = card.sessions || [];
   const session: any = sessions.find((s) => s.sessionId === activeSession) || sessions[0] || { status: 'running', harness: 'Claude Code', model: 'Sonnet', transcript: [] };
   const [tab, setTab] = React.useState('transcript');
+
+  // Interactive composer: steer a real (non-demo) task session — same prompt.send op the authoring
+  // cockpit uses, addressed at this session instead. Gated on the same idle/running check the
+  // coordinator enforces server-side, so the button's enabled state never promises more than the
+  // server will actually accept.
+  const isLive = !!session.sessionId;
+  const canSteer = isLive && (session.status === 'idle' || session.status === 'running');
+  const [draft, setDraft] = React.useState('');
+  const [sending, setSending] = React.useState(false);
+  const [sendError, setSendError] = React.useState<string | null>(null);
+  // A single ordered turn list: human sends are shown optimistically (cleared/rolled back on
+  // rejection), agent/tool turns are merged in from the live transcript as they arrive/update — same
+  // pattern as the authoring cockpit's `convo`, simplified because a task session has one fixed agent
+  // (the implementer) rather than a switchable role.
+  const [turns, setTurns] = React.useState<any[]>([]);
+  const scroller = React.useRef<any>(null);
+  const agentTranscript = (session.transcript || []).filter((t: any) => t.role !== 'user');
+  const transcriptSig = agentTranscript.map((t: any) => `${t.messageId}:${textSig(t.text ?? '')}:${t.isStreaming ? 1 : 0}`).join('|');
+  // Merge the live agent/tool transcript into `turns`, resetting it first when the ACTIVE SESSION
+  // itself changed (so a previously-viewed task's turns don't linger into a newly opened one). Both
+  // concerns share one effect deliberately: two separate effects (merge; reset-on-switch) both fire on
+  // the same mount/switch commit, and since React runs effects in declaration order, a later "reset"
+  // effect would clobber the merge effect's just-populated state every time.
+  const lastSessionId = React.useRef<string | undefined>(session.sessionId);
+  React.useEffect(() => {
+    const switched = lastSessionId.current !== session.sessionId;
+    lastSessionId.current = session.sessionId;
+    if (switched) setSendError(null);
+    setTurns((prev) => {
+      let next = switched ? [] : prev;
+      for (const t of agentTranscript) {
+        const key = 'a:' + t.messageId;
+        const entry = { key, kind: 'agent', tool: t.role === 'tool', text: t.text, streaming: t.isStreaming };
+        const idx = next.findIndex((x: any) => x.key === key);
+        if (idx === -1) next = [...next, entry];
+        else if (next[idx].text !== entry.text || next[idx].streaming !== entry.streaming) { next = next.slice(); next[idx] = { ...next[idx], ...entry }; }
+      }
+      return next;
+    });
+  }, [transcriptSig, session.sessionId]);
+  React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [turns.length, sending]);
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || sending || !canSteer) return;
+    setSending(true);
+    setSendError(null);
+    const key = 'h:' + Date.now();
+    setTurns((t) => [...t, { key, kind: 'human', text }]);
+    setDraft('');
+    try {
+      const res = await steerTaskLive({ sessionId: session.sessionId, specId: card.specId ?? card.id, message: text });
+      const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+      if (err) {
+        setTurns((t) => t.filter((x: any) => x.key !== key)); // undo the optimistic turn
+        setDraft((d) => d || text); // restore the text if the composer is still empty
+        setSendError(err);
+      }
+    } finally {
+      setSending(false);
+    }
+  };
+
   return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('div', { style: { padding: '14px 22px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 } },
       e(Button, { variant: 'ghost', size: 'sm', iconLeft: e(Icon, { name: 'arrowLeft', size: 15 }), onClick: () => store.set({ view: 'board' }) }, 'Board'),
@@ -283,12 +354,26 @@ export function Session() {
     e('div', { style: { padding: '0 22px', borderBottom: '1px solid var(--border)' } },
       e(Tabs, { tabs: [{ id: 'transcript', label: 'Transcript' }, { id: 'todos', label: 'Todos', count: TODOS.length }, { id: 'diff', label: 'Diff' }], value: tab, onChange: setTab })),
     e('div', { style: { flex: 1, minHeight: 0, overflow: 'hidden' } },
-      tab === 'transcript' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 760 } },
-        // Live transcript from the coordinator when present (SPEC-003); otherwise the sample.
-        (session.transcript && session.transcript.length
-          ? session.transcript.map((m, i) => e(AgentMessage, { key: m.messageId || i, role: 'agent', agent: m.role === 'tool' ? 'Tool' : 'Implementation', model: session.model || card.model || 'mid-tier' }, m.text + (m.isStreaming ? ' ▍' : '')))
-          : TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text))),
-        e(Callout, { variant: 'default', label: 'Runtime receipts' }, 'The board reacts to typed receipts — turn quiescence, diff finalisation — captured around each agent turn, with automatic git checkpoints for rescue and audit.')) : null,
+      tab === 'transcript' ? e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
+        e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: 22, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 760 } },
+          (isLive
+            ? turns.map((m: any) => e(AgentMessage, { key: m.key, role: m.kind === 'human' ? 'user' : 'agent', agent: m.tool ? 'Tool' : 'Implementation', model: session.model || card.model || 'mid-tier' }, (m.text || '…') + (m.streaming ? ' ▍' : '')))
+            : TRANSCRIPT.map((m, i) => e(AgentMessage, { key: i, role: m.role, agent: m.agent, model: m.model }, m.text))),
+          e(Callout, { variant: 'default', label: 'Runtime receipts' }, 'The board reacts to typed receipts — turn quiescence, diff finalisation — captured around each agent turn, with automatic git checkpoints for rescue and audit.')),
+        isLive ? e('div', { style: { padding: '10px 22px', borderTop: '1px solid var(--border)' } },
+          e('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-end' } },
+            e('div', { style: { flex: 1, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', background: canSteer ? 'var(--background)' : 'var(--secondary)' } },
+              e(Textarea, { rows: 2, value: draft, placeholder: canSteer ? 'Steer the implementer…' : `session is ${session.status} — no longer steerable`, onChange: (ev: any) => setDraft(ev.target.value), onKeyDown: (ev: any) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) void send(); } })),
+            e('button', { onClick: () => void send(), disabled: !canSteer || sending || !draft.trim(), title: 'Send (⌘⏎)',
+              style: {
+                display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34,
+                borderRadius: 'var(--radius-md)', border: 'none',
+                background: (!canSteer || sending || !draft.trim()) ? 'var(--secondary)' : 'var(--primary)',
+                color: (!canSteer || sending || !draft.trim()) ? 'var(--neutral-400)' : 'var(--primary-foreground)',
+                cursor: (!canSteer || sending || !draft.trim()) ? 'default' : 'pointer', flex: 'none',
+              } },
+              e(Icon, { name: sending ? 'refresh' : 'arrowUp', size: 15 }))),
+          sendError ? e('p', { style: { margin: '6px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, sendError) : null) : null) : null,
       tab === 'todos' ? e('div', { style: { height: '100%', overflowY: 'auto', padding: 22, maxWidth: 620 } },
         TODOS.map((t, i) => e('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', marginBottom: 8, background: 'var(--card)' } },
           t.s === 'gate' ? e('span', { style: { color: 'var(--destructive)', display: 'flex' } }, e(Icon, { name: 'lock', size: 16 })) : t.s === 'done' ? e('span', { style: { color: 'var(--success)', display: 'flex' } }, e(Icon, { name: 'checkCircle', size: 16 })) : e(StatusDot, { status: t.s === 'running' ? 'running' : 'idle', pulse: t.s === 'running' }),
