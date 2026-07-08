@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks, specSlug, taskKey } from "../src/delivery.js";
+import { buildDeliveryPrompt, deliveryWorktreeBranch, isShellSafeBranch, parseTasks, specSlug, taskKey } from "../src/delivery.js";
 
 const TASKS_MD = `# Spec
 
@@ -85,14 +85,35 @@ test("buildDeliveryPrompt omits any PR instruction by default (SPEC-030 auto-PR 
   assert.ok(!/gh pr create/.test(prompt));
 });
 
-test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on", () => {
+test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on, no baseBranch → plain --fill", () => {
   const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
   assert.match(prompt, /open a pull request/i);
   assert.match(prompt, /gh pr create --fill/);
   assert.match(prompt, /pre-authorised/i);
+  assert.ok(!/--base/.test(prompt), "no baseBranch given → no --base flag");
 });
 
-test("buildDeliveryPrompt auto-PR never interpolates a branch into the command (no --base — injection-safe)", () => {
-  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
-  assert.ok(!/--base/.test(prompt), "the base is left to gh's default (feature → repo default), no branch in the shell command");
+test("buildDeliveryPrompt auto-PR targets a safe feature branch, unquoted (SPEC-031)", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "feat/spec-042-widget" });
+  assert.match(prompt, /gh pr create --base feat\/spec-042-widget --fill/, "targets the feature branch");
+  assert.match(prompt, /the feat\/spec-042-widget branch/, "prose names the base");
+  assert.ok(!/`feat\/spec-042-widget`/.test(prompt), "the untrusted branch is not wrapped in its own Markdown code span");
+});
+
+test("isShellSafeBranch accepts normal ref names and rejects anything with special characters", () => {
+  assert.ok(isShellSafeBranch("feat/spec-042-widget"));
+  assert.ok(isShellSafeBranch("release_1.2.3"));
+  for (const bad of ["feat/$(whoami)", "o'brien", "feat/`x`", "feat/a&whoami", "feat/a b", "feat/a|b", "feat/a;b"]) {
+    assert.ok(!isShellSafeBranch(bad), `must reject ${bad}`);
+  }
+});
+
+test("buildDeliveryPrompt drops a base branch with special characters and falls back to gh's default (POSIX/cmd/PowerShell/Markdown-safe)", () => {
+  // A crafted `branch:` value must NOT reach the command or the prose — not shell-quoted-and-hoped, dropped.
+  for (const evil of ["feat/$(whoami)", "feat/a&whoami", "feat/`echo x`", "o'brien"]) {
+    const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: evil });
+    assert.ok(!/--base/.test(prompt), `unsafe base '${evil}' → no --base (falls back to gh default)`);
+    assert.ok(!prompt.includes(evil), `the crafted branch text '${evil}' never appears in the prompt`);
+    assert.match(prompt, /gh pr create --fill/, "still instructs a PR, against the default branch");
+  }
 });

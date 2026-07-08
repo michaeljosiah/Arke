@@ -403,7 +403,7 @@ test("with auto-PR off (default), the delivery prompt says nothing about opening
   assert.ok(!/gh pr create/.test(text), "default delivery does not instruct a PR — it stops at the diff gate");
 });
 
-test("with auto-PR configured on, the delivery prompt instructs the implementer to open a PR", async () => {
+test("with auto-PR configured on, the delivery prompt instructs the implementer to open a PR against the feature branch (SPEC-031)", async () => {
   const { dir } = repo();
   const adapter = new DeliverMockAdapter();
   const { c, port } = await start(dir, adapter);
@@ -414,6 +414,7 @@ test("with auto-PR configured on, the delivery prompt instructs the implementer 
   await sleep(200);
   const text = implementerDispatches(adapter)[0]!.text;
   assert.match(text, /open a pull request/i);
-  assert.match(text, /gh pr create --fill/);
-  assert.ok(!/--base/.test(text), "no branch interpolated into the shell command (injection-safe; base left to gh default)");
+  // The delivery runs on `<BRANCH>--delivery` in the worktree, so the PR targets the FEATURE branch
+  // (delivery → feature → mainline = delivered, SPEC-024). BRANCH is metacharacter-free → interpolated bare.
+  assert.ok(text.includes(`gh pr create --base ${BRANCH} --fill`), "targets the feature branch");
 });

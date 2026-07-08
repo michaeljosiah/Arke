@@ -1210,9 +1210,10 @@ export class ProjectContext {
     this.deliveryWorktrees.set(cid, { wtPath, branch: deliveryBranch });
     // SPEC-030: when the project has opted into auto-PR, the delivery prompt tells the implementer to open
     // the PR itself once every task is done — otherwise the prompt says nothing about PRs and delivery
-    // stops at the human diff-review gate (SPEC-011). The instruction leaves the PR base to `gh`'s default
-    // (`gh pr create --fill`); with the worktree wired (below) the agent's current branch is the delivery
-    // branch, so that opens `<featureBranch>--delivery` → the repo default branch.
+    // stops at the human diff-review gate (SPEC-011). The agent runs on `<featureBranch>--delivery` (the
+    // worktree, below), so the PR targets the FEATURE branch (SPEC-031): delivery → feature, which then
+    // merges to mainline = delivered (SPEC-024). `buildDeliveryPrompt` only interpolates the base branch
+    // when it is metacharacter-free (else it falls back to gh's default base).
     const autoOpenPr = loadAutoOpenPr(this.deliveryConfigPath());
     await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch, autoOpenPr });
     try {
@@ -1221,7 +1222,7 @@ export class ProjectContext {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true } : {}) }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
       return { ok: true, sessionId: ref.sessionId };
