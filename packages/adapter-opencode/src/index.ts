@@ -127,6 +127,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
    * restart loses these bindings (post-restart requests fall back to the primary directory).
    */
   private readonly sessionCwd = new Map<string, string>();
+  /** permissionId → the worktree directory its session runs in (SPEC-028), so the pending-check and
+   *  reply for a worktree-scoped permission are routed to that directory, not the primary. Recorded on
+   *  `permission.asked`, cleared on `permission.replied`. */
+  private readonly permissionCwd = new Map<string, string>();
   // Correlation state for the split transcript model (role on message.updated, text on the parts).
   private readonly normState: NormalizeState = createNormalizeState();
 
@@ -142,21 +146,26 @@ export class OpenCodeAdapter implements HarnessAdapter {
     const permClient: PermissionClient = {
       // Map the once/always/reject vocabulary onto the server's reply (SPEC-016). OpenCode's
       // UI surfaces once/always/reject; older servers accept approve/deny — send both forms.
-      reply: (id, decision, message) => {
+      reply: (id, decision, message, directory) => {
         const response = decision === "reject" ? "reject" : decision; // once | always | reject
         const approve = decision !== "reject";
         return this.http
-          .req("POST", `/permission/${id}/reply`, {
-            response,
-            approve, // tolerated by approve/deny servers; ignored by once/always/reject servers
-            ...(message ? { message } : {}),
-          })
+          .req(
+            "POST",
+            `/permission/${id}/reply`,
+            {
+              response,
+              approve, // tolerated by approve/deny servers; ignored by once/always/reject servers
+              ...(message ? { message } : {}),
+            },
+            { directory },
+          )
           .then(() => undefined);
       },
-      pending: async () => {
+      pending: async (directory) => {
         const list = await this.http.req<
           Array<{ id?: string; request_id?: string; requestID?: string }>
-        >("GET", "/permission/");
+        >("GET", "/permission/", undefined, { directory });
         return (list ?? [])
           .map((x) => x.id ?? x.request_id ?? x.requestID)
           .filter((x): x is string => typeof x === "string");
@@ -165,6 +174,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     this.permissions = new PermissionCoordinator(
       permClient,
       config.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
+      (id) => this.permissionCwd.get(id), // SPEC-028: route a worktree session's permission to its cwd
     );
   }
 
@@ -716,8 +726,14 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
   /** Side effects an emitted event triggers in the adapter (not in the pure normaliser). */
   private observe(event: DomainEvent): void {
-    if (event.type === "permission.replied") {
+    if (event.type === "permission.asked") {
+      // SPEC-028: remember which directory this permission belongs to (its session's worktree cwd, if
+      // any), so the eventual pending-check + reply are routed there, not the primary directory.
+      const dir = this.dirFor(event.sessionId);
+      if (dir) this.permissionCwd.set(event.permissionId, dir);
+    } else if (event.type === "permission.replied") {
       this.permissions.onReplied(event.permissionId);
+      this.permissionCwd.delete(event.permissionId);
     } else if (event.type === "session.status" && event.status === "idle") {
       this.activeTurn.delete(event.sessionId); // turn quiescent → correlation closes
     }

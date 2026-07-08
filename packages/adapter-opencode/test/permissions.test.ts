@@ -4,19 +4,22 @@ import { PermissionCoordinator, type PermissionClient } from "../src/index.js";
 import type { PermissionVerb } from "@arke/contracts";
 
 interface Recorder extends PermissionClient {
-  replies: Array<{ id: string; decision: PermissionVerb }>;
+  replies: Array<{ id: string; decision: PermissionVerb; directory?: string }>;
   pendingCalls: number;
+  pendingDirs: Array<string | undefined>;
 }
 
 function recorder(pending: string[]): Recorder {
   const r: Recorder = {
     replies: [],
     pendingCalls: 0,
-    async reply(id, decision) {
-      r.replies.push({ id, decision });
+    pendingDirs: [],
+    async reply(id, decision, _message, directory) {
+      r.replies.push({ id, decision, directory });
     },
-    async pending() {
+    async pending(directory) {
       r.pendingCalls += 1;
+      r.pendingDirs.push(directory);
       return pending;
     },
   };
@@ -31,7 +34,7 @@ test("a decision is confirmed only by the matching replied event", async () => {
   pc.onReplied("perm_1");
   const ack = await decision;
   assert.deepEqual(ack, { permissionId: "perm_1", status: "confirmed" });
-  assert.deepEqual(client.replies, [{ id: "perm_1", decision: "once" }]);
+  assert.deepEqual(client.replies, [{ id: "perm_1", decision: "once", directory: undefined }]);
 });
 
 test("no replied event within the timeout yields unconfirmed (not success)", async () => {
@@ -85,4 +88,28 @@ test("reconnect reconciles an in-flight decision the server no longer lists as p
   await pc.reconcile();
   const ack = await decision;
   assert.equal(ack.status, "unconfirmed");
+});
+
+test("a worktree-scoped permission routes its pending-check AND reply to the session's directory (SPEC-028)", async () => {
+  const WT = "/repo/.arke/worktrees/abc";
+  const client = recorder(["perm_wt"]);
+  // The resolver maps this permission to its session's worktree cwd (as the adapter does from
+  // permission.asked); a primary-directory permission would resolve undefined.
+  const pc = new PermissionCoordinator(client, 1000, (id) => (id === "perm_wt" ? WT : undefined));
+  const decision = pc.decide({ permissionId: "perm_wt", decision: "once" });
+  pc.onReplied("perm_wt");
+  await decision;
+
+  assert.deepEqual(client.replies, [{ id: "perm_wt", decision: "once", directory: WT }], "reply routed to the worktree directory");
+  assert.ok(client.pendingDirs.includes(WT), "the stale pre-check queried the worktree directory, not the primary");
+});
+
+test("a primary-directory permission passes no directory override (default resolver)", async () => {
+  const client = recorder(["perm_1"]);
+  const pc = new PermissionCoordinator(client, 1000); // no resolver → always undefined
+  const decision = pc.decide({ permissionId: "perm_1", decision: "once" });
+  pc.onReplied("perm_1");
+  await decision;
+  assert.equal(client.replies[0]!.directory, undefined, "primary permission → no directory override (primary directory)");
+  assert.deepEqual(client.pendingDirs, [undefined]);
 });
