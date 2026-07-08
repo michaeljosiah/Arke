@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Switch } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { reprobeRegistry } from '../live';
+import { reprobeRegistry, setAutoOpenPr } from '../live';
 import { isDesktop, desktopVersion, desktopUpdates, type DesktopUpdateStatus } from '../desktop';
 
 const e = React.createElement;
@@ -142,7 +142,7 @@ function AboutArke() {
 }
 
 export function Settings() {
-  const { theme, density, runtimeMode, accent, liveStream } = useStore();
+  const { theme, density, runtimeMode, accent, liveStream, autoOpenPr } = useStore();
   const [telemetry, setTelemetry] = React.useState(true);
   const set = (patch) => store.set(patch);
   const Group = ({ title, children }: any) => e('div', { style: { marginBottom: 26 } },
@@ -155,6 +155,7 @@ export function Settings() {
       e(Row, { title: 'Density', sub: 'Comfortable for prose, compact for dense tool surfaces.' }, e(Seg, { value: density, onChange: (v) => set({ density: v }), options: [{ v: 'comfortable', label: 'Comfortable' }, { v: 'compact', label: 'Compact' }] }))),
     e(Group, { title: 'Governance' },
       e(Row, { title: 'Default runtime mode', sub: 'Supervised asks for approval and writes only within the workspace. Full access is for trusted flows.' }, e(Seg, { value: runtimeMode, onChange: (v) => set({ runtimeMode: v }), options: [{ v: 'supervised', label: 'Supervised' }, { v: 'full-access', label: 'Full access' }] })),
+      e(Row, { title: 'Auto-open pull request on delivery', sub: 'On: the implementer opens the PR itself once every task is done — a standing, pre-authorized decision that skips the per-diff gate. Off (default): delivery stops at the diff-review gate for you to review and open the PR.' }, e(Switch, { checked: !!autoOpenPr, onChange: (v) => { void setAutoOpenPr(v); } })),
       e(Row, { title: 'Live event stream', sub: 'Project delivery state from harness events as they arrive.' }, e(Switch, { checked: liveStream, onChange: (v) => set({ liveStream: v }) }))),
     e(Group, { title: 'Telemetry' },
       e(Row, { title: 'Observability spans', sub: 'Spans at every boundary persist to a local NDJSON trace — the audit source of truth — and export via OTLP.' }, e(Switch, { checked: telemetry, onChange: setTelemetry })),

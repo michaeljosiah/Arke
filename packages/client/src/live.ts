@@ -655,6 +655,7 @@ function applySnapshot(snap: any) {
     specs: Array.isArray(snap?.specs) ? snap.specs : [], // SPEC-008: live spec library for this project
     repo: snap?.repoIdentity ?? null, // SPEC-025: seed the repository panel on connect (no blank first paint)
     gitBranches: Array.isArray(snap?.gitBranches) ? snap.gitBranches : [],
+    autoOpenPr: snap?.delivery?.autoOpenPr ?? false, // SPEC-030: per-project auto-PR preference for the Settings toggle
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   void refreshRecents(); // SPEC-018: populate the picker's real recents
@@ -1021,4 +1022,24 @@ export function steerTaskLive(args: { sessionId: string; specId?: string | null;
 export async function fetchGovernance(): Promise<void> {
   const res = await liveRequest("governance.status");
   if (res?.ok && res.result) store.set({ governance: res.result });
+}
+
+/**
+ * SPEC-030: persist the per-project auto-PR preference to `.arke/config.json` via the coordinator
+ * (governed write — refused, not queued, while offline). Optimistically reflects the choice in the store
+ * so the Settings toggle is snappy, but ROLLS BACK to the previous value and surfaces a notice if the
+ * write is refused/fails — otherwise the toggle could read "on" while the project config still says false
+ * (the next delivery then wouldn't open a PR despite the UI claiming it would). On success it adopts the
+ * coordinator's authoritative value.
+ */
+export async function setAutoOpenPr(value: boolean): Promise<{ ok: boolean; error?: string }> {
+  const prev = !!store.get().autoOpenPr;
+  store.set({ autoOpenPr: value });
+  const res = await governed("delivery.configure", { autoOpenPr: value });
+  if (!res?.ok) {
+    store.set((s: any) => ({ autoOpenPr: prev, cockpit: { ...s.cockpit, notice: `couldn't save auto-PR setting — ${res?.error ?? "offline"}` } }));
+    return { ok: false, error: res?.error };
+  }
+  store.set({ autoOpenPr: res.autoOpenPr === true }); // authoritative value from the coordinator
+  return { ok: true };
 }

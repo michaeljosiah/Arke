@@ -67,6 +67,10 @@ export const store = createStore({
   runtimeMode: 'supervised',
   accent: 'mono',
   liveStream: true,
+  // SPEC-030: per-project auto-PR preference — when true, the implementer opens the PR itself on
+  // delivery; when false (default), delivery stops at the human diff-review gate. Seeded from the
+  // coordinator snapshot's `delivery` block and flipped via the Settings toggle (delivery.configure).
+  autoOpenPr: false,
   // Live coordinator link (SPEC-003). `connection` mirrors the transport state machine;
   // `live` flips true once a snapshot arrives, at which point the mock engine stands down.
   connection: 'offline',

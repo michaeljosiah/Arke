@@ -315,3 +315,54 @@ test("delivery ownership survives a coordinator restart — the checklist oracle
   const sess = card.sessions.find((s: any) => s.sessionId === sessionId);
   assert.equal(sess.status, "done", "the fresh coordinator recovered delivery ownership from the read model and completed the checklist oracle, despite never having dispatched this session itself");
 });
+
+// ---- SPEC-030: auto-PR configuration -------------------------------------------------------------
+
+test("delivery.configure persists the auto-PR preference and delivery.settings reflects it (round-trip)", async () => {
+  const { dir } = repo();
+  const adapter = new DeliverMockAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+
+  // Default: off.
+  let settings = await op(port, "delivery.settings", {});
+  assert.equal(settings.result.autoOpenPr, false, "auto-PR defaults off — the governed baseline");
+
+  const set = await op(port, "delivery.configure", { autoOpenPr: true });
+  assert.equal(set.result.ok, true);
+  assert.equal(set.result.autoOpenPr, true);
+
+  settings = await op(port, "delivery.settings", {});
+  assert.equal(settings.result.autoOpenPr, true, "the preference persisted to .arke/config.json");
+
+  // The write preserved a hand-editable JSON config on disk.
+  const cfg = JSON.parse(readFileSync(join(dir, ".arke", "config.json"), "utf8"));
+  assert.equal(cfg.delivery.autoOpenPr, true);
+});
+
+test("with auto-PR off (default), the delivery prompt says nothing about opening a PR", async () => {
+  const { dir } = repo();
+  const adapter = new DeliverMockAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+
+  await op(port, "spec.deliver", { specId: "SPEC-DELIVER" });
+  await sleep(200);
+  const text = implementerDispatches(adapter)[0]!.text;
+  assert.ok(!/gh pr create/.test(text), "default delivery does not instruct a PR — it stops at the diff gate");
+});
+
+test("with auto-PR configured on, the delivery prompt instructs the implementer to open a PR", async () => {
+  const { dir } = repo();
+  const adapter = new DeliverMockAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+
+  await op(port, "delivery.configure", { autoOpenPr: true });
+  await op(port, "spec.deliver", { specId: "SPEC-DELIVER" });
+  await sleep(200);
+  const text = implementerDispatches(adapter)[0]!.text;
+  assert.match(text, /open a pull request/i);
+  assert.match(text, /gh pr create --fill/);
+  assert.ok(!/--base/.test(text), "no branch interpolated into the shell command (injection-safe; base left to gh default)");
+});
