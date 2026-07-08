@@ -655,6 +655,7 @@ function applySnapshot(snap: any) {
     specs: Array.isArray(snap?.specs) ? snap.specs : [], // SPEC-008: live spec library for this project
     repo: snap?.repoIdentity ?? null, // SPEC-025: seed the repository panel on connect (no blank first paint)
     gitBranches: Array.isArray(snap?.gitBranches) ? snap.gitBranches : [],
+    autoOpenPr: snap?.delivery?.autoOpenPr ?? false, // SPEC-030: per-project auto-PR preference for the Settings toggle
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   void refreshRecents(); // SPEC-018: populate the picker's real recents
@@ -1021,4 +1022,15 @@ export function steerTaskLive(args: { sessionId: string; specId?: string | null;
 export async function fetchGovernance(): Promise<void> {
   const res = await liveRequest("governance.status");
   if (res?.ok && res.result) store.set({ governance: res.result });
+}
+
+/**
+ * SPEC-030: persist the per-project auto-PR preference to `.arke/config.json` via the coordinator
+ * (governed write — refused, not queued, while offline). Optimistically reflects the choice in the store
+ * so the Settings toggle is snappy; a later snapshot re-syncs the authoritative value on reconnect.
+ */
+export async function setAutoOpenPr(value: boolean): Promise<{ ok: boolean; error?: string }> {
+  store.set({ autoOpenPr: value });
+  const res = await governed("delivery.configure", { autoOpenPr: value });
+  return { ok: !!res?.ok, ...(res?.error ? { error: res.error } : {}) };
 }

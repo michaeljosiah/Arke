@@ -35,6 +35,7 @@ import {
   parseCapabilities,
 } from "./spec-lifecycle.js";
 import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks } from "./delivery.js";
+import { loadAutoOpenPr, setAutoOpenPr } from "./delivery-config.js";
 import {
   type HarnessStatus,
   type RegistrySnapshot,
@@ -427,6 +428,9 @@ export class ProjectContext {
       // false, the launch screen shows first-run quick setup instead of the configured-but-down state.
       harnessSetup: { configured: this.endpoints.length > 0 || Object.keys(this.agents.providers).length > 0 },
       specs: this.specLibrary(), // SPEC-008: the spec library for this project
+      // SPEC-030: the per-project auto-PR preference, so the Settings toggle renders its true state on
+      // connect without an extra round-trip.
+      delivery: { autoOpenPr: loadAutoOpenPr(this.deliveryConfigPath()) },
       ...this.read.repoSnapshot(), // SPEC-025: repoIdentity + gitBranches, so a fresh client isn't blank
     };
   }
@@ -1152,6 +1156,11 @@ export class ProjectContext {
     return { ok: true, specId: cid, branch: deliveryBranch };
   }
 
+  /** The canonical project config file (`.arke/config.json`) — home of the SPEC-030 auto-PR preference. */
+  private deliveryConfigPath(): string {
+    return resolve(this.root, ".arke", "config.json");
+  }
+
   /**
    * Dispatch the single implementer session for a delivery (SPEC-009 revised): the full unchecked task
    * list is the prompt, and the agent decides how to sequence/parallelise its own work — the
@@ -1199,12 +1208,16 @@ export class ProjectContext {
     // remove this same worktree/branch — otherwise the deterministic branch name lingers and every retry
     // trips the branch-collision guard above.
     this.deliveryWorktrees.set(cid, { wtPath, branch: deliveryBranch });
-    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch });
+    // SPEC-030: when the project has opted into auto-PR, the delivery prompt tells the implementer to open
+    // the PR itself (targeting the feature branch) once every task is done — otherwise the prompt says
+    // nothing about PRs and delivery stops at the human diff-review gate (SPEC-011).
+    const autoOpenPr = loadAutoOpenPr(this.deliveryConfigPath());
+    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch, autoOpenPr });
     try {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks) }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
       return { ok: true, sessionId: ref.sessionId };
@@ -2245,6 +2258,15 @@ export class ProjectContext {
       case "registry.probe":
         await this.refreshRegistry(true); // explicit user action → re-probe the live adapter
         return this.registrySnapshot;
+      case "delivery.settings": // SPEC-030: read the per-project auto-PR preference
+        return { autoOpenPr: loadAutoOpenPr(this.deliveryConfigPath()) };
+      case "delivery.configure": {
+        // SPEC-030: persist the auto-PR preference into `.arke/config.json` (preserving other keys).
+        const autoOpenPr = a.autoOpenPr === true;
+        setAutoOpenPr(this.deliveryConfigPath(), autoOpenPr);
+        await this.trace.write({ kind: "delivery.configure", projectId: this.projectId, autoOpenPr });
+        return { ok: true, autoOpenPr };
+      }
       case "spec.file":
         return this.readSpecFile(String(a.specId ?? ""));
       case "spec.create": // SPEC-020: new blank-slate specification from the template

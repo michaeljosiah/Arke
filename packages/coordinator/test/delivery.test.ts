@@ -70,3 +70,22 @@ test("buildDeliveryPrompt tells the agent the checklist itself is the completion
   const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD));
   assert.match(prompt, /check it off/i);
 });
+
+test("buildDeliveryPrompt omits any PR instruction by default (SPEC-030 auto-PR off)", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD));
+  assert.ok(!/pull request/i.test(prompt), "default prompt says nothing about PRs — delivery stops at the diff gate");
+  assert.ok(!/gh pr create/.test(prompt));
+});
+
+test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on, targeting the base branch", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "feat/x" });
+  assert.match(prompt, /open a pull request/i);
+  assert.match(prompt, /gh pr create --base feat\/x --fill/);
+  assert.match(prompt, /pre-authorised/i);
+});
+
+test("buildDeliveryPrompt auto-PR without a base branch omits --base (agent falls back to the repo default)", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
+  assert.match(prompt, /gh pr create --fill/);
+  assert.ok(!/--base/.test(prompt), "no base branch → no --base flag");
+});
