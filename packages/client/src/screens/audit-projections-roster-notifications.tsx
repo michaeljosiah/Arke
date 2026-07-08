@@ -85,6 +85,10 @@ function splitModel(m?: string): { provider: string; name: string } {
   return i > 0 ? { provider: m.slice(0, i), name: m.slice(i + 1) } : { provider: 'gateway', name: m };
 }
 
+// Natural, numeric-aware order so versioned model ids sort by value, not lexically: gpt-5.4 before
+// gpt-5.10 (plain .sort() would put gpt-5.10 first because '1' < '4'). Case-insensitive on letters.
+const byNatural = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+
 /** A small downward-opening dropdown (the roster editor's building block). */
 function Sel({ value, options, onChange, icon, small }: any) {
   const [open, setOpen] = React.useState(false);
@@ -163,22 +167,28 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  React.useEffect(() => {
-    if (isCoordinatorConnected()) {
-      void fetchModels().then(setCatalog).catch(() => setCatalog([]));
-      void fetchHarnessCapabilities().then(setCaps).catch(() => setCaps(null));
-    }
+  const [catalogLoading, setCatalogLoading] = React.useState(false);
+  // Re-fetch the harness model catalog on demand: the harness may discover more models after the
+  // editor opens (e.g. OpenCode lazily populates /config/providers), so a one-shot fetch can be stale.
+  const loadCatalog = React.useCallback(() => {
+    if (!isCoordinatorConnected()) return;
+    setCatalogLoading(true);
+    void fetchModels().then(setCatalog).catch(() => setCatalog([])).finally(() => setCatalogLoading(false));
   }, []);
+  React.useEffect(() => {
+    loadCatalog();
+    if (isCoordinatorConnected()) void fetchHarnessCapabilities().then(setCaps).catch(() => setCaps(null));
+  }, [loadCatalog]);
 
   const providers = React.useMemo(() => {
     const set = new Set<string>((catalog || []).map((m: any) => m.provider));
     set.add(initModel.provider); set.add('gateway');
-    return [...set].sort();
+    return [...set].sort(byNatural);
   }, [catalog]);
   const models = React.useMemo(() => {
     const ids = (catalog || []).filter((m: any) => m.provider === provider).map((m: any) => m.id);
     if (provider === initModel.provider && initModel.name && !ids.includes(initModel.name)) ids.push(initModel.name);
-    return [...new Set<string>(ids)].sort();
+    return [...new Set<string>(ids)].sort(byNatural);
   }, [catalog, provider]);
   React.useEffect(() => { if (models.length && !models.includes(model)) setModel(models[0]); }, [provider]);
 
@@ -254,7 +264,11 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
         e('div', { style: { flex: 1 } }, e(EditorRow, { label: 'Mode' }, e(Sel, { value: mode, icon: 'bot', options: ['primary', 'subagent'], onChange: setMode })))),
       e('div', { style: { display: 'flex', gap: 10 } },
         e('div', { style: { flex: 1 } }, e(EditorRow, { label: 'Provider' }, e(Sel, { value: provider, icon: 'server', options: providers, onChange: setProvider }))),
-        e('div', { style: { flex: 1 } }, e(EditorRow, { label: 'Model' }, e(Sel, { value: model || '—', icon: 'cpu', options: models.length ? models : [model || '—'], onChange: setModel }))),
+        e('div', { style: { flex: 1 } }, e(EditorRow, { label: 'Model', hint: e('button', {
+          onClick: loadCatalog, disabled: catalogLoading, title: 'Refresh the harness model catalog',
+          style: { display: 'inline-flex', alignItems: 'center', gap: 3, border: 'none', background: 'none', padding: 0, cursor: catalogLoading ? 'default' : 'pointer', fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } },
+          e(Icon, { name: 'refresh', size: 10 }), catalogLoading ? 'refreshing…' : 'refresh') },
+          e(Sel, { value: model || '—', icon: 'cpu', options: models.length ? models : [model || '—'], onChange: setModel }))),
         e('div', { style: { width: 120 } }, e(EditorRow, { label: 'Reasoning' }, e(Sel, { value: effort, icon: 'zap', options: ['default', 'low', 'medium', 'high', 'xhigh'], onChange: setEffort })))),
       (catalog || []).length === 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', marginBottom: 12, lineHeight: 1.5 } }, 'Harness catalog unavailable (offline or no models capability) — the current provider stays selectable.') : null,
 

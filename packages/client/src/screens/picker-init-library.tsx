@@ -23,7 +23,7 @@ const e = React.createElement;
  * the OpenCode adapter, SPEC-002, not a UI change), so their tiles are inert and never selectable.
  */
 const HARNESS_SETUP = [
-  { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', note: 'open source · self-hostable · the reference harness' },
+  { id: 'opencode', name: 'OpenCode', driver: 'opencode', scheme: 'opencode://', host: 'localhost:4096', note: '' },
   // comingSoon entries are never selectable, so `driver`/`scheme`/`host`/`note` are unused filler kept
   // only so the union shape matches the other entries (avoids `as any` at every shared-field access site).
   { id: 'claude-code', name: 'Claude Code', comingSoon: true, driver: '', scheme: '', host: '', note: '' },
@@ -100,7 +100,7 @@ function HarnessSetup() {
               st.dot ? e('span', { style: { width: 7, height: 7, borderRadius: 999, flex: 'none', background: st.hollow ? 'transparent' : st.color, border: st.hollow ? '1.5px solid ' + st.color : 'none' } }) : null,
               e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)' } }, st.label))));
       })),
-    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note),
+    h.note ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 12 } }, h.note) : null,
     // OpenCode: a primary "Start OpenCode" (managed) with a quiet "Connect to a URL" escape hatch that
     // reveals the attach input. Omnigent is a substrate — its whole flow IS a URL, so show it directly.
     (h as any).substrate
@@ -110,8 +110,7 @@ function HarnessSetup() {
             e(Button, { disabled: actionsDisabled, iconLeft: e(Icon, { name: connecting ? 'refresh' : 'play', size: 15 }), onClick: startManaged }, connecting ? 'Starting OpenCode…' : 'Start OpenCode'),
             e('button', { onClick: actionsDisabled ? undefined : () => setShowUrl((o) => !o), style: { background: 'none', border: 'none', padding: 0, cursor: actionsDisabled ? 'default' : 'pointer', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--muted-foreground)', opacity: actionsDisabled ? 0.4 : 1 } }, 'Connect to a URL')),
           showUrl ? e('div', { style: { marginTop: 10 } }, hostRow('attach', 'Connect')) : null),
-    error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null,
-    e('p', { style: { margin: '10px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Authentication happens in the harness — Arke never collects credentials.'));
+    error ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, 'could not connect — ' + error) : null);
 }
 
 /**
@@ -304,9 +303,7 @@ export function Picker() {
         // 2 · entry
         stepNum('2', 'Open a project', ready ? null : e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)' } }, canScaffold ? 'scaffold to configure a harness' : 'connect a harness first')),
         e('div', { style: { display: 'flex', flexDirection: 'column', gap: 9, marginBottom: (cloneOpen || newOpen) ? 10 : 18 } },
-          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Browse to a project folder — Arke detects and adapts', primary: true, enabled: canScaffold, onClick: openFolder }),
-          e(EntryCard, { icon: 'branch', title: 'Clone repository', sub: 'Clone a URL into a folder in your workspace', enabled: canScaffold, onClick: () => { setNewOpen(false); setEntryError(null); setCloneOpen((o) => !o); } }),
-          e(EntryCard, { icon: 'folderPlus', title: 'New project', sub: 'Scaffold a greenfield, method-ready project', enabled: canScaffold, onClick: () => { setCloneOpen(false); setEntryError(null); setNewOpen((o) => !o); } })),
+          e(EntryCard, { icon: 'folder', title: 'Open folder', sub: 'Browse to a project folder — Arke detects and adapts', primary: true, enabled: canScaffold, onClick: openFolder })),
         cloneOpen ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 } },
           e('div', { style: { display: 'flex', gap: 8 } },
             e('div', { style: { flex: 1, minWidth: 0 } }, e(Input, { mono: true, prefix: 'https://', placeholder: 'github.com/acme/repo', value: cloneUrl, onChange: (ev: any) => setCloneUrl(ev.target.value) })),
