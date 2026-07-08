@@ -1209,15 +1209,17 @@ export class ProjectContext {
     // trips the branch-collision guard above.
     this.deliveryWorktrees.set(cid, { wtPath, branch: deliveryBranch });
     // SPEC-030: when the project has opted into auto-PR, the delivery prompt tells the implementer to open
-    // the PR itself (targeting the feature branch) once every task is done — otherwise the prompt says
-    // nothing about PRs and delivery stops at the human diff-review gate (SPEC-011).
+    // the PR itself once every task is done — otherwise the prompt says nothing about PRs and delivery
+    // stops at the human diff-review gate (SPEC-011). The instruction leaves the PR base to `gh`'s default
+    // (the current feature branch → the repo default branch, i.e. the SPEC-024 delivery PR), since the
+    // harness runs in the project checkout on the feature branch, not the delivery worktree.
     const autoOpenPr = loadAutoOpenPr(this.deliveryConfigPath());
     await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch, autoOpenPr });
     try {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true } : {}) }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
       return { ok: true, sessionId: ref.sessionId };
@@ -2262,9 +2264,12 @@ export class ProjectContext {
         return { autoOpenPr: loadAutoOpenPr(this.deliveryConfigPath()) };
       case "delivery.configure": {
         // SPEC-030: persist the auto-PR preference into `.arke/config.json` (preserving other keys).
+        // Governed write: record the STANDING authorisation fail-safe BEFORE applying it (writeOrThrow),
+        // so the config can't flip — enabling PRs-without-per-diff-approval — with no durable audit
+        // record if the trace is unwritable. Mirrors approveDraft's trace-before-write preflight.
         const autoOpenPr = a.autoOpenPr === true;
+        await this.trace.writeOrThrow({ kind: "delivery.configure", projectId: this.projectId, autoOpenPr });
         setAutoOpenPr(this.deliveryConfigPath(), autoOpenPr);
-        await this.trace.write({ kind: "delivery.configure", projectId: this.projectId, autoOpenPr });
         return { ok: true, autoOpenPr };
       }
       case "spec.file":

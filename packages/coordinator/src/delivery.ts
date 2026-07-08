@@ -77,13 +77,15 @@ export interface DeliveryPromptOptions {
    * relaxes SPEC-011's per-diff human gate for this project. When false (the default), the prompt says
    * nothing about PRs: the agent stops after implementing and the human reviews the diff and opens the
    * PR via the board's diff-review gate.
+   *
+   * The instruction deliberately does NOT hard-code a `--base`: the harness runs in the project's own
+   * checkout on the feature branch (the delivery worktree is not wired into the harness cwd — a known
+   * SPEC-028 gap), so `gh pr create --fill` opens the PR from the current (feature) branch against the
+   * repository's default branch, which is exactly the SPEC-024 delivery PR (feature → mainline). Leaving
+   * the base to `gh`'s default also keeps a spec branch name out of the shell command (no injection via a
+   * crafted `branch:` frontmatter value).
    */
   autoOpenPr?: boolean;
-  /**
-   * The branch an auto-opened PR should target — the spec's feature branch. Omitted (or empty) → no
-   * explicit base in the instruction, and the agent falls back to the repository's default branch.
-   */
-  baseBranch?: string;
 }
 
 /**
@@ -104,14 +106,13 @@ export function buildDeliveryPrompt(specPath: string, tasks: ParsedTask[], opts:
     "than checking everything off at the end.",
   ];
   if (opts.autoOpenPr) {
-    const base = opts.baseBranch ? ` targeting the \`${opts.baseBranch}\` branch` : "";
-    const ghBase = opts.baseBranch ? ` --base ${opts.baseBranch}` : "";
     lines.push(
       "",
-      `When every task is checked off, open a pull request for your changes${base}: push your working branch`,
-      `if it has no remote yet, then \`gh pr create${ghBase} --fill\`. This project is configured to open the`,
-      "PR automatically on delivery — the engineer has pre-authorised it, so do not stop to ask for a separate",
-      "diff approval first.",
+      "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
+      "and merged: push your current branch if it has no remote yet, then run `gh pr create --fill` (it opens",
+      "a PR from your current branch against the repository's default branch). This project is configured to",
+      "open the PR automatically on delivery — the engineer has pre-authorised it, so do not stop to ask for a",
+      "separate diff approval first.",
     );
   }
   lines.push("", "--- TASKS ---", list);

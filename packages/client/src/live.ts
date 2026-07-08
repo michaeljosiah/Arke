@@ -1027,10 +1027,19 @@ export async function fetchGovernance(): Promise<void> {
 /**
  * SPEC-030: persist the per-project auto-PR preference to `.arke/config.json` via the coordinator
  * (governed write — refused, not queued, while offline). Optimistically reflects the choice in the store
- * so the Settings toggle is snappy; a later snapshot re-syncs the authoritative value on reconnect.
+ * so the Settings toggle is snappy, but ROLLS BACK to the previous value and surfaces a notice if the
+ * write is refused/fails — otherwise the toggle could read "on" while the project config still says false
+ * (the next delivery then wouldn't open a PR despite the UI claiming it would). On success it adopts the
+ * coordinator's authoritative value.
  */
 export async function setAutoOpenPr(value: boolean): Promise<{ ok: boolean; error?: string }> {
+  const prev = !!store.get().autoOpenPr;
   store.set({ autoOpenPr: value });
   const res = await governed("delivery.configure", { autoOpenPr: value });
-  return { ok: !!res?.ok, ...(res?.error ? { error: res.error } : {}) };
+  if (!res?.ok) {
+    store.set((s: any) => ({ autoOpenPr: prev, cockpit: { ...s.cockpit, notice: `couldn't save auto-PR setting — ${res?.error ?? "offline"}` } }));
+    return { ok: false, error: res?.error };
+  }
+  store.set({ autoOpenPr: res.autoOpenPr === true }); // authoritative value from the coordinator
+  return { ok: true };
 }

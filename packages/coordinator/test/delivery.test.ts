@@ -77,15 +77,14 @@ test("buildDeliveryPrompt omits any PR instruction by default (SPEC-030 auto-PR 
   assert.ok(!/gh pr create/.test(prompt));
 });
 
-test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on, targeting the base branch", () => {
-  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "feat/x" });
+test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
   assert.match(prompt, /open a pull request/i);
-  assert.match(prompt, /gh pr create --base feat\/x --fill/);
+  assert.match(prompt, /gh pr create --fill/);
   assert.match(prompt, /pre-authorised/i);
 });
 
-test("buildDeliveryPrompt auto-PR without a base branch omits --base (agent falls back to the repo default)", () => {
+test("buildDeliveryPrompt auto-PR never interpolates a branch into the command (no --base — injection-safe)", () => {
   const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
-  assert.match(prompt, /gh pr create --fill/);
-  assert.ok(!/--base/.test(prompt), "no base branch → no --base flag");
+  assert.ok(!/--base/.test(prompt), "the base is left to gh's default (feature → repo default), no branch in the shell command");
 });
