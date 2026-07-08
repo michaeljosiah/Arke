@@ -34,15 +34,7 @@ import {
   normativeHash,
   parseCapabilities,
 } from "./spec-lifecycle.js";
-import {
-  maxConcurrentTasks,
-  parseTasks,
-  planFanOut,
-  type FanOutRecord,
-  type FanOutTask,
-  type TaskCommand,
-} from "./fanout.js";
-import { FanOutStore } from "./fanout-store.js";
+import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks } from "./delivery.js";
 import {
   type HarnessStatus,
   type RegistrySnapshot,
@@ -183,14 +175,11 @@ export class ProjectContext {
   private readonly generationProposals = new Map<string, { sessionId: string; artifacts: ArtifactProposal[]; specContentHash: string; status: "generating" | "pending-review" }>();
   /** generation sessionId → specId, so the agent's completed turn is routed back to its proposal. */
   private readonly generationSessions = new Map<string, string>();
-  /** Durable fan-out records for restart idempotency (SPEC-009). */
-  private fanoutStore?: FanOutStore;
-  /** Per-spec queue of task commands held back by the concurrency cap (SPEC-009). */
-  private readonly fanoutQueues = new Map<string, TaskCommand[]>();
-  /** Specs whose fan-out is halted because the spec was demoted away from approved (SPEC-009). */
-  private readonly fanoutHalted = new Set<string>();
-  /** task sessionId → its spec + task key, so a completed task can drain the spec's queue (SPEC-009). */
-  private readonly taskSessions = new Map<string, { specId: string; taskKey: string }>();
+  /** specId → its live delivery (single-session implementation) sessionId — the claim that closes the
+   *  TOCTOU race between deliver()'s guard and the async createSession call (SPEC-009 revised). */
+  private readonly deliverySessions = new Map<string, string>();
+  /** delivery sessionId → specId, so a settled turn is routed back to its completion check. */
+  private readonly deliverySessionOwner = new Map<string, string>();
   /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
   private readonly completedReviews = new Set<string>();
   /** Specs currently being auto-renamed after titling, so the per-turn trigger is not re-entrant (SPEC-020). */
@@ -241,9 +230,6 @@ export class ProjectContext {
   async start(): Promise<void> {
     this.classify();
     await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
-    this.fanoutStore = new FanOutStore(resolve(this.root, ".arke", "fanout.ndjson")); // SPEC-009
-    this.fanoutStore.load();
-    this.fanoutStore.reconcileInterrupted(); // restart: free slots held by tasks whose sessions died
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -401,7 +387,6 @@ export class ProjectContext {
       if (card.needsHuman) return true;
       if (card.sessions.some((s) => s.status === "running" || s.status === "waiting")) return true;
     }
-    for (const q of this.fanoutQueues.values()) if (q.length > 0) return true; // queued, not yet dispatched
     return false;
   }
 
@@ -914,10 +899,10 @@ export class ProjectContext {
         }
         // Record the normative baseline so a later material change can be detected.
         await setStatus("approved", "pr-approved", { normativeHash: normativeHash(found.text) });
-        this.fanoutHalted.delete(specId);
         // SPEC-024: approval is DECOUPLED from delivery. Reaching `approved` no longer fans out or
-        // generates — it is a resting backlog state. Delivery (fan-out + downstream-artefact generation)
-        // is started explicitly by the `spec.deliver` op, which may run later, on any branch.
+        // generates — it is a resting backlog state. Delivery (single-session implementation +
+        // downstream-artefact generation) is started explicitly by the `spec.deliver` op, which may run
+        // later, on any branch.
         return { applied: "approved", specId };
       }
       case "merged": // git-side transition kind (WebhookTransition.kind) — the PR merged
@@ -958,12 +943,6 @@ export class ProjectContext {
       /* best-effort: the read model is authoritative for the gate; a write failure surfaces as divergence */
     }
     await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) });
-    // SPEC-009 demotion guard: leaving `approved` while tasks are still queued halts the queue —
-    // queued tasks for a no-longer-approved spec must not be dispatched.
-    if (status !== "approved" && (this.fanoutQueues.get(specId)?.length ?? 0) > 0) {
-      this.fanoutHalted.add(specId);
-      await this.trace.write({ kind: "fanout.halted", projectId: this.projectId, specId, reason: "spec-demoted" });
-    }
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) } as DomainEvent);
     this.regenerateSpecIndex(); // SPEC-026: keep the index status column true through the lifecycle
   }
@@ -1059,7 +1038,6 @@ export class ProjectContext {
       }
       if (gate.solo) await this.trace.write({ kind: "governance.self-approval-allowed-solo", projectId: this.projectId, specId: cid, actor });
       await this.commitStatus(cid, "approved", gate.solo ? "manual-solo" : "manual", { actor, extra: { normativeHash: normativeHash(found.text) } });
-      this.fanoutHalted.delete(cid);
       return { applied: "approved", specId: cid };
     }
 
@@ -1086,16 +1064,18 @@ export class ProjectContext {
     return { applied: to, specId: cid };
   }
 
-  /** Interrupt any in-flight delivery for a reopened spec (SPEC-024): mark its live task sessions
-   *  `interrupted` (the card surfaces needs-human) and halt any queued tasks. The contract changed —
+  /** Interrupt any in-flight delivery for a reopened spec (SPEC-024): mark its live task session
+   *  `interrupted` (the card surfaces needs-human) and release the delivery claim so a fresh
+   *  `spec.deliver` after re-approval isn't blocked by this superseded one. The contract changed —
    *  delivery must not silently continue. */
   private async interruptInFlightDelivery(specId: string): Promise<void> {
     const card = this.read.snapshot().find((c) => c.specId === specId);
     const live = (card?.sessions ?? []).filter((s) => s.kind === "task" && (s.status === "running" || s.status === "waiting" || s.status === "idle"));
     for (const s of live) {
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: s.sessionId, specId, kind: "task", status: "interrupted" } as DomainEvent);
+      this.deliverySessionOwner.delete(s.sessionId);
     }
-    if ((this.fanoutQueues.get(specId)?.length ?? 0) > 0) this.fanoutHalted.add(specId);
+    this.deliverySessions.delete(specId);
     if (live.length > 0) await this.trace.write({ kind: "delivery.interrupted", projectId: this.projectId, specId, count: live.length, reason: "reopen" });
   }
 
@@ -1143,9 +1123,11 @@ export class ProjectContext {
 
   /**
    * `spec.deliver` (SPEC-024) — the explicit start of delivery, decoupled from approval. Approval parks
-   * a spec in the `approved` backlog; delivery fans out the task list (SPEC-009) and proposes downstream
-   * artefacts (SPEC-013) on a recorded delivery branch, and may run later, on any branch. Refuses a spec
-   * that is not `approved`, or one already delivering (no double-dispatch — `fanOut` is re-entrant).
+   * a spec in the `approved` backlog; delivery dispatches ONE implementer session with the full task
+   * list (SPEC-009 revised — the agent decides how to sequence/tackle the tasks itself, no forced
+   * concurrent fan-out) and proposes downstream artefacts (SPEC-013) on a recorded delivery branch, and
+   * may run later, on any branch. Refuses a spec that is not `approved`, or one already delivering (no
+   * double-dispatch).
    */
   private async deliver(specId: string, branch?: string): Promise<{ ok: boolean; specId?: string; branch?: string; error?: string }> {
     const found = this.findSpecFile(specId);
@@ -1153,18 +1135,108 @@ export class ProjectContext {
     const cid = found.canonicalId;
     const status = this.specRecords.get(cid)?.status ?? found.frontmatter.status ?? "draft";
     if (status !== "approved") return { ok: false, specId: cid, error: `cannot deliver: '${cid}' is '${status}', expected 'approved'` };
-    // Re-delivery guard: a delivery already queued or with a live task session must not be re-dispatched.
+    // Re-delivery guard: an in-memory claim already in flight (closes the TOCTOU race around the async
+    // dispatch below) or a live task session in the read model must not be re-dispatched.
     const card = this.read.snapshot().find((c) => c.specId === cid);
     const alreadyDelivering =
-      (this.fanoutQueues.get(cid)?.length ?? 0) > 0 ||
-      !!card?.sessions.some((s) => s.kind === "task" && (s.status === "running" || s.status === "idle"));
+      this.deliverySessions.has(cid) || !!card?.sessions.some((s) => s.kind === "task" && (s.status === "running" || s.status === "idle"));
     if (alreadyDelivering) return { ok: false, specId: cid, error: `'${cid}' is already delivering` };
     const deliveryBranch = branch ?? found.frontmatter.branch ?? gitHeadBranch(this.root) ?? "";
     await this.trace.write({ kind: "spec.deliver", projectId: this.projectId, specId: cid, branch: deliveryBranch });
-    this.fanoutHalted.delete(cid);
-    void this.fanOut(cid); // SPEC-009: fan the task list out concurrently
+    void this.deliverImplementation(cid, deliveryBranch); // SPEC-009 revised: one session, full task list
     void this.generate(cid); // SPEC-013: propose downstream artefacts
     return { ok: true, specId: cid, branch: deliveryBranch };
+  }
+
+  /**
+   * Dispatch the single implementer session for a delivery (SPEC-009 revised): the full unchecked task
+   * list is the prompt, and the agent decides how to sequence/parallelise its own work — the
+   * coordinator no longer forces tasks into concurrent child sessions. Runs in ONE dedicated git
+   * worktree on a deterministic sibling branch (`deliveryWorktreeBranch`), not the feature branch
+   * itself, so the worktree can always be created even if the human's own working directory (`this.root`)
+   * is currently checked out on that feature branch (a common case — approving a spec requires being on
+   * it). Idempotent: a duplicate trigger while a delivery session is live is a no-op.
+   */
+  private async deliverImplementation(specId: string, featureBranch: string): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { ok: false, error: "spec not found" };
+    const cid = found.canonicalId;
+    if (this.deliverySessions.has(cid)) return { ok: true, sessionId: this.deliverySessions.get(cid) }; // duplicate → no-op
+    const tasks = parseTasks(found.text);
+    if (tasks.filter((t) => !t.done).length === 0) {
+      // Graceful failure: no actionable tasks (SPEC-009). Error on the spec session + warn trace.
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: cid, specId: cid, kind: "spec", status: "error" } as DomainEvent);
+      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cid, reason: "no-tasks" });
+      return { ok: false, error: "no-tasks" };
+    }
+    // Claim the slot SYNCHRONOUSLY (before any await) so a concurrent deliver() for the same spec sees
+    // it already claimed and no-ops — closing the TOCTOU race (single live delivery session invariant).
+    this.deliverySessions.set(cid, "");
+    const deliveryBranch = deliveryWorktreeBranch(featureBranch);
+    const fail = async (reason: string) => {
+      this.deliverySessions.delete(cid);
+      await this.trace.write({ kind: "dispatch.failed", projectId: this.projectId, specId: cid, branch: deliveryBranch, reason });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: `${cid}#delivery`, specId: cid, kind: "task", status: "error" } as DomainEvent);
+    };
+    // Branch-collision guard: an existing branch means an orphaned worktree from a prior run.
+    const exists = spawnSync("git", ["branch", "--list", deliveryBranch], gitOpts(this.root));
+    if ((exists.stdout ?? "").trim().length > 0) {
+      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cid, reason: "branch-collision", branch: deliveryBranch });
+      await fail(`delivery branch '${deliveryBranch}' already exists`);
+      return { ok: false, error: "branch-collision" };
+    }
+    const wtPath = resolve(this.root, ".arke", "worktrees", createHash("sha1").update(deliveryBranch).digest("hex").slice(0, 16));
+    const add = spawnSync("git", ["worktree", "add", "-b", deliveryBranch, wtPath, featureBranch], gitOpts(this.root));
+    if (add.status !== 0) {
+      await fail(`git worktree add failed: ${(add.stderr || add.stdout || "").toString().trim().slice(0, 200)}`);
+      return { ok: false, error: "worktree-failed" };
+    }
+    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cid, branch: deliveryBranch });
+    try {
+      const ref = await this.adapter.createSession({ specId: cid, parent: cid });
+      this.deliverySessions.set(cid, ref.sessionId);
+      this.deliverySessionOwner.set(ref.sessionId, cid);
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks) }] });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
+      await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
+      return { ok: true, sessionId: ref.sessionId };
+    } catch (err) {
+      // The worktree was created but the session never started: remove it so a retry is clean rather
+      // than tripping the collision guard on the orphaned branch.
+      spawnSync("git", ["worktree", "remove", "--force", wtPath], gitOpts(this.root));
+      spawnSync("git", ["branch", "-D", deliveryBranch], gitOpts(this.root));
+      await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { ok: false, error: "dispatch-failed" };
+    }
+  }
+
+  /**
+   * Track a delivery session to completion (SPEC-009 revised): there is no artificial "one dispatch,
+   * one turn, idle means done" signal anymore — the agent may take several turns, possibly steered by
+   * a human via the board's task composer — so on each settled assistant turn, check whether every task
+   * in the spec's `## Tasks` list is now checked off; that checklist is the completion oracle. Marks the
+   * session `done` (surfacing the board's diff-review column) only once every task is checked. A
+   * harness-reported error releases the claim so a fresh `spec.deliver` can retry.
+   */
+  private async observeDeliveryProgress(event: DomainEvent): Promise<void> {
+    if (event.type === "session.status" && event.status === "error") {
+      const specId = this.deliverySessionOwner.get(event.sessionId);
+      if (!specId) return;
+      this.deliverySessions.delete(specId);
+      this.deliverySessionOwner.delete(event.sessionId);
+      return;
+    }
+    if (event.type !== "message.updated" || event.isStreaming || event.role !== "assistant") return;
+    const specId = this.deliverySessionOwner.get(event.sessionId);
+    if (!specId) return;
+    const found = this.findSpecFile(specId);
+    if (!found) return;
+    const tasks = parseTasks(found.text);
+    if (tasks.length === 0 || !tasks.every((t) => t.done)) return;
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: event.sessionId, specId, kind: "task", status: "done" } as DomainEvent);
+    await this.trace.write({ kind: "delivery.complete", projectId: this.projectId, specId, sessionId: event.sessionId });
+    this.deliverySessions.delete(specId);
+    this.deliverySessionOwner.delete(event.sessionId);
   }
 
   // ---- session detail: rescue / steering / diff-gate (SPEC-011) -----------
@@ -1398,114 +1470,6 @@ export class ProjectContext {
     const limit = Number(process.env.ARKE_AUDIT_QUERY_LIMIT) || 500;
     const { records, total } = await this.trace.query(specId, since ?? 0, limit);
     return { projectId: this.projectId, specId, records, total };
-  }
-
-  // ---- parallel task fan-out (SPEC-009) -----------------------------------
-
-  /**
-   * Fan an approved spec's task list out into concurrent child task sessions (SPEC-009). Each task
-   * runs in its own git worktree off the feature branch. Idempotent across restart (FanOutStore),
-   * non-blocking (commands dispatch concurrently), and capped at `ARKE_MAX_CONCURRENT_TASKS` with the
-   * excess queued and drained as task sessions complete.
-   */
-  async fanOut(specId: string): Promise<{ dispatched: number; queued: number; error?: string }> {
-    const found = this.findSpecFile(specId);
-    if (!found) return { dispatched: 0, queued: 0, error: "spec not found" };
-    const cid = found.canonicalId;
-    const featureBranch = found.frontmatter.branch ?? "";
-    const tasks = parseTasks(found.text);
-    if (tasks.filter((t) => !t.done).length === 0) {
-      // Graceful failure: no actionable tasks (SPEC-009). Error on the spec session + warn trace.
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: cid, specId: cid, kind: "spec", status: "error" } as DomainEvent);
-      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cid, reason: "no-tasks" });
-      return { dispatched: 0, queued: 0, error: "no-tasks" };
-    }
-    const store = this.fanoutStore;
-    const already = store?.dispatchedKeys(cid) ?? new Set<string>();
-    const record: FanOutRecord = store?.get(cid) ?? { specId: cid, specSessionId: cid, featureBranch, tasks: [], startedAt: Date.now() };
-    const runningCount = record.tasks.filter((t) => t.status === "running" || t.status === "dispatching").length;
-    const plan = planFanOut({ specId: cid, specSessionId: cid, featureBranch, tasks, alreadyDispatched: already, runningCount, limit: maxConcurrentTasks() });
-
-    // Replace the live queue from the freshly-computed plan — fanOut re-plans from the durable record
-    // each call, so repeated calls (and re-approval after a restart) are idempotent: dispatchedKeys
-    // excludes running/dispatching/done, so only genuinely-pending tasks are (re)queued here.
-    this.fanoutQueues.set(cid, plan.queued);
-    for (const cmd of plan.queued) {
-      const existing = record.tasks.find((t) => t.taskKey === cmd.taskKey);
-      if (!existing) record.tasks.push({ taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, taskText: cmd.taskText, status: "queued", worktreeBranch: cmd.worktreeBranch });
-      else if (existing.status === "failed") existing.status = "queued"; // retry a previously-failed task
-    }
-    store?.put(record);
-
-    // Dispatch the immediate set concurrently — never await one before starting the next. Each task is
-    // isolated: a per-task failure (collision/worktree/dispatch) does not abort the others.
-    const results = await Promise.allSettled(plan.dispatch.map((cmd) => this.dispatchTask(cmd)));
-    const dispatched = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
-    return { dispatched, queued: plan.queued.length };
-  }
-
-  /** Execute one task command: collision check → worktree → session → dispatchAsync, fully isolated.
-   *  Returns true only when the task was actually dispatched (false on any per-task failure). */
-  private async dispatchTask(cmd: TaskCommand): Promise<boolean> {
-    const store = this.fanoutStore;
-    const record = store?.get(cmd.specId) ?? { specId: cmd.specId, specSessionId: cmd.specSessionId, featureBranch: cmd.featureBranch, tasks: [], startedAt: Date.now() };
-    const upsert = (patch: Partial<FanOutTask>) => {
-      const existing = record.tasks.find((t) => t.taskKey === cmd.taskKey);
-      if (existing) Object.assign(existing, patch);
-      else record.tasks.push({ taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, taskText: cmd.taskText, status: "dispatching", ...patch });
-      store?.put(record);
-    };
-    const fail = async (reason: string) => {
-      upsert({ status: "failed", error: reason });
-      await this.trace.write({ kind: "dispatch.failed", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, worktreeBranch: cmd.worktreeBranch, reason });
-      // The task card moves to needs-human (the read model maps an errored task session to that column).
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: `${cmd.specId}#task-${cmd.taskKey}`, specId: cmd.specId, kind: "task", status: "error" } as DomainEvent);
-    };
-
-    upsert({ status: "dispatching", worktreeBranch: cmd.worktreeBranch });
-    await this.trace.write({ kind: "dispatch.started", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, worktreeBranch: cmd.worktreeBranch });
-
-    // Branch-collision guard: an existing branch means an orphaned worktree from a prior run.
-    const exists = spawnSync("git", ["branch", "--list", cmd.worktreeBranch], gitOpts(this.root));
-    if ((exists.stdout ?? "").trim().length > 0) {
-      await this.trace.write({ kind: "warn", projectId: this.projectId, specId: cmd.specId, taskKey: cmd.taskKey, reason: "branch-collision", branch: cmd.worktreeBranch });
-      await fail(`worktree branch '${cmd.worktreeBranch}' already exists`);
-      return false;
-    }
-    // Worktree path keyed by a hash of the full branch name, so distinct branches never collapse to
-    // the same on-disk path (a lossy char-replace could map `feat/foo` and `feat-foo` together).
-    const wtPath = resolve(this.root, ".arke", "worktrees", createHash("sha1").update(cmd.worktreeBranch).digest("hex").slice(0, 16));
-    const add = spawnSync("git", ["worktree", "add", "-b", cmd.worktreeBranch, wtPath, cmd.featureBranch], gitOpts(this.root));
-    if (add.status !== 0) {
-      await fail(`git worktree add failed: ${(add.stderr || add.stdout || "").toString().trim().slice(0, 200)}`);
-      return false;
-    }
-
-    try {
-      const ref = await this.adapter.createSession({ specId: cmd.specId, parent: cmd.specSessionId });
-      this.taskSessions.set(ref.sessionId, { specId: cmd.specId, taskKey: cmd.taskKey });
-      upsert({ status: "running", sessionId: ref.sessionId });
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: cmd.taskText }] });
-      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cmd.specId, kind: "task", status: "running" } as DomainEvent);
-      await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cmd.specId, taskIndex: cmd.taskIndex, taskKey: cmd.taskKey, sessionId: ref.sessionId });
-      return true;
-    } catch (err) {
-      // The worktree was created but the session never started: remove it so a retry is clean rather
-      // than tripping the collision guard on the orphaned branch.
-      spawnSync("git", ["worktree", "remove", "--force", wtPath], gitOpts(this.root));
-      spawnSync("git", ["branch", "-D", cmd.worktreeBranch], gitOpts(this.root));
-      await fail(`dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
-    }
-  }
-
-  /** Drain one queued task for a spec when a running task completes (respecting the demotion halt). */
-  private async drainFanOut(specId: string): Promise<void> {
-    if (this.fanoutHalted.has(specId)) return; // spec demoted → hold queued tasks
-    const queue = this.fanoutQueues.get(specId);
-    if (!queue || queue.length === 0) return;
-    const next = queue.shift()!;
-    await this.dispatchTask(next);
   }
 
   /**
@@ -2247,9 +2211,7 @@ export class ProjectContext {
         return this.groundingList();
       case "spec.library":
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
-      case "spec.fanout":
-        return this.fanOut(String(a.specId ?? "")); // SPEC-009: fan an approved spec's tasks out
-      case "spec.deliver": // SPEC-024: explicit delivery (decoupled from approval) — fan out + generate
+      case "spec.deliver": // SPEC-024: explicit delivery (decoupled from approval) — single-session implementation + generate
         return this.deliver(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "spec.transition": { // SPEC-024: a human manual board move — one op, two triggers, one gate
         const parsed = SpecStatus.safeParse(a.to);
@@ -2547,8 +2509,8 @@ export class ProjectContext {
 
       await this.emit(event);
       await this.observeReviewerEvent(event);
-      await this.observeTaskCompletion(event); // SPEC-009: drain the fan-out queue on task completion
       await this.observeGeneration(event); // SPEC-013: ingest the generation agent's proposal
+      await this.observeDeliveryProgress(event); // SPEC-009 revised: has every task been checked off (or errored)?
 
       if (event.type === "message.part") {
         this.streaming.add(event.sessionId);
@@ -2574,10 +2536,10 @@ export class ProjectContext {
 
   /** After an authoring turn settles, rename an `untitled-NNN` spec whose title is now set (SPEC-020). */
   private async maybeRenameTitledSpec(sessionId: string): Promise<void> {
-    // Only the AUTHORING session drives the rename. Reviewer / generation / task sessions are also
-    // created parentless (so they surface as spec-kind cards), but a reviewer or generation turn on
-    // a still-untitled spec must NOT trigger the rename — otherwise it races the author.
-    if (this.reviewerSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.taskSessions.has(sessionId)) return;
+    // Only the AUTHORING session drives the rename. Reviewer / generation / delivery sessions are also
+    // created parentless (so they surface as spec-kind cards), but a reviewer, generation, or delivery
+    // turn on a still-untitled spec must NOT trigger the rename — otherwise it races the author.
+    if (this.reviewerSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.deliverySessionOwner.has(sessionId)) return;
     // The authoring session folds into its spec's card as a `spec`-kind session (SPEC-023); find that
     // card and rename the spec it belongs to.
     const card = this.read.snapshot().find((c) => c.sessions.some((s) => s.sessionId === sessionId && s.kind === "spec"));
@@ -2610,34 +2572,6 @@ export class ProjectContext {
       const link = this.reviewerSessions.get(sessionId);
       await this.trace.write({ kind: "policy.violation", projectId: this.projectId, panelId: link?.panelId, reviewerRole: link?.role, action: "diff.finalized", sessionId });
     }
-  }
-
-  /**
-   * Drain the fan-out queue when a task session reaches a TERMINAL state (SPEC-009). A fan-out task
-   * is dispatched EXACTLY ONCE with no follow-up turn, so the harness's `idle` (the end of that single
-   * agent loop) IS the task's terminal completion — against live OpenCode, which emits `idle` and
-   * never a distinct `done`, the queue would otherwise never advance. `done` completes too; `error`
-   * fails it. Authoring/spec sessions are never in `taskSessions`, so their multi-turn `idle`
-   * semantics (where `idle` is just the end of one turn) are unaffected by this.
-   */
-  private async observeTaskCompletion(event: DomainEvent): Promise<void> {
-    if (event.type !== "session.status") return;
-    if (event.status !== "done" && event.status !== "idle" && event.status !== "error") return;
-    const link = this.taskSessions.get(event.sessionId);
-    if (!link) return; // not a fan-out task session — nothing to drain
-    const succeeded = event.status !== "error";
-    const store = this.fanoutStore;
-    const record = store?.get(link.specId);
-    if (record) {
-      const task = record.tasks.find((t) => t.taskKey === link.taskKey);
-      if (task && task.status === "running") {
-        task.status = succeeded ? "done" : "failed";
-        if (!succeeded) task.error = "task session reported error";
-        store?.put(record);
-      }
-    }
-    this.taskSessions.delete(event.sessionId);
-    await this.drainFanOut(link.specId);
   }
 
   /** Route a generation session's completed turn (or error) into its proposal (SPEC-013). */
