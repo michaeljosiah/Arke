@@ -80,15 +80,23 @@ export interface DeliveryPromptOptions {
    * relaxes SPEC-011's per-diff human gate for this project. When false (the default), the prompt says
    * nothing about PRs: the agent stops after implementing and the human reviews the diff and opens the
    * PR via the board's diff-review gate.
-   *
-   * The instruction deliberately does NOT hard-code a `--base`: the harness runs in the project's own
-   * checkout on the feature branch (the delivery worktree is not wired into the harness cwd — a known
-   * SPEC-028 gap), so `gh pr create --fill` opens the PR from the current (feature) branch against the
-   * repository's default branch, which is exactly the SPEC-024 delivery PR (feature → mainline). Leaving
-   * the base to `gh`'s default also keeps a spec branch name out of the shell command (no injection via a
-   * crafted `branch:` frontmatter value).
    */
   autoOpenPr?: boolean;
+  /**
+   * The branch an auto-opened PR should target (SPEC-031) — the spec's FEATURE branch. With the delivery
+   * worktree wired into the harness cwd (SPEC-028), the agent runs on `<featureBranch>--delivery`, so the
+   * PR should merge that back into the feature branch (which then merges to mainline = `delivered`,
+   * SPEC-024), NOT jump straight to the repo default. The value is shell-quoted into the command, so a
+   * crafted `branch:` frontmatter value cannot inject shell syntax. Omitted → no `--base` (gh's default).
+   */
+  baseBranch?: string;
+}
+
+/** POSIX single-quote a value so it is safe to embed literally in a shell command (handles an embedded
+ *  `'`). Git branch names allow `$`, `(`, `)`, `'`, etc., so a base branch MUST be quoted before it lands
+ *  in the `gh pr create` command shown to the agent. */
+export function shSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /**
@@ -109,13 +117,17 @@ export function buildDeliveryPrompt(specPath: string, tasks: ParsedTask[], opts:
     "than checking everything off at the end.",
   ];
   if (opts.autoOpenPr) {
+    // Target the feature branch when known (SPEC-031): the agent is on `<featureBranch>--delivery`, so the
+    // PR merges delivery → feature (which then merges to mainline = delivered). The base is shell-quoted.
+    const baseFlag = opts.baseBranch ? ` --base ${shSingleQuote(opts.baseBranch)}` : "";
+    const target = opts.baseBranch ? `the \`${opts.baseBranch}\` branch` : "the repository's default branch";
     lines.push(
       "",
       "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
-      "and merged: push your current branch if it has no remote yet, then run `gh pr create --fill` (it opens",
-      "a PR from your current branch against the repository's default branch). This project is configured to",
-      "open the PR automatically on delivery — the engineer has pre-authorised it, so do not stop to ask for a",
-      "separate diff approval first.",
+      `and merged: push your current branch if it has no remote yet, then run \`gh pr create${baseFlag} --fill\``,
+      `(it opens a PR from your current branch against ${target}). This project is configured to open the PR`,
+      "automatically on delivery — the engineer has pre-authorised it, so do not stop to ask for a separate",
+      "diff approval first.",
     );
   }
   lines.push("", "--- TASKS ---", list);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks, specSlug, taskKey } from "../src/delivery.js";
+import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks, shSingleQuote, specSlug, taskKey } from "../src/delivery.js";
 
 const TASKS_MD = `# Spec
 
@@ -85,14 +85,30 @@ test("buildDeliveryPrompt omits any PR instruction by default (SPEC-030 auto-PR 
   assert.ok(!/gh pr create/.test(prompt));
 });
 
-test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on", () => {
+test("buildDeliveryPrompt appends a PR instruction when autoOpenPr is on, no baseBranch → plain --fill", () => {
   const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
   assert.match(prompt, /open a pull request/i);
   assert.match(prompt, /gh pr create --fill/);
   assert.match(prompt, /pre-authorised/i);
+  assert.ok(!/--base/.test(prompt), "no baseBranch given → no --base flag");
 });
 
-test("buildDeliveryPrompt auto-PR never interpolates a branch into the command (no --base — injection-safe)", () => {
-  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true });
-  assert.ok(!/--base/.test(prompt), "the base is left to gh's default (feature → repo default), no branch in the shell command");
+test("buildDeliveryPrompt auto-PR targets the feature branch when given, shell-quoted (SPEC-031)", () => {
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "feat/x" });
+  assert.match(prompt, /gh pr create --base 'feat\/x' --fill/, "targets the feature branch, single-quoted");
+  assert.match(prompt, /the `feat\/x` branch/, "prose names the base branch");
+});
+
+test("shSingleQuote wraps in single quotes and POSIX-escapes an embedded quote", () => {
+  assert.equal(shSingleQuote("feat/x"), "'feat/x'");
+  assert.equal(shSingleQuote("feat/$(whoami)"), "'feat/$(whoami)'", "metacharacters stay inert inside single quotes");
+  assert.equal(shSingleQuote("o'brien"), "'o'\\''brien'", "an embedded ' is closed, escaped, and reopened");
+});
+
+test("buildDeliveryPrompt shell-quotes a base branch containing shell metacharacters (injection-safe)", () => {
+  // Git ref names can't contain spaces but DO allow `$()` — an unquoted `feat/$(whoami)` would execute.
+  const prompt = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "feat/$(whoami)" });
+  assert.match(prompt, /gh pr create --base 'feat\/\$\(whoami\)' --fill/, "the metacharacters are inside single quotes — inert");
+  const prompt2 = buildDeliveryPrompt("docs/specifications/example.md", parseTasks(TASKS_MD), { autoOpenPr: true, baseBranch: "o'brien" });
+  assert.ok(prompt2.includes("--base 'o'\\''brien'"), "an embedded single quote is POSIX-escaped");
 });
