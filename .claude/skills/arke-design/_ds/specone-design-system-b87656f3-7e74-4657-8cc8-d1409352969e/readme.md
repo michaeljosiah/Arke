@@ -54,6 +54,8 @@ Microcopy: button = verb-first sentence case (`Generate specification`, `Approve
 
 The look is **quiet monochrome infrastructure**: white surfaces, neutral hairline borders, near-black primary, and a single red reserved for destructive/blocked states.
 
+> **Arke amendment (SPEC-033):** the default **brand accent is teal (`#0E7490`)**, applied to `--primary`/`--ring` (primary actions, the `//Arke` wordmark, active/selected states, focus ring). Surfaces, body text and the neutral `--accent` hover token stay monochrome — teal is a restrained brand tint, not a recolour. `mono` restores the near-black primary described below.
+
 ### Color (shadcn token contract)
 - **Surfaces:** `--background` / `--card` white; `--muted` / `--secondary` `#F5F5F5` for recessed strips, hover, and segmented controls.
 - **Text:** `--foreground` `#0A0A0A`; `--muted-foreground` `#737373` for secondary/labels. A full **neutral ramp** (`--neutral-50…950`) is available for fine control.

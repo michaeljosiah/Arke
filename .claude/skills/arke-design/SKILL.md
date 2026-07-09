@@ -15,10 +15,13 @@ description: >-
 
 This skill is the **canonical design template for Arke**. Every Arke UI surface — and
 every Arke specification that touches a UI — should follow it. The look is **quiet
-monochrome infrastructure**: white surfaces, neutral hairline borders, near-black
-primary, a single red reserved for destructive/blocked states, **Geist** for everything,
-**Geist Mono** for code/IDs/paths, **Lucide** line icons, sentence-case copy, British
-spelling, no emoji.
+monochrome infrastructure with a teal brand accent**: white surfaces, neutral hairline
+borders, a **teal brand accent (`#0E7490`) on primary actions and the focus ring**
+(SPEC-033, applied via `--primary`/`--ring`; `mono` restores the near-black primary), a
+single red reserved for destructive/blocked states, **Geist** for everything, **Geist
+Mono** for code/IDs/paths, **Lucide** line icons, sentence-case copy, British spelling,
+no emoji. Surfaces, body text and the neutral `--accent` hover token stay monochrome — the
+teal is a restrained brand tint, not a recolour.
 
 > Note on naming: this bundle was generated in the project's "SpecOne" era; the product
 > is now **Arke**. The tokens, components and screens are unchanged and authoritative —

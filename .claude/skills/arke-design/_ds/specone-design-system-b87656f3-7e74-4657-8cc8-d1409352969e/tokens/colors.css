@@ -79,7 +79,9 @@
   --selection-bg: var(--neutral-200);
   --selection-fg: var(--foreground);
 
-  /* Legacy brand names → monochrome, so nothing renders teal/orange */
+  /* Legacy brand names → they follow --primary (SPEC-033: the brand accent is teal by default,
+     set on --primary/--ring at runtime; 'mono' restores the near-black primary). Nothing renders
+     orange. */
   --teal:        var(--primary);
   --teal-700:    #000000;
   --bright:      var(--muted-foreground);

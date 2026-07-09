@@ -1,7 +1,7 @@
 import React from 'react';
 import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
-import { AgentMessage, Button, Textarea, Badge, StatusDot } from '../ds';
+import { AgentMessage, Button, Textarea, Badge, StatusDot, SplitPane, Markdown } from '../ds';
 import { store, useStore } from '../store';
 import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected, fetchModels, configureAgent } from '../live';
 
@@ -39,7 +39,10 @@ function RequirementBlock({ req }: any) {
       e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)', textDecoration: st?.strike ? 'line-through' : 'none' } }, req.title),
       req.deltaKind ? e(DeltaBadge, { kind: req.deltaKind }) : null,
       req.capability ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)' } }, req.capability) : null),
-    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: st?.strike ? 'var(--muted-foreground)' : 'var(--foreground)', textDecoration: st?.strike ? 'line-through' : 'none', whiteSpace: 'pre-wrap' } }, requirementProse(req.body)));
+    // Rendered markdown for the prose (SPEC-032); a REMOVED tombstone stays struck-through plain text.
+    st?.strike
+      ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--muted-foreground)', textDecoration: 'line-through', whiteSpace: 'pre-wrap' } }, requirementProse(req.body))
+      : e(Markdown, { text: requirementProse(req.body), mode: 'preview' }));
 }
 
 /** The requirement prose minus the `capability:`/`delta:` metadata line (shown as a badge instead). */
@@ -61,29 +64,42 @@ function PreviewSection({ section, requirements }: any) {
     e('h3', { style: { margin: '0 0 8px', fontFamily: 'var(--font-sans)', fontSize: 14.5, fontWeight: 600, color: 'var(--foreground)' } }, section.title),
     section.key === 'requirements'
       ? (requirements.length ? requirements.map((r, i) => e(RequirementBlock, { key: i, req: r })) : e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--neutral-400)' } }, 'no requirements yet'))
-      : e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--foreground)', whiteSpace: 'pre-wrap' } }, section.markdown));
+      : e(Markdown, { text: section.markdown || '', mode: 'preview' }));
 }
 
 function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving, reviewed }: any) {
   const fm = doc?.frontmatter ?? {};
   const chip = (t: string, v?: string) => v ? e('span', { key: t, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `${t}: ${v}`) : null;
-  return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)', borderLeft: '1px solid var(--border)' } },
+  // SPEC-032: render the spec as formatted markdown by default; a persisted toggle switches to a raw,
+  // read-only view of the file's exact source (frontmatter + delta metadata lines included).
+  const [mode, setMode] = React.useState<string>(() => { try { return localStorage.getItem('arke.cockpit.previewMode') === 'raw' ? 'raw' : 'rendered'; } catch { return 'rendered'; } });
+  const setModePersist = (m: string) => { setMode(m); try { localStorage.setItem('arke.cockpit.previewMode', m); } catch { /* ignore */ } };
+  const modeToggle = e('div', { role: 'group', 'aria-label': 'Preview mode', style: { display: 'flex', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
+    (['rendered', 'raw'] as const).map((m) => e('button', {
+      key: m, onClick: () => setModePersist(m), 'aria-pressed': mode === m, title: m === 'rendered' ? 'Rendered markdown' : 'Raw source',
+      style: { display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 500, background: mode === m ? 'var(--secondary)' : 'transparent', color: mode === m ? 'var(--foreground)' : 'var(--muted-foreground)' },
+    }, e(Icon, { name: m === 'rendered' ? 'eye' : 'code', size: 12 }), m === 'rendered' ? 'Rendered' : 'Raw')));
+  // The split-pane divider draws the separator between the panels, so no left border here (SPEC-032).
+  return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)' } },
     e('div', { style: { padding: '11px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
       e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'fileText', size: 15 })),
       e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--foreground)' } }, file?.path ?? 'specification'),
       inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'writing…')) : null,
       refreshed ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'refreshed') : null,
       e('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 } },
+        file?.exists ? modeToggle : null,
         // The finalisation gate (SPEC-007) is enforced server-side; mirror it here so the button is
         // disabled until a panel has completed for this spec, with a hint at why.
         !reviewed && file?.exists ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' }, title: 'A multi-model review must complete before this draft can be approved.' }, 'review required') : null,
         e(Button, { size: 'sm', disabled: inFlight || approving || !file?.exists || !reviewed, iconLeft: e(Icon, { name: 'check', size: 14 }), onClick: onApprove }, approving ? 'Approving…' : 'Approve & persist'))),
     e('div', { style: { padding: '9px 20px', background: 'var(--secondary)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 16, flexWrap: 'wrap' } },
       chip('spec', fm.spec_id || file?.specId), chip('status', fm.status || file?.status), chip('branch', fm.branch || file?.branch)),
-    e('div', { style: { padding: '20px 22px', overflowY: 'auto', flex: 1 } },
+    e('div', { style: { padding: mode === 'raw' ? 0 : '20px 22px', overflowY: 'auto', flex: 1 } },
       !file?.exists
         ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)' } }, 'No working specification file found for this spec on the active project.')
-        : (doc?.sections ?? []).map((sec, i) => e(PreviewSection, { key: i, section: sec, requirements: doc.requirements }))),
+        : mode === 'raw'
+          ? e('pre', { style: { margin: 0, padding: '18px 20px', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.6, color: 'var(--foreground)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', userSelect: 'text' } }, file.text || '')
+          : (doc?.sections ?? []).map((sec, i) => e(PreviewSection, { key: i, section: sec, requirements: doc.requirements }))),
   );
 }
 
@@ -371,12 +387,13 @@ function LiveCockpit() {
           return e('div', { key: i + name, style: { display: 'flex', alignItems: 'center', gap: 6, background: 'color-mix(in srgb, var(--secondary) 60%, transparent)', border: '0.5px solid var(--border)', borderRadius: 6, padding: '3px 8px' } },
             e('span', { style: { display: 'flex', color: 'var(--neutral-400)', flex: 'none' } }, e(Icon, { name: 'terminal', size: 11 })),
             e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', fontWeight: 500 } }, name),
-            path ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, path) : null);
+            path ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, path) : null,
+            tc?.result ? e('span', { title: String(tc.result), style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180, marginLeft: 'auto', flex: 'none' } }, '→ ' + String(tc.result).replace(/\s+/g, ' ').slice(0, 90)) : null);
         }))
     : null;
 
-  return e('div', { style: { display: 'flex', height: '100%' } },
-    e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
+  return e(SplitPane, { storageKey: 'arke.cockpit.split',
+    left: e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)' } },
       e('div', { style: { padding: '11px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 } },
         e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Authoring'),
         inFlight ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'agent writing')) : null,
@@ -386,7 +403,7 @@ function LiveCockpit() {
       e('div', { ref: scroller, style: { flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 22 } },
         turns.length === 0 && !showThinking ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, specId ? 'Direct the authoring agents to begin shaping the specification.' : 'Open a specification to author.')
           : turns.map((m: any) => e('div', { key: m.key },
-              e(AgentMessage, { role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model }, m.text || '…'),
+              e(AgentMessage, { role: m.kind, agent: m.kind === 'agent' ? m.agent : undefined, model: m.model, streaming: m.kind === 'agent' && m.streaming }, m.text || '…'),
               m.kind === 'agent' ? e(ToolChips, { tools: m.toolCalls }) : null)),
         // Thinking indicator: agent icon+name header with a spinner + status label inline.
         showThinking ? e('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
@@ -448,8 +465,8 @@ function LiveCockpit() {
               } },
               sending ? e('span', { style: { width: 13, height: 13, borderRadius: 999, border: '2px solid color-mix(in srgb, currentColor 30%, transparent)', borderTopColor: 'currentColor', display: 'inline-block', animation: 'arkeSpinner 0.7s linear infinite' } }) : e(Icon, { name: 'arrowUp', size: 15 }))))),
     ),
-    e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId) }),
-  );
+    right: e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId) }),
+  });
 }
 
 // ============================ DEMO MODE (design baseline) ====================
@@ -486,7 +503,7 @@ function seedSpec() {
 const SEED_MSGS = [
   { id: 'm1', role: 'agent', agent: 'Product Owner', model: 'Opus', text: 'Captured the requirement: payment retries must be idempotent so a duplicated webhook never double-charges. Acceptance criteria drafted as SHALL statements with WHEN/THEN scenarios.' },
   { id: 'm2', role: 'human', text: 'Good. Move the evaluation rules out of scope for v1 and tighten the acceptance criteria.' },
-  { id: 'm3', role: 'agent', agent: 'Technical Architect', model: 'Opus', text: 'Drafting the data model and API contracts from the codebase. An idempotency_key column is added to the payments table; the retry handler keys on it. Preview updated on the right.' },
+  { id: 'm3', role: 'agent', agent: 'Technical Architect', model: 'Opus', text: 'Drafting the data model and API contract from the codebase. The retry handler keys on a unique **idempotency_key**:\n\n- `payments.idempotency_key` — unique, indexed\n- `processed_at` — timestamp, set on first apply\n\n```sql\nALTER TABLE payments\n  ADD COLUMN idempotency_key text UNIQUE,\n  ADD COLUMN processed_at timestamptz;\n```\n\nThe preview on the right reflects the change — see [the contract](https://example.com/retries) for the full `POST /retries` shape.' },
 ];
 
 function MiniSelect({ value, options, onChange, icon }: any) {
@@ -579,7 +596,7 @@ function SpecPreview({ spec, editing }: any) {
       : it.open ? e('span', { style: { flex: 'none', color: 'var(--warning)', display: 'flex', marginTop: 2 } }, e(Icon, { name: 'alert', size: 13 }))
       : e('span', { style: { flex: 'none', color: 'var(--neutral-400)', marginTop: -1 } }, '·'),
     e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, lineHeight: 1.6, color: 'var(--foreground)' } }, it.t));
-  return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)', borderLeft: '1px solid var(--border)' } },
+  return e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)' } },
     e('div', { style: { padding: '11px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
       e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'fileText', size: 15 })),
       e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--foreground)' } }, 'payment-retry.md'),
@@ -652,8 +669,8 @@ function DemoCockpit() {
     }, 400);
   };
 
-  return e('div', { style: { display: 'flex', height: '100%' } },
-    e('div', { style: { width: 430, flex: 'none', display: 'flex', flexDirection: 'column', background: 'var(--background)', minWidth: 0 } },
+  return e(SplitPane, { storageKey: 'arke.cockpit.split',
+    left: e('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--background)' } },
       e('div', { style: { padding: '11px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 } },
         e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', fontWeight: 600 } }, 'Authoring'),
         streaming ? e('span', { style: { display: 'flex', alignItems: 'center', gap: 5 } }, e(StatusDot, { status: 'running', pulse: true }), e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, 'agent writing')) : null,
@@ -671,8 +688,8 @@ function DemoCockpit() {
           e('div', { style: { flex: 1 } }),
           e(Button, { size: 'sm', disabled: streaming, onClick: send }, 'Send'))),
     ),
-    e(SpecPreview, { spec, editing }),
-  );
+    right: e(SpecPreview, { spec, editing }),
+  });
 }
 
 /** The cockpit renders live (wired to the coordinator) once a snapshot has arrived, else the demo. */
