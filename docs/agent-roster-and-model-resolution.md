@@ -1,3 +1,8 @@
+---
+type: architecture
+title: Agent roster & model resolution
+---
+
 # Agent roster & model resolution
 
 The canonical, harness-agnostic definition of the agents a project ships, and the
