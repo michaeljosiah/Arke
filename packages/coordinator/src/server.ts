@@ -13,6 +13,8 @@ import {
   type DeadLetterSink,
   type OpenCodeConfig,
 } from "@arke/adapter-opencode";
+import { CodexAdapter, type CodexConfig } from "@arke/adapter-codex";
+import { loadRegistryConfig } from "./registry-config.js";
 import { Trace } from "./trace.js";
 import { NullAdapter } from "./null-adapter.js";
 import { ClientConnection } from "./client-connection.js";
@@ -383,6 +385,13 @@ export class Coordinator {
     const driver = resolveDriver(rawDriver, endpoint);
     const managed = String(rawMode ?? "").toLowerCase() === "managed";
 
+    if (driver === "codex") {
+      // The Codex leaf adapter (SPEC-034) is runnable, but it has no HTTP endpoint — it spawns a local
+      // `codex app-server`. So it is selected by adding a `codex` instance to `.arke/config.json` (and
+      // reopening the project), NOT via this endpoint-connect flow. Say so plainly rather than reject it
+      // as "not runnable".
+      return { ok: false, driver, reason: "Codex runs from a `codex` instance in .arke/config.json (a local app-server, no endpoint) — add one and reopen the project; it is not connected via an endpoint URL." };
+    }
     if (driver !== "opencode") {
       const label = driver === "omnigent" ? "Omnigent substrate" : driver;
       const v = endpoint ? await this.validateEndpoint(httpBaseFromEndpoint(endpoint)) : { ok: false, reason: "no endpoint" };
@@ -833,6 +842,41 @@ function buildAgents(root: string): AgentRegistry {
   return loadAgentRegistry(root, providers);
 }
 
+/**
+ * Select the Codex leaf adapter (SPEC-034) when a project is configured for it. The PROJECT's own
+ * instances take precedence (SPEC-019): if the project pins any harness, Codex is chosen iff it declares
+ * a `codex` instance and NO `opencode` one (OpenCode wins a tie, preserving the default). Only a project
+ * with NO instances of its own inherits the global config's harness. This ordering matters — a machine-
+ * wide OpenCode instance must NOT suppress a project that explicitly opts into Codex.
+ */
+export function codexInstanceFor(configPath: string): InstanceConfig | undefined {
+  const project = loadRegistryConfig(configPath)?.config.instances ?? [];
+  const pick = (insts: InstanceConfig[]): InstanceConfig | undefined =>
+    insts.some((i) => i.driver === "opencode") ? undefined : insts.find((i) => i.driver === "codex");
+  if (project.length > 0) return pick(project);
+  return pick(loadGlobalConfig(globalConfigPath())?.instances ?? []);
+}
+
+/**
+ * Build a {@link CodexConfig} for a project root (SPEC-034). Codex has no HTTP endpoint — it runs the
+ * app-server in the project root, and its auth is host-side (NFR-1), so the config carries only the cwd.
+ */
+function loadCodexConfig(root: string, _inst: InstanceConfig): CodexConfig {
+  return { cwd: root };
+}
+
+/** Construct + init a {@link CodexAdapter}, degrading to a {@link NullAdapter} if the app-server won't start. */
+async function buildCodexDeps(root: string, inst: InstanceConfig, trace: Trace, grants: GrantStore, agents: AgentRegistry): Promise<ContextDeps> {
+  const adapter = new CodexAdapter(loadCodexConfig(root, inst));
+  try {
+    await adapter.init();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { adapter: new NullAdapter(`codex app-server init failed: ${reason} — is Codex installed and authed?`), trace, grants, endpoints: [], agents };
+  }
+  return { adapter, trace, grants, endpoints: [], agents };
+}
+
 /** Build context dependencies for an arbitrary project root (used to open projects at runtime). */
 async function buildContextDeps(root: string): Promise<ContextDeps> {
   const arke = resolve(root, ".arke");
@@ -841,6 +885,9 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   grants.load();
   const configPath = resolve(arke, "config.json");
   const agents = buildAgents(root);
+  // SPEC-034: a project configured for the Codex leaf adapter runs on it instead of OpenCode.
+  const codexInst = codexInstanceFor(configPath);
+  if (codexInst) return buildCodexDeps(root, codexInst, trace, grants, agents);
   const config = loadOpenCodeConfig({ configPath, baseDir: root, globalConfigPath: globalConfigPath() });
   // SPEC-018 per-project harness runners: a MANAGED context whose root differs from the default
   // project gets its own OpenCode on a per-root port — this build cannot serve a non-primary
@@ -880,6 +927,9 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
 /** Build the DEFAULT project's adapter (uses the env-overridable paths for back-compat). */
 async function buildDefaultDeps(trace: Trace, grants: GrantStore): Promise<ContextDeps> {
   const agents = buildAgents(REPO_ROOT);
+  // SPEC-034: the default project may itself be configured for Codex.
+  const codexInst = codexInstanceFor(CONFIG_PATH);
+  if (codexInst) return buildCodexDeps(REPO_ROOT, codexInst, trace, grants, agents);
   const config = loadOpenCodeConfig({ configPath: CONFIG_PATH, baseDir: REPO_ROOT, globalConfigPath: globalConfigPath() });
   if (!config) {
     const present = existsSync(CONFIG_PATH);

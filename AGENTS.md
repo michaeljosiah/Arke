@@ -38,6 +38,10 @@ Read `docs/PRD-Arke.html` for the full product definition.
   normalizes + validates them, folds a read model, persists the audit trace, pushes
   ordered/sequenced events to the client. No cloud backend on the hot path.
 - `packages/adapter-opencode` — the first harness adapter (OpenCode headless server + SSE).
+- `packages/adapter-codex` — the second **leaf** harness adapter (OpenAI Codex over `codex app-server`
+  JSON-RPC/stdio), proving the neutral `HarnessAdapter` seam against a transport that shares nothing with
+  OpenCode's HTTP/SSE (SPEC-034). Selected when a project pins a `codex` instance in `.arke/config.json`.
+  (`packages/adapter-omnigent` is the separate *meta-harness* substrate spike, ADR-0002.)
 - `packages/client` — the React orchestrator UI (cockpit, board, review, generation, …).
 - `apps/desktop` — Electron shell that embeds the coordinator (one signed app).
 - `.opencode/agents` — the versioned agent roster (spec-author, architect, reviewer-a,
