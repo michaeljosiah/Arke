@@ -68,7 +68,7 @@ import {
   type ArtifactProposal,
 } from "./generation.js";
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
-import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
+import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { computeRepoStatus, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
@@ -729,7 +729,7 @@ export class ProjectContext {
    * can still have its permissions saved); `permission` undefined leaves the block, whereas an explicit
    * empty map CLEARS it; an invalid permission verb (only `allow|ask|deny`) is rejected before any write.
    */
-  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown, rawPermission?: unknown, rawMode?: unknown): Promise<{ name: string; model?: string; reasoningEffort?: string; permission?: Record<string, string>; mode?: string }> {
+  async configureAgent(rawName: unknown, rawProvider: unknown, rawModel: unknown, rawEffort: unknown, rawPermission?: unknown, rawMode?: unknown, rawTools?: unknown): Promise<{ name: string; model?: string; reasoningEffort?: string; permission?: Record<string, string>; mode?: string; tools?: Array<{ name: string; kind: string }> }> {
     const name = String(rawName ?? "");
     // Guard the path segment: agent names index a directory, so only a safe slug is addressable.
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
@@ -745,12 +745,20 @@ export class ProjectContext {
     const permission = sanitizePermission(rawPermission); // undefined = leave; {} = clear; {…} = set (verbs validated)
     const mode = rawMode ? String(rawMode).trim() : undefined;
     if (mode && mode !== "primary" && mode !== "subagent" && mode !== "all") throw new Error(`invalid mode '${mode}' (expected primary | subagent | all)`);
-    if (!hasModel && permission === undefined && !mode) throw new Error("nothing to update — provide a model, permission, or mode");
+    // Tools (SPEC-021): undefined = leave the tools block; an object (incl. {}) = replace it wholesale
+    // (the client sends the FULL merged map — MCP entries it edited plus any function/agent entries it
+    // preserved — so a non-MCP tool is never dropped by the MCP-focused editor).
+    const hasTools = rawTools !== undefined && rawTools !== null;
+    const tools = hasTools ? (rawTools as Parameters<typeof setAgentTools>[1]) : undefined;
+    if (!hasModel && permission === undefined && !mode && !hasTools) throw new Error("nothing to update — provide a model, permission, mode, or tools");
 
     const agentDir = resolve(this.root, "agents", name);
     if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
     if (!existsSync(resolve(agentDir, "config.yaml"))) throw new Error(`agent '${name}' has no config.yaml image`);
 
+    // Tools FIRST: setAgentTools self-validates (NFR-1 + malformed) and rolls the file back on failure,
+    // so a bad tools edit aborts before any model/mode/permission write is applied (no partial edit).
+    if (hasTools) setAgentTools(agentDir, tools!);
     if (hasModel) setAgentModel(agentDir, full, effort);
     if (mode) setAgentMode(agentDir, mode);
     if (permission !== undefined) setAgentPermission(agentDir, permission);
@@ -762,10 +770,32 @@ export class ProjectContext {
     // clobbers the prompt (the reason an earlier version skipped it). A model edit also rides the
     // per-message dispatch override, but rewriting it here keeps the materialised file consistent.
     const img = this.agents.image(name);
-    if (img) await this.adapter.materializeAgent?.(img);
-    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) });
+    let cap: CapabilityMaterialisation | undefined;
+    if (img) {
+      await this.adapter.materializeAgent?.(img);
+      // A tools edit must reach native config too: materializeCapabilities writes the agent's MCP servers
+      // into `opencode.json`, so without this a newly-added MCP server would never spawn (SPEC-021).
+      if (hasTools && this.adapter.materializeCapabilities) cap = await this.adapter.materializeCapabilities(img);
+    }
+    const toolSummary = img ? Object.entries(img.tools).map(([n, t]) => ({ name: n, kind: t.type })) : undefined;
+    await this.trace.write({ kind: "agent.configured", projectId: this.projectId, name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}), ...(hasTools ? { tools: toolSummary } : {}), ...(cap ? { registered: cap.registered, unsupported: cap.unsupported } : {}) });
     await this.refreshRegistry(); // emit registry.updated + refresh the snapshot roster
-    return { name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}) };
+    return { name, ...(hasModel ? { model: full } : {}), ...(effort ? { reasoningEffort: effort } : {}), ...(mode ? { mode } : {}), ...(permission !== undefined ? { permission } : {}), ...(hasTools ? { tools: toolSummary } : {}) };
+  }
+
+  /**
+   * Return one agent's FULL editable capability wiring (SPEC-021) — the read half of the tools editor.
+   * Unlike the roster projection (names + kinds only), this carries each MCP tool's command/args/url and
+   * its `environment`/`headers` — but ONLY as they sit in the tracked `config.yaml`, which by NFR-1 holds
+   * `${VAR}` references, never resolved secrets. It is safe to return to the operator (who can already
+   * read the file); no credential value is ever materialised here.
+   */
+  agentImageTools(rawName: unknown): { name: string; tools: Record<string, unknown> } {
+    const name = String(rawName ?? "");
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
+    const img = this.agents.image(name);
+    if (!img) throw new Error(`unknown agent '${name}'`);
+    return { name, tools: img.tools as Record<string, unknown> };
   }
 
   /**
@@ -2419,8 +2449,10 @@ export class ProjectContext {
         return this.adapter.capabilities().has("models") && this.adapter.listModels
           ? await this.adapter.listModels().catch(() => [])
           : [];
-      case "agent.configure": // SPEC-016 revised + SPEC-021: rewrite an agent's model+effort (+ permission + mode)
-        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort, a.permission, a.mode);
+      case "agent.configure": // SPEC-016 revised + SPEC-021: rewrite an agent's model+effort (+ permission + mode + tools)
+        return this.configureAgent(a.name, a.provider, a.model, a.reasoningEffort, a.permission, a.mode, a.tools);
+      case "agent.get": // SPEC-021: the agent's full editable tool wiring (config.yaml ${VAR} refs, no secrets)
+        return this.agentImageTools(a.name);
       case "agent.create": // SPEC-021: create a new agent image from the editor's structured spec
         return this.createAgent(a.spec ?? a);
       case "registry.get":

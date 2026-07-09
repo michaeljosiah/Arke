@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Tabs, Input } from '../ds';
 import { Page, SectionHead, Empty, ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { fetchModels, fetchHarnessCapabilities, createAgent, configureAgent, isCoordinatorConnected } from '../live';
+import { fetchModels, fetchHarnessCapabilities, createAgent, configureAgent, fetchAgentTools, isCoordinatorConnected } from '../live';
 
 const e = React.createElement;
 
@@ -141,6 +141,44 @@ function ToolEditor({ tool, caps, onChange, onRemove }: any) {
   );
 }
 
+/**
+ * Split an agent's full typed tools map (from `agent.get`) into the MCP entries the editor edits and the
+ * non-MCP entries (function/agent tools) it preserves verbatim — so saving the MCP edits never drops a
+ * function/agent tool the MCP-focused editor doesn't render (SPEC-021).
+ */
+function toEditorTools(full: Record<string, any>): { mcp: any[]; rest: Record<string, any> } {
+  const mcp: any[] = [];
+  const rest: Record<string, any> = {};
+  for (const [name, t] of Object.entries(full || {})) {
+    if (t && (t as any).type === 'mcp') {
+      const tool = t as any;
+      if (tool.transport === 'remote' || (tool.url && !tool.command)) {
+        mcp.push({ name, transport: 'remote', url: tool.url || '', headers: Object.entries(tool.headers || {}).map(([k, v]) => ({ k, v })), environment: [] });
+      } else {
+        mcp.push({ name, transport: 'local', command: tool.command || '', argsText: (tool.args || []).join(' '), environment: Object.entries(tool.environment || {}).map(([k, v]) => ({ k, v })), headers: [] });
+      }
+    } else {
+      rest[name] = t; // function / agent tool — kept as-is, re-sent on save so it isn't lost
+    }
+  }
+  return { mcp, rest };
+}
+
+/** Build the `agent.create`/`agent.configure` MCP tools map from the editor's tool rows (SPEC-021). */
+function buildMcpToolMap(tools: any[]): Record<string, any> {
+  const map: Record<string, any> = {};
+  for (const t of tools) {
+    if (!t.name) continue;
+    if (t.transport === 'remote') {
+      map[t.name] = { type: 'mcp', transport: 'remote', url: t.url, ...(t.headers?.length ? { headers: Object.fromEntries(t.headers.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
+    } else {
+      const args = (t.argsText || '').trim() ? t.argsText.trim().split(/\s+/) : undefined;
+      map[t.name] = { type: 'mcp', transport: 'local', command: t.command, ...(args ? { args } : {}), ...(t.environment?.length ? { environment: Object.fromEntries(t.environment.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
+    }
+  }
+  return map;
+}
+
 const PERMISSION_KEYS = ['read', 'edit', 'write', 'bash', 'webfetch', 'websearch'];
 
 /**
@@ -162,6 +200,11 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
   const [mode, setMode] = React.useState(existing?.mode || 'subagent');
   const [perms, setPerms] = React.useState<any[]>(Object.entries(existing?.permission || {}).map(([k, v]) => ({ k, v })));
   const [tools, setTools] = React.useState<any[]>([]);
+  // SPEC-021: edit mode loads the agent's current MCP tools (via agent.get) into the editor; non-MCP
+  // tools (function/agent) are preserved verbatim and re-merged on save. `toolsLoaded` guards a failed
+  // fetch from sending an empty map that would clear the agent's tools.
+  const [preservedTools, setPreservedTools] = React.useState<Record<string, any>>({});
+  const [toolsLoaded, setToolsLoaded] = React.useState<boolean>(!existing);
   const [catalog, setCatalog] = React.useState<any[]>([]);
   const [caps, setCaps] = React.useState<any>(null);
   const [saving, setSaving] = React.useState(false);
@@ -179,6 +222,14 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
     loadCatalog();
     if (isCoordinatorConnected()) void fetchHarnessCapabilities().then(setCaps).catch(() => setCaps(null));
   }, [loadCatalog]);
+  // Load the existing agent's editable tool wiring (SPEC-021): the roster carries names+kinds only, so
+  // fetch the full config (command/args/url + ${VAR} env/header refs) to populate the MCP editor.
+  React.useEffect(() => {
+    if (!isEdit || !isCoordinatorConnected()) return;
+    void fetchAgentTools(name)
+      .then((full) => { const { mcp, rest } = toEditorTools(full); setTools(mcp); setPreservedTools(rest); setToolsLoaded(true); })
+      .catch(() => setToolsLoaded(false));
+  }, []);
 
   const providers = React.useMemo(() => {
     const set = new Set<string>((catalog || []).map((m: any) => m.provider));
@@ -212,22 +263,16 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
     if (!model && provider !== 'gateway') { setError('pick a model'); return; }
     setSaving(true);
     const permission = Object.fromEntries(perms.filter((p) => p.k && p.v).map((p) => [p.k, p.v]));
+    const toolMap = buildMcpToolMap(tools);
     let res: any;
     if (isEdit) {
       // Pass permission (even {}) so removing all rows clears the block, and mode so a primary/subagent
       // change persists. An empty model = "leave as-is" (the coordinator keeps a default-model agent).
-      res = await configureAgent(name, provider, model, effort === 'default' ? undefined : effort, permission, mode);
+      // Send tools ONLY when the current picture loaded (else leave them untouched), merging the
+      // preserved non-MCP tools back so the MCP editor never drops a function/agent tool (SPEC-021).
+      const fullTools = toolsLoaded ? { ...preservedTools, ...toolMap } : undefined;
+      res = await configureAgent(name, provider, model, effort === 'default' ? undefined : effort, permission, mode, fullTools);
     } else {
-      const toolMap: any = {};
-      for (const t of tools) {
-        if (!t.name) continue;
-        if (t.transport === 'remote') {
-          toolMap[t.name] = { type: 'mcp', transport: 'remote', url: t.url, ...(t.headers?.length ? { headers: Object.fromEntries(t.headers.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
-        } else {
-          const args = (t.argsText || '').trim() ? t.argsText.trim().split(/\s+/) : undefined;
-          toolMap[t.name] = { type: 'mcp', transport: 'local', command: t.command, ...(args ? { args } : {}), ...(t.environment?.length ? { environment: Object.fromEntries(t.environment.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
-        }
-      }
       res = await createAgent({
         name, harness, mode,
         ...(description ? { description } : {}),
@@ -280,16 +325,17 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
             e('button', { onClick: () => setPerms(perms.filter((_, j) => j !== i)), style: { display: 'flex', border: 'none', background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 2 } }, e(Icon, { name: 'x', size: 13 })))),
           e('button', { onClick: () => setPerms([...perms, { k: '', v: 'allow' }]), style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add permission'))),
 
-      isEdit
-        ? (existing.tools?.length ? e(EditorRow, { label: 'Tools', hint: 'edit via config.yaml' },
-            e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-              existing.tools.map((t: any) => e('span', { key: t.name, style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 8px' } }, `${t.name} · ${t.kind}`)))) : null)
-        : e(EditorRow, { label: 'Tools (MCP)', hint: caps?.harness ? `${caps.harness}${caps.version ? ' ' + caps.version : ''}` : undefined },
-            mcpUnavailable
-              ? e(Callout, { variant: 'default' }, 'This harness does not support MCP tools.')
-              : e('div', null,
-                  tools.map((t, i) => e(ToolEditor, { key: i, tool: t, caps, onChange: (nt: any) => setTools(tools.map((x, j) => j === i ? nt : x)), onRemove: () => setTools(tools.filter((_, j) => j !== i)) })),
-                  e('button', { onClick: () => setTools([...tools, { name: '', transport: (caps && caps.mcp?.local === false) ? 'remote' : 'local', environment: [], headers: [] }]), style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add MCP server'))),
+      // Tools (MCP) — editable on BOTH create and edit (SPEC-021). Edit mode loads the agent's current
+      // servers via agent.get; function/agent tools are preserved and shown as a read-only note.
+      e(EditorRow, { label: 'Tools (MCP)', hint: caps?.harness ? `${caps.harness}${caps.version ? ' ' + caps.version : ''}` : undefined },
+        mcpUnavailable
+          ? e(Callout, { variant: 'default' }, 'This harness does not support MCP tools.')
+          : e('div', null,
+              tools.map((t, i) => e(ToolEditor, { key: i, tool: t, caps, onChange: (nt: any) => setTools(tools.map((x, j) => j === i ? nt : x)), onRemove: () => setTools(tools.filter((_, j) => j !== i)) })),
+              e('button', { onClick: () => setTools([...tools, { name: '', transport: (caps && caps.mcp?.local === false) ? 'remote' : 'local', environment: [], headers: [] }]), style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add MCP server'),
+              Object.keys(preservedTools).length
+                ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', marginTop: 6 } }, `${Object.keys(preservedTools).length} function/agent tool(s) preserved — edit via config.yaml`)
+                : null)),
 
       error ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--destructive)', marginTop: 6, marginBottom: 4 } }, error) : null,
       e('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 } },
