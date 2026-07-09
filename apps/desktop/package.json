@@ -1,6 +1,6 @@
 {
   "name": "@arke/desktop",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "Electron desktop shell that embeds the coordinator and serves the React client as one signed app (PRD §8.6, D16; SPEC-022).",
   "author": "Arke",
