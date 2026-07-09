@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -420,7 +420,11 @@ export class ProjectContext {
         const abs = resolve(dir, name);
         let st;
         try {
-          st = statSync(abs);
+          // lstat (not stat): a symlink resolves to isFile()/isDirectory() = false, so it is NEITHER
+          // descended into NOR read — this both prevents a symlink cycle (e.g. `docs/loop -> ..`) from
+          // hanging the walk AND stops a symlink escaping the project root, matching the realpath/
+          // isWithinRoot confinement `findSpecFile`/`specLibrary` already enforce elsewhere (SPEC-027).
+          st = lstatSync(abs);
         } catch {
           continue;
         }
@@ -429,7 +433,7 @@ export class ProjectContext {
           walk(abs);
           continue;
         }
-        if (!name.endsWith(".md") || name === "index.md") continue; // generated index is `type: index`, never grounding
+        if (!st.isFile() || !name.endsWith(".md") || name === "index.md") continue; // generated index is `type: index`, never grounding
         const relPath = relative(this.root, abs).replaceAll("\\", "/");
         try {
           const doc = groundingDocFromFile(relPath, readFileSync(abs, "utf8"), summaryBudget ? { summaryBudget } : {});
@@ -1833,6 +1837,7 @@ export class ProjectContext {
       sectionHashes.set(s.title.toLowerCase(), h);
     }
     const requirementsSectionHash = sectionHashes.get("requirements") ?? sectionHashOf("");
+    this.groundingDigestCache = null; // ground the panel on the CURRENT docs/ tree (SPEC-027, see session.create)
     const grounding = this.groundingSummary();
     const prompt = buildReviewerPrompt(found.text, grounding);
     const panel: ReviewPanel = {
@@ -2236,7 +2241,9 @@ export class ProjectContext {
         const abs = resolve(dir, f);
         let st;
         try {
-          st = statSync(abs);
+          // lstat (not stat) so a symlink is neither followed out of the grounding root nor descended
+          // into — a symlink cycle can't hang the walk, and an escaping link can't leak external paths.
+          st = lstatSync(abs);
         } catch {
           continue;
         }
@@ -2257,6 +2264,11 @@ export class ProjectContext {
       case "session.create": {
         const specId = String(a.specId ?? "");
         const parent = a.parent ? String(a.parent) : undefined;
+        // Re-ground each new session on the CURRENT docs/ tree (SPEC-027): the digest cache lives for the
+        // whole project-context, and under the sweep-only fallback (headless/CI, no docs watcher) a
+        // grounding doc added after project-open would otherwise never invalidate it. Nulling at the
+        // session boundary — "session starts" — keeps a fresh session's grounding current regardless.
+        this.groundingDigestCache = null;
         const ref = await this.adapter.createSession({ specId, ...(parent ? { parent } : {}) });
         await this.emit({
           seq: 0,

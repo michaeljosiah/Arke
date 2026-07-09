@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -236,5 +236,32 @@ test("a nested local upload is surfaced by the recursive grounding list, never a
   assert.ok(existsSync(resolve(dir, ".arke", "grounding", "nested", "deep", "secret.md")), "the upload lives in the local tier");
   assert.ok(!existsSync(resolve(dir, "docs", "secret.md")), "it was not auto-promoted into the tracked docs/ tree");
   assert.ok(!existsSync(resolve(dir, "docs", "nested")), "no part of the local path leaked into docs/");
+  ws.close();
+});
+
+test("a symlink cycle under the grounding tree does not hang the recursive walk (lstat, not stat)", async () => {
+  const dir = repoWithGrounding();
+  // A self-referential directory symlink would make a stat-following walk recurse forever. Skip where
+  // the OS won't let us create one (Windows without privilege) — the lstat guard is still exercised on CI.
+  mkdirSync(resolve(dir, ".arke", "grounding"), { recursive: true });
+  let linked = false;
+  try {
+    symlinkSync(resolve(dir, ".arke", "grounding"), resolve(dir, ".arke", "grounding", "loop"), "dir");
+    linked = true;
+  } catch {
+    linked = false;
+  }
+  if (!linked) return;
+
+  const adapter = new CapturingAdapter();
+  const { c, port } = await start(dir, adapter);
+  after(() => c.stop());
+  const { ws, ready, request } = connect(port);
+  await ready;
+
+  // grounding.list must return promptly (no stack overflow / hang) and must NOT descend the symlink.
+  const list = await request("grounding.list");
+  assert.equal(list.ok, true);
+  assert.ok(!list.result.some((g: { name: string }) => g.name.includes("loop")), "the symlink is neither followed nor listed");
   ws.close();
 });

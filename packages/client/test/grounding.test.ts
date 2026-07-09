@@ -55,6 +55,21 @@ test("groundingDocFromFile falls back to H1 then filename for the title", () => 
   assert.equal(groundingDocFromFile("docs/house-rules.md", noTitleNoH1)!.title, "house-rules");
 });
 
+test("an EMPTY frontmatter title falls through to H1 (not left blank)", () => {
+  const emptyTitle = `---\ntype: architecture\ntitle:\n---\n\n# The Real Title\n\nBody.\n`;
+  assert.equal(groundingDocFromFile("docs/x.md", emptyTitle)!.title, "The Real Title", "a bare `title:` must not win over the H1");
+});
+
+test("a pathologically long title is capped so one entry cannot blow the total budget", () => {
+  const longTitle = "T".repeat(5000);
+  const doc = groundingDocFromFile("docs/x.md", `---\ntype: product-overview\ntitle: ${longTitle}\n---\n\nBody.\n`)!;
+  assert.ok(doc.title.length <= 201, "title capped near TITLE_BUDGET (200) + ellipsis");
+  assert.ok(doc.title.endsWith("…"));
+  // Even ranked first and under a tiny budget, the "always keep first entry" guard now stays bounded.
+  const text = renderGroundingDigest({ businessGrounding: [doc], specIndex: [], sessionUploads: [] }, { totalBudget: 100 });
+  assert.ok(text.length < 1000, "bounded despite an adversarial title");
+});
+
 test("summary skips headings, HTML comments, and blockquote callouts", () => {
   const body = `# Heading\n\n<!-- a comment -->\n\n> A callout note, not the summary.\n\nThe real first paragraph.\n`;
   assert.equal(firstMeaningfulParagraph(body), "The real first paragraph.");

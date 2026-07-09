@@ -77,6 +77,8 @@ export interface GroundingDigest {
 
 export const DEFAULT_SUMMARY_BUDGET = 500;
 export const DEFAULT_DIGEST_BUDGET = 12000;
+/** Titles come from a single frontmatter line (unbounded) — cap them so one entry can't blow the budget. */
+export const TITLE_BUDGET = 200;
 
 export interface GroundingDocOptions {
   /** Max characters of the per-document summary (default {@link DEFAULT_SUMMARY_BUDGET}). */
@@ -91,7 +93,13 @@ export interface GroundingDocOptions {
 export function groundingDocFromFile(path: string, text: string, opts: GroundingDocOptions = {}): GroundingDoc | null {
   const { data, body } = parseFrontmatter(text);
   if (!isGroundingType(data.type)) return null;
-  const title = (data.title ?? firstH1(body) ?? baseName(path)).trim();
+  // Fall through on an EMPTY frontmatter title (a bare `title:`), not just an absent one — `??` would
+  // keep the empty string; `.find(truthy)` picks the first non-blank of title → H1 → filename. Then cap
+  // it (the title is one unbounded frontmatter line) so a single row can't exceed the total budget.
+  const title = truncate(
+    [data.title?.trim(), firstH1(body)?.trim(), baseName(path)].find((s): s is string => !!s)!,
+    TITLE_BUDGET,
+  );
   const summary = truncate(firstMeaningfulParagraph(body), opts.summaryBudget ?? DEFAULT_SUMMARY_BUDGET);
   return { type: data.type, title, path, summary };
 }
