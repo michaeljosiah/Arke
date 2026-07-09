@@ -130,3 +130,32 @@ test("reject discards the proposal", async () => {
   const again = await request("generation.reject", { specId: "SPEC-GEN", proposalId: proposed.event.sessionId });
   assert.equal(again.result.ok, false);
 });
+
+test("a client connecting AFTER generation.proposed sees the pending proposal in its snapshot (SPEC-013 rehydration)", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const first = connect(port);
+  await first.ready;
+  await first.request("spec.generate", { specId: "SPEC-GEN" });
+  const proposed = await first.waitFor((f) => f.type === "event" && f.event?.type === "generation.proposed");
+
+  // A FRESH connection's snapshot must carry the awaiting-decision proposal — otherwise a reload/late
+  // join renders an empty workspace and the human decision point is silently lost.
+  const second = connect(port);
+  await second.ready;
+  const snap = await second.waitFor((f) => f.type === "snapshot");
+  assert.ok(snap.generation, "snapshot carries the pending proposal");
+  assert.equal(snap.generation.status, "pending-review");
+  assert.equal(snap.generation.specId, "SPEC-GEN");
+  assert.equal(snap.generation.proposalId, proposed.event.sessionId);
+  assert.equal(snap.generation.artifacts.length, 2);
+
+  // Once decided, a subsequent connection's snapshot no longer carries it.
+  await second.request("generation.reject", { specId: "SPEC-GEN", proposalId: proposed.event.sessionId });
+  const third = connect(port);
+  await third.ready;
+  const snap3 = await third.waitFor((f) => f.type === "snapshot");
+  assert.ok(!snap3.generation, "a decided proposal is not rehydrated");
+  first.ws.close(); second.ws.close(); third.ws.close();
+});

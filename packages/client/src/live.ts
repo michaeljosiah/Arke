@@ -217,7 +217,16 @@ function applyEvent(ev: any) {
       break;
     }
     case 'generation.error': {
-      store.set((s: any) => ({ generation: s.generation && s.generation.specId === ev.specId ? { ...s.generation, status: 'error', error: ev.reason } : s.generation, cockpit: { ...s.cockpit, notice: `generation failed — ${ev.reason}` } }));
+      // Surface the failure in the workspace even when NO prior proposal exists (a parse/timeout error
+      // on the approval auto-trigger emits no `generation.proposed`, so `s.generation` is null) — else
+      // the GenError/Retry UI is unreachable and only a cockpit notice shows. Don't clobber a pending
+      // proposal for a DIFFERENT spec; replace only a null slot or the same spec's entry (SPEC-013).
+      store.set((s: any) => ({
+        generation: !s.generation || s.generation.specId === ev.specId
+          ? { specId: ev.specId, proposalId: s.generation?.proposalId ?? '', artifacts: s.generation?.artifacts ?? [], status: 'error', error: ev.reason }
+          : s.generation,
+        cockpit: { ...s.cockpit, notice: `generation failed — ${ev.reason}` },
+      }));
       rail('generation.error', `generation.error · ${ev.specId} · ${ev.reason}`, ts);
       break;
     }
@@ -656,6 +665,11 @@ function applySnapshot(snap: any) {
     repo: snap?.repoIdentity ?? null, // SPEC-025: seed the repository panel on connect (no blank first paint)
     gitBranches: Array.isArray(snap?.gitBranches) ? snap.gitBranches : [],
     autoOpenPr: snap?.delivery?.autoOpenPr ?? false, // SPEC-030: per-project auto-PR preference for the Settings toggle
+    // SPEC-013: a pending-review generation proposal the coordinator is still holding, so a client that
+    // (re)connects after `generation.proposed` sees the awaiting-decision proposal, not an empty workspace.
+    generation: snap?.generation && snap.generation.status === 'pending-review'
+      ? { specId: snap.generation.specId, proposalId: snap.generation.proposalId, artifacts: snap.generation.artifacts || [], status: 'pending-review' }
+      : null,
   });
   applyRegistrySnapshot(snap?.registry); // SPEC-005: live harnesses & model tiering
   void refreshRecents(); // SPEC-018: populate the picker's real recents

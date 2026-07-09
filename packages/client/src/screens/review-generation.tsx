@@ -229,24 +229,19 @@ export function Generation() {
 const TARGET_LABEL: Record<string, string> = { docs: 'Documentation', tests: 'Tests', ticket: 'Tickets', tracking: 'Tracking' };
 const SOR_TARGETS = ['jira', 'github', 'azure-devops'];
 
-/** Centred empty state — no live proposal yet; offers to trigger generation for the active spec. */
-function GenEmpty({ activeSpec }: { activeSpec?: string }) {
-  const [busy, setBusy] = React.useState(false);
-  const gen = async () => {
-    if (!activeSpec) return;
-    setBusy(true);
-    const res = await triggerGenerationLive(activeSpec);
-    setBusy(false);
-    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `generation failed — ${res.error}` } }));
-  };
+/**
+ * Centred empty state — no live proposal. Informational only: generation runs automatically when a
+ * spec is approved (the approved-spec boundary — SPEC-013 — so we do NOT offer a generate-from-here
+ * button that could dispatch against unapproved source or the wrong active spec). Explicit regeneration
+ * belongs on an existing approved proposal, not this empty view.
+ */
+function GenEmpty() {
   return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 40 } },
     e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'sparkle', size: 26 })),
     e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'No generation proposal'),
     e('p', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 480, textAlign: 'center', lineHeight: 1.5 } },
       'When a specification is approved, an agent proposes the downstream artefacts — documentation, tickets, test scaffolds and tracking entries — for you to review here. Nothing is written until you approve.'),
-    e('div', { style: { display: 'flex', gap: 8, marginTop: 2 } },
-      activeSpec ? e(Button, { disabled: busy, iconLeft: e(Icon, { name: busy ? 'refresh' : 'sparkle', size: 14 }), onClick: gen }, busy ? 'Generating…' : 'Generate for ' + activeSpec) : null,
-      e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring')));
+    e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring'));
 }
 
 /** Centred error/timeout state with a Retry that re-triggers generation for the spec. */
@@ -275,7 +270,7 @@ function GenError({ specId, error }: { specId: string; error?: string }) {
  * and fans out. Nothing is written before approval; this screen holds no authoritative state.
  */
 function LiveGeneration() {
-  const { generation, activeSpec } = useStore();
+  const { generation } = useStore();
   const proposalId = generation?.proposalId;
   const [decisions, setDecisions] = React.useState({} as Record<string, ArtifactDecision>);
   const [edits, setEdits] = React.useState({} as Record<string, ArtifactEditInput>);
@@ -290,7 +285,7 @@ function LiveGeneration() {
     setSel(first ? first.id : null);
   }, [proposalId]);
 
-  if (!generation) return e(GenEmpty, { activeSpec });
+  if (!generation) return e(GenEmpty);
   if (generation.status === 'error') return e(GenError, { specId: generation.specId, error: generation.error });
 
   const artifacts = (generation.artifacts || []) as any[];

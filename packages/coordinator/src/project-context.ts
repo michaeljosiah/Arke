@@ -534,8 +534,20 @@ export class ProjectContext {
       // SPEC-030: the per-project auto-PR preference, so the Settings toggle renders its true state on
       // connect without an extra round-trip.
       delivery: { autoOpenPr: loadAutoOpenPr(this.deliveryConfigPath()) },
+      // SPEC-013: a pending-review generation proposal, so a client that (re)connects AFTER the
+      // `generation.proposed` event still sees the awaiting-decision proposal instead of an empty
+      // workspace — otherwise the human decision point is silently lost on reload/late-join.
+      ...(this.pendingProposalSnapshot() ? { generation: this.pendingProposalSnapshot() } : {}),
       ...this.read.repoSnapshot(), // SPEC-025: repoIdentity + gitBranches, so a fresh client isn't blank
     };
+  }
+
+  /** The first pending-review generation proposal, shaped for the snapshot (SPEC-013), or null. */
+  private pendingProposalSnapshot(): { specId: string; proposalId: string; artifacts: unknown[]; status: "pending-review" } | null {
+    for (const [cid, p] of this.generationProposals) {
+      if (p.status === "pending-review") return { specId: cid, proposalId: p.sessionId, artifacts: p.artifacts, status: "pending-review" };
+    }
+    return null;
   }
 
   cardCount(): number {
