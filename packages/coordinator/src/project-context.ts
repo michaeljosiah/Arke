@@ -50,12 +50,17 @@ import {
 } from "./registry.js";
 import { AgentRegistry, loadAgentRegistry } from "./agent-registry.js";
 import {
+  ADJUDICATION_PROMPT_VERSION,
   ISSUE_EXTRACTION_PROMPT_VERSION,
+  buildAdjudicationPrompt,
   buildReviewerPrompt,
+  detectAdjudicatorCollisions,
   detectAgreement,
+  parseDispositions,
   parseReviewerIssues,
   sectionHashOf,
   validateReviewers,
+  type AdjudicationIssue,
   type ReviewerConfig,
 } from "./review-panel.js";
 import {
@@ -134,6 +139,32 @@ interface ReviewPanel {
   status: "running" | "complete" | "failed";
 }
 
+/** SPEC-035: the bounded, author-adjudicated review loop for one draft. Each round convenes a panel then
+ *  runs one `spec-author` adjudication turn; the loop reconvenes only when the author accepts a blocking
+ *  issue AND the spec's normative content changes, under the round cap, else it converges. */
+interface ReviewLoopState {
+  specId: string; // canonical
+  round: number; // 1-based; the current round
+  panelId?: string; // the current round's panel
+  reviewers: ReviewerConfig[]; // re-validated each round so a config change is picked up
+  branch?: string;
+  /** Normative hash (Requirements + Design, SPEC-008) at the START of the current round — the reviewers'
+   *  view — so a material change from the author's edits is detectable after adjudication. */
+  normativeHashBeforeRound: string;
+  /** Per-round re-prompt counter for missing/unjustified blocking-issue dispositions. */
+  adjudicationRetries: number;
+  /** Blocking issues the author DISMISSED this round (with rationale) — surfaced to the human at approval. */
+  unresolvedBlockers: Array<{ issueId: string; section: string; text: string; rationale: string }>;
+  /** Every review-machinery session id (reviewers + adjudication turns) this loop has spawned, so the
+   *  approve-guard exclusion set is cleaned when the loop ends. */
+  machinery: string[];
+}
+
+/** SPEC-035: the review loop runs at most this many rounds; the human is the backstop past the cap. */
+const MAX_REVIEW_ROUNDS = 3;
+/** SPEC-035: how many times a round re-prompts the author for a missing/unjustified blocker disposition. */
+const ADJUDICATION_RETRY_LIMIT = 1;
+
 /** A spec library entry projected from a file's frontmatter + coordinator lifecycle state (SPEC-008). */
 export interface SpecLibraryRecord {
   specId: string;
@@ -174,6 +205,14 @@ export class ProjectContext {
   private readonly panels = new Map<string, ReviewPanel>();
   /** Reviewer session id → its panel + role, so the pump routes reviewer output to the panel. */
   private readonly reviewerSessions = new Map<string, { panelId: string; role: string }>();
+  /** SPEC-035: active author-adjudicated review loops by canonical specId (in-memory; the gate is durable). */
+  private readonly reviewLoops = new Map<string, ReviewLoopState>();
+  /** SPEC-035: adjudication session id → its loop coordinates, so the pump routes the author's turn back. */
+  private readonly adjudicationSessions = new Map<string, { specId: string; panelId: string; round: number }>();
+  /** SPEC-035: session ids that are review MACHINERY (reviewers + the author's adjudication turn) for a live
+   *  loop — excluded from approveDraft's "authoring session running" guard so a still-settling adjudication
+   *  turn doesn't block its own auto-promotion. Cleared when the loop converges or fails. */
+  private readonly reviewMachinerySessions = new Set<string>();
   /** Spec lifecycle state by canonical specId, driven by PR webhooks (SPEC-008). */
   private readonly specRecords = new Map<string, SpecRecordState>();
   /** Sessions whose diff a human has approved for PR (SPEC-011 diff-gate; idempotency guard). */
@@ -191,8 +230,9 @@ export class ProjectContext {
    *  can remove the worktree/branch the same way a pre-dispatch failure does — otherwise the deterministic
    *  branch name lingers and every retry trips the branch-collision guard. */
   private readonly deliveryWorktrees = new Map<string, { wtPath: string; branch: string }>();
-  /** Canonical spec ids with at least one completed review panel — the finalisation gate (SPEC-007). */
-  private readonly completedReviews = new Set<string>();
+  /** Canonical spec ids whose author-adjudicated review loop CONVERGED — the finalisation gate (SPEC-035,
+   *  superseding SPEC-007's bare panel-completion gate). A legacy `review.complete` does NOT satisfy it. */
+  private readonly convergedReviews = new Set<string>();
   /** Specs currently being auto-renamed after titling, so the per-turn trigger is not re-entrant (SPEC-020). */
   private readonly renamingSpecs = new Set<string>();
   /** SPEC-025: last emitted repo.identity signature (remote|default|head) — re-emit only on change. */
@@ -1761,19 +1801,22 @@ export class ProjectContext {
       await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: false, reason: "spec.malformed" });
       throw new Error(reason);
     }
-    // Finalisation gate (SPEC-007): a draft cannot be approved until at least one review panel has
-    // completed for it. Enforced server-side so a direct approveDraft (CLI/op) can't bypass the UI.
-    if (!this.completedReviews.has(cid)) {
-      const reason = "no completed review panel — convene and complete a review before approving";
+    // Finalisation gate (SPEC-035): a draft cannot be approved until its author-adjudicated review loop
+    // has CONVERGED for it (not merely a panel completed). Enforced server-side so a direct approveDraft
+    // (CLI/op) can't bypass the UI.
+    if (!this.convergedReviews.has(cid)) {
+      const reason = "review not converged — run and converge an author-adjudicated review before approving";
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.gate-failed", specId: cid, reason } as DomainEvent);
       await this.trace.write({ kind: "spec.approve", projectId: this.projectId, specId: cid, ok: false, reason: "review.gate-failed" });
       throw new Error(reason);
     }
     // Server-side in-flight guard (the UI guard alone can't protect the exposed CLI/op): never commit
     // while a spec-author/architect AUTHORING session for this spec is running — an unrelated
-    // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7).
+    // implementation task for the same spec must NOT block approval (PR #18 review rounds 5 & 7). Review
+    // MACHINERY sessions (reviewers, the author's adjudication turn — SPEC-035) are excluded: they are
+    // review, not authoring, and the adjudication turn is what DROVE this auto-promotion.
     const cidCard = this.read.snapshot().find((c) => c.specId === cid);
-    if (cidCard?.sessions.some((s) => s.kind === "spec" && s.status === "running")) {
+    if (cidCard?.sessions.some((s) => s.kind === "spec" && s.status === "running" && !this.reviewMachinerySessions.has(s.sessionId))) {
       return fail(`an authoring session for '${cid}' is still running — wait for it to finish before approving`);
     }
     const fmBranch = found.frontmatter.branch;
@@ -1839,10 +1882,12 @@ export class ProjectContext {
   }
 
   /**
-   * `convenePanel` — start a multi-model review of the working draft (SPEC-007). Validates the
-   * reviewer configuration against the registry (pairwise-distinct models, enough distinct capable
-   * models), dispatches each reviewer as a parallel read-only session, and emits `panel.started`.
-   * Passes a reference (`specId`/`branch`), never file content; the coordinator reads the file.
+   * `convenePanel` / `reviewSpec` — start an author-adjudicated review of the working draft (SPEC-035,
+   * superseding SPEC-007's human-adjudicated panel). Seeds a bounded review loop and convenes round 1's
+   * panel: reviewers critique in parallel, then the `spec-author` adjudicates their issues and applies
+   * the accepted ones; the loop reconvenes on a blocker-driven material change (cap {@link
+   * MAX_REVIEW_ROUNDS}) and converges otherwise, satisfying the finalisation gate. Passes a reference
+   * (`specId`/`branch`), never file content; the coordinator reads the file.
    */
   private async convenePanel(
     specId: string,
@@ -1861,12 +1906,56 @@ export class ProjectContext {
     }
     const cid = found.canonicalId;
     const resolvedBranch = fmBranch ?? branch;
+    const reviewers = reviewersArg && reviewersArg.length > 0 ? reviewersArg : [{ role: "reviewer-a" }, { role: "reviewer-b" }];
+
+    // Seed the loop and convene round 1. A superseding review replaces any prior loop/gate for this spec.
+    const loop: ReviewLoopState = {
+      specId: cid,
+      round: 1,
+      reviewers,
+      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
+      normativeHashBeforeRound: normativeHash(found.text),
+      adjudicationRetries: 0,
+      unresolvedBlockers: [],
+      machinery: [],
+    };
+    this.reviewLoops.set(cid, loop);
+    this.convergedReviews.delete(cid); // a fresh review must re-converge before the gate is satisfied
+    let panel: ReviewPanel;
+    try {
+      panel = await this.startPanel(cid, reviewers, resolvedBranch);
+    } catch (err) {
+      this.reviewLoops.delete(cid);
+      throw err;
+    }
+    loop.panelId = panel.panelId;
+    this.trackMachinery(loop, panel.reviewers.map((r) => r.sessionId));
+
+    return {
+      panelId: panel.panelId,
+      specId: cid,
+      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
+      convened: true,
+      reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })),
+    };
+  }
+
+  /**
+   * Convene one panel for a review round (SPEC-007 mechanism, reused by the SPEC-035 loop): validate the
+   * reviewers (pairwise-distinct models), create a read-only session per reviewer, register the fully
+   * populated panel, announce `panel.started`, then dispatch each reviewer in parallel. Throws (after
+   * emitting `panel.config-error`) if the reviewer configuration is invalid. Reads the file fresh so each
+   * round reviews the current draft.
+   */
+  private async startPanel(cid: string, reviewersArg: ReviewerConfig[], resolvedBranch?: string): Promise<ReviewPanel> {
+    const found = this.findSpecFile(cid);
+    if (!found) throw new Error(`no specification file found for '${cid}' under docs/specifications`);
+    const doc = parseSpecDoc(found.text);
 
     // Validate reviewers against the agent registry (SPEC-007): at least two reviewers, each with a
     // declared model, and every pair distinct. Refuse rather than run a panel with unverifiable
     // independence — validateReviewers surfaces the precise reason (missing agent, no model, or dup).
-    const reviewers = reviewersArg && reviewersArg.length > 0 ? reviewersArg : [{ role: "reviewer-a" }, { role: "reviewer-b" }];
-    const validation = validateReviewers(this.agents, reviewers);
+    const validation = validateReviewers(this.agents, reviewersArg);
     if (!validation.ok) {
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.config-error", specId: cid, reason: validation.reason ?? "invalid reviewer configuration" } as DomainEvent);
       throw new Error(validation.reason ?? "invalid reviewer configuration");
@@ -1932,27 +2021,23 @@ export class ProjectContext {
     for (const r of panel.reviewers) {
       await this.adapter.dispatchAsync({ sessionId: r.sessionId, agent: r.role, ...this.modelArg(r.role), parts: [{ type: "text", text: prompt }] });
     }
-
-    return {
-      panelId,
-      specId: cid,
-      ...(resolvedBranch ? { branch: resolvedBranch } : {}),
-      convened: true,
-      reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })),
-    };
+    return panel;
   }
 
   /**
-   * Rebuild the finalisation-gate state from the durable trace on startup (SPEC-007): the live panel
-   * view is in-memory and lost on restart, but every completed panel wrote a `review.complete` record,
-   * so the gate (which specs have a completed review) survives a coordinator restart.
+   * Rebuild the finalisation-gate state from the durable trace on startup (SPEC-035): the live loop is
+   * in-memory and lost on restart, but every CONVERGED loop wrote a `review.converged` record, so the
+   * gate (which specs have a converged review) survives a coordinator restart. A legacy `review.complete`
+   * (a bare panel completion, pre-agent-adjudication) does NOT satisfy the new gate — those drafts must
+   * run a fresh author-adjudicated loop.
    */
   private async reconstructReviewGate(): Promise<void> {
     // Read through the Trace abstraction (the single owner of the path/format) rather than
-    // re-deriving the trace location here. One pass rebuilds both the review gate (SPEC-007) and the
+    // re-deriving the trace location here. One pass rebuilds both the review gate (SPEC-035) and the
     // pr.approve idempotency set (SPEC-011) so a restart can't re-open a second PR for a session.
     for (const rec of await this.trace.readAll()) {
-      if (rec.kind === "review.complete" && typeof rec.specId === "string") this.completedReviews.add(rec.specId);
+      if (rec.kind === "review.converged" && typeof rec.specId === "string") this.convergedReviews.add(rec.specId);
+      if (rec.kind === "review.sent-back" && typeof rec.specId === "string") this.convergedReviews.delete(rec.specId);
       if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
     }
   }
@@ -2022,21 +2107,234 @@ export class ProjectContext {
     await this.maybeCompletePanel(panel);
   }
 
-  /** Complete a panel once no reviewer is still running; satisfy the review gate unless all errored. */
+  /**
+   * Complete a panel once no reviewer is still running (SPEC-035). Panel completion no longer satisfies
+   * the gate on its own — instead it hands the current round to the author's adjudication turn. A panel
+   * where every reviewer errored fails the loop (the gate stays unsatisfied).
+   */
   private async maybeCompletePanel(panel: ReviewPanel): Promise<void> {
     if (panel.reviewers.some((r) => r.status === "running")) return;
     const anySucceeded = panel.reviewers.some((r) => r.status === "done");
     panel.status = anySucceeded ? "complete" : "failed";
     for (const r of panel.reviewers) this.reviewerSessions.delete(r.sessionId);
-    if (panel.status === "complete") {
-      this.completedReviews.add(panel.specId); // satisfies the finalisation gate
-      await this.trace.write({ kind: "review.complete", projectId: this.projectId, specId: panel.specId, panelId: panel.panelId });
-    }
+    await this.trace.write({ kind: "review.complete", projectId: this.projectId, specId: panel.specId, panelId: panel.panelId, status: panel.status });
     await this.emit({
       seq: 0, ts: 0, harness: this.adapter.id, type: "panel.complete",
       panelId: panel.panelId, specId: panel.specId, status: panel.status, issueCount: panel.issues.length,
       adjudicatedCount: panel.issues.filter((i) => i.adjudication).length,
     } as DomainEvent);
+    // Hand off to the SPEC-035 loop (only for the loop's CURRENT panel — a late-completing superseded
+    // panel from an earlier round must not re-trigger). A failed panel fails the loop.
+    const loop = this.reviewLoops.get(panel.specId);
+    if (!loop || loop.panelId !== panel.panelId) return;
+    if (panel.status === "failed") {
+      await this.failReviewLoop(loop, "every reviewer errored — no critique to adjudicate");
+      return;
+    }
+    await this.startAdjudication(loop, panel);
+  }
+
+  /**
+   * Dispatch the `spec-author` adjudication turn for a completed round (SPEC-035). The author receives
+   * every reviewer issue and, in one turn, decides accept/dismiss per issue and applies each accepted fix
+   * to the working file. A zero-issue panel converges immediately (nothing to adjudicate). Warns (never
+   * gates) when the author's model collides with a reviewer's.
+   */
+  private async startAdjudication(loop: ReviewLoopState, panel: ReviewPanel, retryNote?: string): Promise<void> {
+    if (panel.issues.length === 0) {
+      await this.convergeLoop(loop); // no critique to fold in — the round (and loop) is done
+      return;
+    }
+    const found = this.findSpecFile(loop.specId);
+    if (!found) {
+      await this.failReviewLoop(loop, "specification file not found for adjudication");
+      return;
+    }
+    // Adjudicator-independence warning (SPEC-035): the author now judges critiques of its own draft, so a
+    // shared model weakens the check. The concrete model stays host-side (trace only); the client sees the
+    // reviewer role. Never a gate — the reviewers remain cross-model against each other.
+    const authorModel = this.agents.image("spec-author")?.executor.config.model;
+    for (const c of detectAdjudicatorCollisions(authorModel, panel.reviewers.map((r) => ({ role: r.role, model: r.model })))) {
+      await this.trace.write({ kind: "panel.adjudicator-model-collision", projectId: this.projectId, panelId: panel.panelId, specId: loop.specId, reviewerRole: c.reviewerRole, model: c.model });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.adjudicator-model-collision", panelId: panel.panelId, reviewerRole: c.reviewerRole } as DomainEvent);
+    }
+
+    const issues: AdjudicationIssue[] = panel.issues.map((i) => ({
+      issueId: i.issueId, reviewerRole: i.reviewerRole, section: i.section, severity: i.severity, text: i.text, agreed: panel.agreedHashes.has(i.sectionHash),
+    }));
+    this.groundingDigestCache = null; // ground on the CURRENT docs/ tree
+    const grounding = this.groundingSummary();
+    const base = buildAdjudicationPrompt(found.text, grounding, issues, found.relPath);
+    const prompt = retryNote ? `${retryNote}\n\n${base}` : base;
+
+    await this.trace.write({ kind: "panel.adjudicating", projectId: this.projectId, panelId: panel.panelId, specId: loop.specId, round: loop.round, promptVersion: ADJUDICATION_PROMPT_VERSION });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.adjudicating", panelId: panel.panelId, specId: loop.specId, round: loop.round } as DomainEvent);
+
+    const session = await this.adapter.createSession({ specId: loop.specId });
+    this.adjudicationSessions.set(session.sessionId, { specId: loop.specId, panelId: panel.panelId, round: loop.round });
+    this.trackMachinery(loop, [session.sessionId]);
+    await this.adapter.dispatchAsync({ sessionId: session.sessionId, agent: "spec-author", ...this.modelArg("spec-author"), parts: [{ type: "text", text: prompt }] });
+  }
+
+  /** Register review-machinery session ids for approve-guard exclusion, cleaned when the loop ends. */
+  private trackMachinery(loop: ReviewLoopState, sessionIds: string[]): void {
+    for (const sid of sessionIds) {
+      loop.machinery.push(sid);
+      this.reviewMachinerySessions.add(sid);
+    }
+  }
+
+  /**
+   * Ingest the author's completed adjudication turn (SPEC-035): parse per-issue dispositions, enforce
+   * accept-or-justify on blockers (re-prompt once, then fail), record + emit each disposition, apply the
+   * accepts (the author already edited the file), then decide reconvene vs converge. Reconvene only when
+   * the author accepted a blocking issue AND the spec's normative content changed, under the round cap.
+   */
+  private async ingestAdjudication(sessionId: string, text: string): Promise<void> {
+    const link = this.adjudicationSessions.get(sessionId);
+    if (!link) return;
+    const loop = this.reviewLoops.get(link.specId);
+    const panel = this.panels.get(link.panelId);
+    if (!loop || !panel || loop.panelId !== link.panelId) {
+      this.adjudicationSessions.delete(sessionId);
+      return;
+    }
+
+    const dispositions = parseDispositions(text);
+    const byId = new Map(dispositions.map((d) => [d.issueId, d]));
+    // Accept-or-justify: every blocking issue needs a disposition, and a dismissal needs a rationale.
+    const blockers = panel.issues.filter((i) => i.severity === "blocking");
+    const missing = blockers.filter((b) => {
+      const d = byId.get(b.issueId);
+      return !d || (d.action === "dismiss" && !d.rationale);
+    });
+    if (missing.length > 0) {
+      this.adjudicationSessions.delete(sessionId); // this attempt is consumed
+      if (loop.adjudicationRetries < ADJUDICATION_RETRY_LIMIT) {
+        loop.adjudicationRetries++;
+        const note = `Your previous adjudication omitted a disposition (or a dismissal rationale) for these blocking issues: ${missing.map((m) => m.issueId).join(", ")}. Re-answer with the COMPLETE disposition array — every issue exactly once, and a concrete rationale for each dismissal.`;
+        await this.startAdjudication(loop, panel, note);
+      } else {
+        await this.failReviewLoop(loop, `author did not adjudicate ${missing.length} blocking issue(s) after re-prompt`);
+      }
+      return;
+    }
+
+    // Record every disposed issue: mark it, trace it (actor: spec-author), emit panel.disposition.
+    let applied = 0;
+    let dismissed = 0;
+    for (const i of panel.issues) {
+      const d = byId.get(i.issueId);
+      if (!d) continue; // an undisposed suggestion/question — leave as raised
+      i.adjudication = d.action === "accept" ? "accepted" : "dismissed";
+      if (d.action === "accept") applied++;
+      else dismissed++;
+      await this.trace.write({
+        kind: "review.adjudicate", projectId: this.projectId, panelId: panel.panelId, issueId: i.issueId, specId: loop.specId,
+        section: i.section, sectionHash: i.sectionHash, reviewerRole: i.reviewerRole, action: i.adjudication, actor: "spec-author",
+        ...(d.rationale ? { rationale: d.rationale } : {}),
+      });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.disposition", panelId: panel.panelId, issueId: i.issueId, action: d.action, rationale: d.rationale, actor: "spec-author" } as DomainEvent);
+    }
+    loop.unresolvedBlockers = panel.issues
+      .filter((i) => i.severity === "blocking" && i.adjudication === "dismissed")
+      .map((i) => ({ issueId: i.issueId, section: i.section, text: i.text, rationale: byId.get(i.issueId)?.rationale ?? "" }));
+
+    // Reconvene iff a BLOCKER was accepted (warrants re-review) AND the spec's normative content actually
+    // changed (so a dismiss-only or no-op round can't loop forever) AND we are under the round cap.
+    const foundAfter = this.findSpecFile(loop.specId);
+    const newHash = foundAfter ? normativeHash(foundAfter.text) : loop.normativeHashBeforeRound;
+    const acceptedBlocker = panel.issues.some((i) => i.severity === "blocking" && i.adjudication === "accepted");
+    const changed = newHash !== loop.normativeHashBeforeRound;
+    const reconvene = acceptedBlocker && changed && loop.round < MAX_REVIEW_ROUNDS;
+
+    this.adjudicationSessions.delete(sessionId);
+    await this.trace.write({ kind: "review.round", projectId: this.projectId, specId: loop.specId, panelId: panel.panelId, round: loop.round, applied, dismissed, reconvened: reconvene });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.round-complete", panelId: panel.panelId, specId: loop.specId, round: loop.round, applied, dismissed, reconvened: reconvene } as DomainEvent);
+
+    if (reconvene) await this.startReviewRound(loop);
+    else await this.convergeLoop(loop);
+  }
+
+  /** Reconvene a fresh panel for the next review round (SPEC-035) on the revised draft. */
+  private async startReviewRound(loop: ReviewLoopState): Promise<void> {
+    loop.round++;
+    loop.adjudicationRetries = 0;
+    const found = this.findSpecFile(loop.specId);
+    if (!found) {
+      await this.failReviewLoop(loop, "specification file not found to reconvene");
+      return;
+    }
+    loop.normativeHashBeforeRound = normativeHash(found.text);
+    let panel: ReviewPanel;
+    try {
+      panel = await this.startPanel(loop.specId, loop.reviewers, loop.branch);
+    } catch (err) {
+      await this.failReviewLoop(loop, `could not reconvene the panel: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    loop.panelId = panel.panelId;
+    this.trackMachinery(loop, panel.reviewers.map((r) => r.sessionId));
+  }
+
+  /**
+   * Converge the review loop (SPEC-035): satisfy the durable gate, emit `review.converged` with any
+   * unresolved (dismissed) blockers for the human, then AUTO-RUN the gated draft→in-review promotion so
+   * the human's only governed action is the approval. A precondition failure (malformed / branch
+   * mismatch) surfaces via its own event and leaves the spec in `draft` — it does not throw here.
+   */
+  private async convergeLoop(loop: ReviewLoopState): Promise<void> {
+    this.convergedReviews.add(loop.specId);
+    await this.trace.write({ kind: "review.converged", projectId: this.projectId, specId: loop.specId, rounds: loop.round, unresolvedBlockers: loop.unresolvedBlockers });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.converged", specId: loop.specId, rounds: loop.round, unresolvedBlockers: loop.unresolvedBlockers } as DomainEvent);
+    // Auto-promote draft→in-review. The gate won't fail on the review check (just satisfied); a
+    // well-formedness or branch-guard failure emits spec.malformed / spec.branch-mismatch for a human fix.
+    try {
+      await this.approveDraft(loop.specId);
+    } catch {
+      /* surfaced via spec.malformed / spec.branch-mismatch — the spec stays draft until fixed */
+    }
+    // Clear the loop's machinery + the loop only AFTER the promotion (the approve guard excludes the
+    // still-settling adjudication session by its membership in reviewMachinerySessions until here).
+    this.endReviewLoop(loop);
+  }
+
+  /** Fail the review loop (SPEC-035): the gate stays unsatisfied; surface `review.gate-failed` and clean up. */
+  private async failReviewLoop(loop: ReviewLoopState, reason: string): Promise<void> {
+    this.endReviewLoop(loop);
+    await this.trace.write({ kind: "review.failed", projectId: this.projectId, specId: loop.specId, reason });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.gate-failed", specId: loop.specId, reason } as DomainEvent);
+  }
+
+  /** Tear down a finished review loop: drop its machinery from all routing/guard sets and forget the loop. */
+  private endReviewLoop(loop: ReviewLoopState): void {
+    for (const sid of loop.machinery) {
+      this.reviewMachinerySessions.delete(sid);
+      this.reviewerSessions.delete(sid);
+      this.adjudicationSessions.delete(sid);
+    }
+    this.reviewLoops.delete(loop.specId);
+  }
+
+  /**
+   * `sendBackReview` (SPEC-035) — the human's send-back lever: clear the converged-review gate, abandon
+   * any active loop, and (if the spec is `in-review`) reopen authoring by regressing it to `draft`. A
+   * fresh author-adjudicated loop is then required before the spec can return to `in-review`.
+   */
+  private async sendBackReview(specId: string, actor?: string): Promise<{ ok: true; specId: string; applied: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    const cid = found.canonicalId;
+    this.convergedReviews.delete(cid);
+    const loop = this.reviewLoops.get(cid);
+    if (loop) this.endReviewLoop(loop);
+    await this.trace.write({ kind: "review.sent-back", projectId: this.projectId, specId: cid, ...(actor ? { actor } : {}) });
+    const status = (this.specRecords.get(cid)?.status ?? found.frontmatter.status ?? "draft") as SpecStatus;
+    if (status === "in-review") {
+      const r = await this.applyTransition(cid, "draft", { kind: "human", ...(actor ? { actor } : {}) });
+      return { ok: true, specId: cid, applied: r.applied };
+    }
+    return { ok: true, specId: cid, applied: "cleared" };
   }
 
   /**
@@ -2231,7 +2529,7 @@ export class ProjectContext {
         this.specRecords.delete(oldSpecId);
         this.specRecords.set(newSpecId, rec);
       }
-      if (this.completedReviews.delete(oldSpecId)) this.completedReviews.add(newSpecId);
+      if (this.convergedReviews.delete(oldSpecId)) this.convergedReviews.add(newSpecId);
 
       const relPath = `docs/specifications/${newFilename}`;
       await this.trace.write({ kind: "spec.rename", projectId: this.projectId, oldSpecId, specId: newSpecId, path: relPath, branch: newBranch });
@@ -2533,12 +2831,15 @@ export class ProjectContext {
         return this.handleWebhook(String(a.eventName ?? ""), a.payload);
       case "approveDraft":
         return this.approveDraft(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
-      case "convenePanel":
+      case "convenePanel": // SPEC-035: `convenePanel` and `reviewSpec` both seed the author-adjudicated loop.
+      case "reviewSpec":
         return this.convenePanel(
           String(a.specId ?? ""),
           a.branch ? String(a.branch) : undefined,
           Array.isArray(a.reviewers) ? (a.reviewers as ReviewerConfig[]) : undefined,
         );
+      case "sendBackReview": // SPEC-035: the human's send-back — clear the gate + reopen authoring.
+        return this.sendBackReview(String(a.specId ?? ""), a.actor ? String(a.actor) : undefined);
       case "adjudicateIssue": {
         const action = String(a.action ?? "");
         if (action !== "accepted" && action !== "dismissed" && action !== "sent-back") {
@@ -2785,6 +3086,7 @@ export class ProjectContext {
 
       await this.emit(event);
       await this.observeReviewerEvent(event);
+      await this.observeAdjudication(event); // SPEC-035: ingest the spec-author's adjudication turn
       await this.observeGeneration(event); // SPEC-013: ingest the generation agent's proposal
       await this.observeDeliveryProgress(event); // SPEC-009 revised: has every task been checked off (or errored)?
 
@@ -2815,7 +3117,7 @@ export class ProjectContext {
     // Only the AUTHORING session drives the rename. Reviewer / generation / delivery sessions are also
     // created parentless (so they surface as spec-kind cards), but a reviewer, generation, or delivery
     // turn on a still-untitled spec must NOT trigger the rename — otherwise it races the author.
-    if (this.reviewerSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.deliverySessionOwner.has(sessionId)) return;
+    if (this.reviewerSessions.has(sessionId) || this.adjudicationSessions.has(sessionId) || this.generationSessions.has(sessionId) || this.deliverySessionOwner.has(sessionId)) return;
     // The authoring session folds into its spec's card as a `spec`-kind session (SPEC-023); find that
     // card and rename the spec it belongs to.
     const card = this.read.snapshot().find((c) => c.sessions.some((s) => s.sessionId === sessionId && s.kind === "spec"));
@@ -2847,6 +3149,25 @@ export class ProjectContext {
       // was bypassed — record it as a governed-policy violation (SPEC-007).
       const link = this.reviewerSessions.get(sessionId);
       await this.trace.write({ kind: "policy.violation", projectId: this.projectId, panelId: link?.panelId, reviewerRole: link?.role, action: "diff.finalized", sessionId });
+    }
+  }
+
+  /**
+   * Route the spec-author's adjudication turn back into its review loop (SPEC-035): a completed ASSISTANT
+   * turn → parse dispositions + drive the loop; an errored session → fail the loop (the gate stays
+   * unsatisfied). No-op for non-adjudication sessions. Same `role` gate rationale as the reviewer pump.
+   */
+  private async observeAdjudication(event: DomainEvent): Promise<void> {
+    if (!("sessionId" in event)) return;
+    const sessionId = (event as { sessionId: string }).sessionId;
+    const link = this.adjudicationSessions.get(sessionId);
+    if (!link) return;
+    if (event.type === "message.updated" && !event.isStreaming && event.role === "assistant") {
+      await this.ingestAdjudication(sessionId, event.text);
+    } else if (event.type === "session.status" && event.status === "error") {
+      this.adjudicationSessions.delete(sessionId);
+      const loop = this.reviewLoops.get(link.specId);
+      if (loop && loop.panelId === link.panelId) await this.failReviewLoop(loop, "adjudication session reported error");
     }
   }
 

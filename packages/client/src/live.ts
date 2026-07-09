@@ -422,15 +422,56 @@ function applyEvent(ev: any) {
     }
     case 'panel.complete': {
       updatePanel(ev.panelId, (p: any) => {
-        p.status = ev.status;
         for (const r of p.reviewers) if (r.status === 'running') r.status = 'done';
+        // A completed round hands off to the author's adjudication (SPEC-035) — do NOT mark converged
+        // here; the gate is satisfied only by review.converged. A failed panel ends the round though.
+        if (ev.status === 'failed') p.status = 'failed';
       });
-      // Key the gate off the completed panel's OWN specId (carried on the event), not the current
-      // store slot — a late completion of a superseded panel must not mark a different spec reviewed.
-      if (ev.status === 'complete' && ev.specId) {
-        store.set((s: any) => ({ reviewedSpecs: s.reviewedSpecs.includes(ev.specId) ? s.reviewedSpecs : [...s.reviewedSpecs, ev.specId] }));
-      }
       rail('panel.complete', `panel.complete · ${ev.status} · ${ev.issueCount} issues`, ts);
+      break;
+    }
+    case 'panel.adjudicating': {
+      // SPEC-035: the spec-author began adjudicating this round's issues.
+      updatePanel(ev.panelId, (p: any) => { p.phase = 'adjudicating'; p.round = ev.round; });
+      rail('panel.adjudicating', `panel.adjudicating · ${ev.specId} · round ${ev.round}`, ts);
+      break;
+    }
+    case 'panel.disposition': {
+      // SPEC-035: the author accepted or dismissed one issue — annotate it (across reviewer columns).
+      updatePanel(ev.panelId, (p: any) => {
+        for (const r of p.reviewers) {
+          const i = (r.issues || []).find((x: any) => x.issueId === ev.issueId);
+          if (i) { i.disposition = ev.action; i.rationale = ev.rationale; }
+        }
+      });
+      break;
+    }
+    case 'panel.round-complete': {
+      // SPEC-035: a round finished adjudicating; record its counts. If it reconvened, a fresh
+      // panel.started replaces this panel; otherwise the loop converges next.
+      updatePanel(ev.panelId, (p: any) => {
+        p.rounds = [...(p.rounds || []), { round: ev.round, applied: ev.applied, dismissed: ev.dismissed, reconvened: ev.reconvened }];
+        p.phase = ev.reconvened ? 'reviewing' : 'adjudicated';
+      });
+      rail('panel.round-complete', `panel.round-complete · round ${ev.round} · +${ev.applied}/−${ev.dismissed}${ev.reconvened ? ' · reconvening' : ''}`, ts);
+      break;
+    }
+    case 'panel.adjudicator-model-collision': {
+      // SPEC-035: the author shares a reviewer's model — a warning, never a gate.
+      updatePanel(ev.panelId, (p: any) => { p.collisionNote = `the author shares ${ev.reviewerRole}'s model — independence is reduced (warning)`; });
+      rail('panel.adjudicator-model-collision', `panel.adjudicator-model-collision · ${ev.reviewerRole}`, ts);
+      break;
+    }
+    case 'review.converged': {
+      // SPEC-035: the bounded loop converged — the review gate is satisfied. The coordinator auto-runs
+      // draft→in-review; the human's remaining action is the approval (in-review → approved).
+      store.set((s: any) => ({
+        panel: s.panel && s.panel.specId === ev.specId
+          ? { ...s.panel, status: 'converged', phase: 'converged', rounds: s.panel.rounds || [], unresolvedBlockers: ev.unresolvedBlockers || [], convergedRounds: ev.rounds }
+          : s.panel,
+        reviewedSpecs: s.reviewedSpecs.includes(ev.specId) ? s.reviewedSpecs : [...s.reviewedSpecs, ev.specId],
+      }));
+      rail('review.converged', `review.converged · ${ev.specId} · ${ev.rounds} round(s) · ${(ev.unresolvedBlockers || []).length} unresolved blocker(s)`, ts);
       break;
     }
     case 'panel.config-error': {
@@ -940,12 +981,35 @@ export function convenePanelLive(specId: string, branch?: string): Promise<any> 
  * Adjudicate a review issue (SPEC-007): accept (route to the spec author), dismiss, or send back.
  * A governed action like approve/convene — refused while offline rather than queued. Pass
  * `confirm: true` to override a stale-file warning when the reviewed section changed since the panel ran.
+ * SPEC-035 retires the human per-issue path from the UI; kept for a manual override / CLI.
  */
 export function adjudicateIssueLive(panelId: string, issueId: string, action: 'accepted' | 'dismissed' | 'sent-back', rationale?: string, confirm?: boolean): Promise<any> {
   if (!isCoordinatorConnected()) {
     return Promise.resolve({ ok: false, error: 'offline — reconnect to adjudicate' });
   }
   return liveRequest('adjudicateIssue', { panelId, issueId, action, rationale, confirm }, 30000);
+}
+
+/**
+ * SPEC-035: start the author-adjudicated review loop on the current draft. Same governed semantics as
+ * `convenePanel` (a reference, never file content; refused offline) — this is now the cockpit entry.
+ */
+export function reviewSpecLive(specId: string, branch?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to review' });
+  }
+  return liveRequest('reviewSpec', { specId, branch });
+}
+
+/**
+ * SPEC-035: the human's send-back lever — clear the converged-review gate and reopen authoring. Refused
+ * offline like any governed action.
+ */
+export function sendBackReviewLive(specId: string, actor?: string): Promise<any> {
+  if (!isCoordinatorConnected()) {
+    return Promise.resolve({ ok: false, error: 'offline — reconnect to send back' });
+  }
+  return liveRequest('sendBackReview', { specId, actor }, 30000);
 }
 
 export function stopLive(): void {

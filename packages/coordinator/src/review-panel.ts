@@ -58,6 +58,112 @@ export interface ParsedIssue {
 
 const SEVERITIES = new Set(["blocking", "suggestion", "question"]);
 
+/** The adjudication prompt is versioned alongside the source (SPEC-035); bumped when its shape changes. */
+export const ADJUDICATION_PROMPT_VERSION = "v1";
+
+/** One issue handed to the author's adjudication turn (identity + severity + who raised it). */
+export interface AdjudicationIssue {
+  issueId: string;
+  reviewerRole: string;
+  section: string;
+  severity: string;
+  text: string;
+  agreed: boolean;
+}
+
+/**
+ * Build the spec-author's adjudication prompt (SPEC-035). The author reads every reviewer issue and,
+ * in ONE turn, (a) decides accept/dismiss per issue, (b) EDITS the working spec file to apply each
+ * accepted issue (it is the singular writer — reviewers are read-only), and (c) ends with a fenced
+ * JSON array of dispositions. `blocking` issues must be accepted-and-applied or dismissed WITH a
+ * concrete reason — an unjustified blocker is not a valid disposition (enforced by the coordinator).
+ */
+export function buildAdjudicationPrompt(
+  specText: string,
+  grounding: string,
+  issues: AdjudicationIssue[],
+  relPath: string,
+): string {
+  const lines = issues.map(
+    (i) =>
+      `- [${i.issueId}] (${i.severity}${i.agreed ? ", concurred by ≥2 reviewers" : ""}, raised by ${i.reviewerRole}, section "${i.section}"): ${i.text}`,
+  );
+  return [
+    "You are the specification author adjudicating an independent multi-model review of YOUR draft (SPEC-035).",
+    `For every issue below, decide whether to ACCEPT it (fold the fix into the spec) or DISMISS it (reject it,`,
+    "with a specific reason). This is your judgement — a reviewer can be wrong; do not accept a critique you",
+    "believe is mistaken, but you must justify a dismissal.",
+    "",
+    `The working specification file is \`${relPath}\`. For EVERY issue you accept, EDIT that file now to`,
+    "resolve it (you have write access; the reviewers did not). Apply all accepted edits before you answer.",
+    "",
+    "Rules:",
+    '  • Every "blocking" issue MUST be either accepted-and-applied or dismissed with a concrete rationale.',
+    '  • "suggestion" / "question" issues are yours to accept or dismiss at your discretion.',
+    "  • Keep the specification well-formed (Requirements with SHALL/MUST statements and WHEN/THEN scenarios).",
+    "",
+    "When your edits are done, your reply MUST END WITH a single fenced code block containing a JSON array",
+    "with one object per issue — a machine parses ONLY that block:",
+    "```json",
+    "[",
+    '  {"issueId": "issue-abc", "action": "accept",  "rationale": "Quantified the retention window to 30 days in FR-08."},',
+    '  {"issueId": "issue-def", "action": "dismiss", "rationale": "The cited contradiction does not hold — FR-10 governs a different path."}',
+    "]",
+    "```",
+    "Every issueId below must appear exactly once. action is \"accept\" or \"dismiss\". rationale is one concrete sentence.",
+    "",
+    "## Issues to adjudicate",
+    lines.length ? lines.join("\n") : "(none)",
+    "",
+    grounding ? `## Project grounding\n${grounding}\n` : "",
+    "## Specification under review",
+    specText,
+  ].join("\n");
+}
+
+export interface ParsedDisposition {
+  issueId: string;
+  action: "accept" | "dismiss";
+  rationale: string;
+}
+
+/**
+ * Parse the author's adjudication turn into structured dispositions (SPEC-035). Mirrors
+ * {@link parseReviewerIssues}: the author writes prose + edits, then ends with a fenced JSON array, so
+ * this enumerates every balanced array candidate (fenced first) and keeps the one yielding the most
+ * well-formed dispositions. Unparseable output yields [] (the coordinator then re-prompts / fails).
+ */
+export function parseDispositions(text: string): ParsedDisposition[] {
+  let best: ParsedDisposition[] = [];
+  for (const candidate of jsonArrayCandidates(text)) {
+    let arr: unknown;
+    try {
+      arr = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(arr)) continue;
+    const parsed = coerceDispositions(arr);
+    if (parsed.length > best.length) best = parsed;
+  }
+  return best;
+}
+
+/** Keep only well-formed dispositions: a non-empty issueId, an accept|dismiss action, and a rationale. */
+function coerceDispositions(arr: unknown[]): ParsedDisposition[] {
+  const out: ParsedDisposition[] = [];
+  for (const raw of arr) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const issueId = typeof r.issueId === "string" ? r.issueId.trim() : "";
+    const action = r.action === "accept" || r.action === "dismiss" ? r.action : undefined;
+    if (!issueId || !action) continue;
+    const rationale = typeof r.rationale === "string" ? r.rationale.trim() : "";
+    out.push({ issueId, action, rationale });
+  }
+  return out;
+}
+
 /**
  * Parse a reviewer's output into structured issues. Reviewers write prose analysis and end with a
  * fenced JSON array (see {@link buildReviewerPrompt}), so this must find the REAL issues array amid
@@ -200,6 +306,21 @@ export function validateReviewers(agents: AgentRegistry, reviewers: ReviewerConf
     }
   }
   return { ok: true, reviewers: resolved };
+}
+
+/**
+ * SPEC-035 adjudicator independence: the spec-author now judges critiques of its own draft, so its
+ * resolved model SHOULD differ from every reviewer's. Return each reviewer whose model matches the
+ * author's. A match is a WARNING, never a gate (the reviewers stay cross-model against each other, so
+ * adversarial pressure survives; hard-blocking would strand panels on a thin registry). An unknown
+ * author model (no image / no concrete model) yields no collision — nothing verifiable to compare.
+ */
+export function detectAdjudicatorCollisions(
+  authorModel: string | undefined,
+  reviewers: Array<{ role: string; model: string }>,
+): Array<{ reviewerRole: string; model: string }> {
+  if (!authorModel) return [];
+  return reviewers.filter((r) => r.model === authorModel).map((r) => ({ reviewerRole: r.role, model: r.model }));
 }
 
 export interface AgreementGroup {

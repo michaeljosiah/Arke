@@ -3,7 +3,7 @@ import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
 import { AgentMessage, Button, Textarea, Badge, StatusDot, SplitPane, Markdown } from '../ds';
 import { store, useStore } from '../store';
-import { fetchSpecFile, approveDraftLive, convenePanelLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected, fetchModels, configureAgent } from '../live';
+import { fetchSpecFile, approveDraftLive, reviewSpecLive, sendCockpitPrompt, liveRequest, isCoordinatorConnected, fetchModels, configureAgent } from '../live';
 
 const e = React.createElement;
 
@@ -357,9 +357,10 @@ function LiveCockpit() {
 
   const convene = async () => {
     if (!specId) return;
-    const res = await convenePanelLive(specId, file?.branch);
-    if (res?.ok) store.set((s: any) => ({ view: 'review', cockpit: { ...s.cockpit, notice: `review requested for ${specId}` } }));
-    else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `convene failed — ${res.error}` } }));
+    // SPEC-035: start the author-adjudicated review loop (reviewers → author adjudication → converge).
+    const res = await reviewSpecLive(specId, file?.branch);
+    if (res?.ok) store.set((s: any) => ({ view: 'review', cockpit: { ...s.cockpit, notice: `review started for ${specId}` } }));
+    else if (res?.error) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `review failed to start — ${res.error}` } }));
   };
 
   React.useEffect(() => { if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [convo.length, sending, inFlight]);

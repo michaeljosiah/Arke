@@ -67,11 +67,11 @@ function repoWith(specBranch: string, headBranch = BRANCH): string {
   writeFileSync(resolve(dir, "docs", "specifications", "test.md"), specDoc(specBranch), "utf8");
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", "init");
-  // Seed a completed review so the SPEC-007 finalisation gate is satisfied for the approve-path tests
-  // here (the gate itself is exercised in review-panel-integration.test.ts). The trace appends, so
-  // reconstructReviewGate() picks this up on startup.
+  // Seed a CONVERGED review so the SPEC-035 finalisation gate is satisfied for the approve-path tests
+  // here (the loop itself is exercised in review-panel-integration.test.ts). The trace appends, so
+  // reconstructReviewGate() picks this up on startup. A legacy `review.complete` no longer counts.
   mkdirSync(resolve(dir, ".arke"), { recursive: true });
-  writeFileSync(resolve(dir, ".arke", "trace.ndjson"), JSON.stringify({ kind: "review.complete", specId: "SPEC-TEST" }) + "\n", "utf8");
+  writeFileSync(resolve(dir, ".arke", "trace.ndjson"), JSON.stringify({ kind: "review.converged", specId: "SPEC-TEST" }) + "\n", "utf8");
   return dir;
 }
 

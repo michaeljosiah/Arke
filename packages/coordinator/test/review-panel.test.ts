@@ -3,7 +3,10 @@ import { test } from "node:test";
 import type { AgentImage } from "@arke/contracts";
 import { AgentRegistry } from "../src/agent-registry.js";
 import {
+  buildAdjudicationPrompt,
+  detectAdjudicatorCollisions,
   detectAgreement,
+  parseDispositions,
   parseReviewerIssues,
   sectionHashOf,
   validateReviewers,
@@ -145,4 +148,58 @@ test("detectAgreement does NOT group a section raised twice by the same reviewer
     { issueId: "i2", reviewerRole: "reviewer-a", section: "requirements > R1", sectionHash: h },
   ]);
   assert.equal(groups.length, 0); // same reviewer twice ≠ agreement
+});
+
+// ---- SPEC-035 author-adjudication helpers ----
+
+test("parseDispositions reads a fenced disposition array and coerces well-formed entries", () => {
+  const text = [
+    "I applied the first and declined the second.",
+    "```json",
+    '[{"issueId":"issue-1","action":"accept","rationale":"Quantified the window."},',
+    ' {"issueId":"issue-2","action":"dismiss","rationale":"FR-10 governs a different path."}]',
+    "```",
+  ].join("\n");
+  const d = parseDispositions(text);
+  assert.equal(d.length, 2);
+  assert.deepEqual(d[0], { issueId: "issue-1", action: "accept", rationale: "Quantified the window." });
+  assert.equal(d[1]!.action, "dismiss");
+});
+
+test("parseDispositions drops entries with no issueId or an invalid action, and tolerates a missing rationale", () => {
+  const text = '[{"issueId":"","action":"accept","rationale":"x"},{"issueId":"i2","action":"maybe","rationale":"y"},{"issueId":"i3","action":"accept"}]';
+  const d = parseDispositions(text);
+  assert.equal(d.length, 1);
+  assert.deepEqual(d[0], { issueId: "i3", action: "accept", rationale: "" });
+});
+
+test("parseDispositions returns [] on unparseable output", () => {
+  assert.deepEqual(parseDispositions("no json"), []);
+  assert.deepEqual(parseDispositions("[not json"), []);
+});
+
+test("detectAdjudicatorCollisions flags a reviewer sharing the author's model, and is silent otherwise", () => {
+  const reviewers = [
+    { role: "reviewer-a", model: "anthropic/opus" },
+    { role: "reviewer-b", model: "copilot/gpt" },
+  ];
+  const hit = detectAdjudicatorCollisions("anthropic/opus", reviewers);
+  assert.equal(hit.length, 1);
+  assert.deepEqual(hit[0], { reviewerRole: "reviewer-a", model: "anthropic/opus" });
+  assert.equal(detectAdjudicatorCollisions("openai/o5", reviewers).length, 0); // distinct author → no collision
+  assert.equal(detectAdjudicatorCollisions(undefined, reviewers).length, 0); // unknown author → nothing to compare
+});
+
+test("buildAdjudicationPrompt lists every issue id + the file path and demands a JSON disposition array", () => {
+  const p = buildAdjudicationPrompt(
+    "SPEC BODY",
+    "GROUNDING",
+    [{ issueId: "issue-9", reviewerRole: "reviewer-a", section: "Requirements > R1", severity: "blocking", text: "vague", agreed: true }],
+    "docs/specifications/007.thing.md",
+  );
+  assert.match(p, /issue-9/);
+  assert.match(p, /docs\/specifications\/007\.thing\.md/);
+  assert.match(p, /concurred by ≥2 reviewers/);
+  assert.match(p, /```json/);
+  assert.match(p, /SPEC BODY/);
 });

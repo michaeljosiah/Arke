@@ -495,6 +495,57 @@ export const SpecMalformedEvent = base.extend({
   missing: z.array(z.string()),
 });
 
+/** SPEC-035: the spec-author's adjudication turn began for a panel (one round of the review loop). */
+export const PanelAdjudicatingEvent = base.extend({
+  type: z.literal("panel.adjudicating"),
+  panelId: z.string(),
+  specId: z.string(),
+  round: z.number().int().positive(),
+});
+
+/** SPEC-035: the author's disposition of one reviewer issue — `accept` (applied to the working file) or
+ *  `dismiss` (with a recorded rationale). Replaces the human accept/dismiss/send-back of SPEC-007. */
+export const PanelDispositionEvent = base.extend({
+  type: z.literal("panel.disposition"),
+  panelId: z.string(),
+  issueId: z.string(),
+  action: z.enum(["accept", "dismiss"]),
+  rationale: z.string(),
+  actor: z.literal("spec-author"),
+});
+
+/** SPEC-035: one review round finished adjudicating — applied/dismissed counts and whether a fresh panel
+ *  reconvenes (a blocker was accepted and the spec's normative content changed, under the round cap). */
+export const PanelRoundCompleteEvent = base.extend({
+  type: z.literal("panel.round-complete"),
+  panelId: z.string(),
+  specId: z.string(),
+  round: z.number().int().positive(),
+  applied: z.number().int().nonnegative(),
+  dismissed: z.number().int().nonnegative(),
+  reconvened: z.boolean(),
+});
+
+/** SPEC-035: the adjudicating author shares a reviewer's model — a warning, never a gate. The concrete
+ *  model stays host-side (trace only, SPEC-005); the client sees only which reviewer role collided. */
+export const PanelAdjudicatorModelCollisionEvent = base.extend({
+  type: z.literal("panel.adjudicator-model-collision"),
+  panelId: z.string(),
+  reviewerRole: z.string(),
+});
+
+/** SPEC-035: the bounded review loop converged — the review gate is satisfied for this draft.
+ *  `unresolvedBlockers` are blocking issues the author dismissed (with rationale), surfaced prominently to
+ *  the human at approval so a dismissed-but-valid critique is never silently dropped. */
+export const ReviewConvergedEvent = base.extend({
+  type: z.literal("review.converged"),
+  specId: z.string(),
+  rounds: z.number().int().positive(),
+  unresolvedBlockers: z.array(
+    z.object({ issueId: z.string(), section: z.string(), text: z.string(), rationale: z.string() }),
+  ),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -535,6 +586,11 @@ export const DomainEvent = z.discriminatedUnion("type", [
   PanelStaleFileWarningEvent,
   ReviewGateFailedEvent,
   SpecMalformedEvent,
+  PanelAdjudicatingEvent,
+  PanelDispositionEvent,
+  PanelRoundCompleteEvent,
+  PanelAdjudicatorModelCollisionEvent,
+  ReviewConvergedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
