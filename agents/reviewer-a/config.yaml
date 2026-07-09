@@ -5,7 +5,9 @@ executor:
   type: omnigent
   config:
     harness: opencode-native
-    model: github-copilot/claude-opus-4.8
+    # Distinct from spec-author (opus-4.8) and reviewer-b (gpt-5.5) so the author-adjudicated review
+    # (SPEC-035) keeps three pairwise-distinct models — the author never shares a reviewer's model.
+    model: github-copilot/claude-sonnet-4.5
     auth:
       profile: opencode-local
 instructions: AGENTS.md

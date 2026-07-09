@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Tabs } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, engine, useStore } from '../store';
-import { adjudicateIssueLive, triggerGenerationLive, approveGenerationLive, rejectGenerationLive } from '../live';
+import { triggerGenerationLive, approveGenerationLive, rejectGenerationLive, sendBackReviewLive, transitionSpecLive } from '../live';
 import { collectApproval, approveAll as approveAllArtifacts, isApprovable, needsSorTarget, effectiveSorTarget, type ArtifactDecision, type ArtifactEditInput } from '../generation-logic';
 
 const e = React.createElement;
@@ -31,71 +31,96 @@ export function Review() {
 const SEV_STATUS: Record<string, string> = { blocking: 'diverge', suggestion: 'agree', question: 'agree' };
 
 /**
- * Live multi-model review panel (SPEC-007). Renders one column per reviewer with the issues each
- * raised (severity-coded), surfaces cross-model agreement, and lets the human adjudicate — accept
- * (routed to the spec author), send back, or dismiss. Approval stays gated in the cockpit until the
- * panel completes; this screen drives the panel, the coordinator enforces the gate.
+ * Live author-adjudicated review (SPEC-035). Reviewers critique the draft in parallel on distinct
+ * models; the spec-author then adjudicates every issue — accept (applied to the draft) or dismiss (with
+ * a rationale) — looping up to three rounds while blockers drive material change. The human no longer
+ * triages issues: on convergence the coordinator auto-promotes draft→in-review and this screen presents
+ * the consolidated report, leaving the human a single decision — Approve or Send back.
  */
 function LiveReview() {
-  const { panel, cockpit } = useStore();
-  const [decisions, setDecisions] = React.useState({} as Record<string, string>);
+  const { panel } = useStore();
   const [busy, setBusy] = React.useState<string | null>(null);
-  const [confirmNeeded, setConfirmNeeded] = React.useState({} as Record<string, boolean>);
 
   if (!panel) {
     return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 40 } },
-      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'No review panel running'),
-      e('p', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 460, textAlign: 'center', lineHeight: 1.5 } }, 'Convene a multi-model review from the authoring cockpit. Each reviewer critiques the same specification on a distinct model; their issues and agreement appear here for you to adjudicate.'),
+      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'No review running'),
+      e('p', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 460, textAlign: 'center', lineHeight: 1.5 } }, 'Start a review from the authoring cockpit. Reviewers critique the specification on distinct models, then the spec-author adjudicates their issues and applies the accepted ones — you only approve the result.'),
       e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring'));
   }
 
   const reviewers = panel.reviewers || [];
   const agreed = new Set<string>(panel.agreedIds || []);
-  const running = panel.status === 'running';
+  const converged = panel.status === 'converged';
+  const failed = panel.status === 'failed';
+  const adjudicating = panel.phase === 'adjudicating';
+  const round = panel.round || 1;
   const allIssues = reviewers.flatMap((r: any) => (r.issues || []).map((i: any) => ({ ...i, role: r.role })));
-  // Adjudicate the issues that matter: anything blocking, or anything two reviewers concur on — each
-  // issueId once (dedup by id, first occurrence wins).
-  const byId = new Map<string, any>();
-  for (const i of allIssues) if (!byId.has(i.issueId)) byId.set(i.issueId, i);
-  const adjList = [...byId.values()].filter((i: any) => i.severity === 'blocking' || agreed.has(i.issueId));
+  const unresolved = panel.unresolvedBlockers || [];
 
-  const decide = async (issueId: string, action: 'accepted' | 'dismissed' | 'sent-back') => {
-    setBusy(issueId);
-    const confirm = !!confirmNeeded[issueId];
-    const res = await adjudicateIssueLive(panel.panelId, issueId, action, undefined, confirm);
+  const statusLabel = failed ? 'Review failed' : converged ? 'Converged — ready to approve' : adjudicating ? 'Author adjudicating…' : 'Reviewing…';
+  const statusVariant = converged ? 'default' : failed ? 'outline' : 'secondary';
+
+  const approve = async () => {
+    setBusy('approve');
+    const res = await transitionSpecLive(panel.specId, 'approved');
     setBusy(null);
-    if (res?.ok && res.result?.staleWarning) {
-      setConfirmNeeded((x) => ({ ...x, [issueId]: true }));
-      return; // user must re-click to confirm routing against the changed section
-    }
-    if (res?.ok) {
-      setDecisions((x) => ({ ...x, [issueId]: action }));
-      setConfirmNeeded((x) => ({ ...x, [issueId]: false }));
-    } else if (res?.error) {
-      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `adjudication failed — ${res.error}` } }));
+    // spec.transition returns the coordinator frame: a governance/illegal-transition refusal arrives as
+    // ok:true with result.applied !== 'approved' (or result.error). Only a real 'approved' is success.
+    const applied = res?.result?.applied;
+    if (applied === 'approved') store.set((s: any) => ({ view: 'board', cockpit: { ...s.cockpit, notice: `${panel.specId} approved` } }));
+    else {
+      const why = (res && res.ok === false && res.error) || res?.result?.error || 'the server did not approve the specification';
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval refused — ${why}` } }));
     }
   };
+  const sendBack = async () => {
+    setBusy('sendback');
+    const res = await sendBackReviewLive(panel.specId);
+    setBusy(null);
+    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `send-back failed — ${res.error}` } }));
+    else store.set({ view: 'cockpit' });
+  };
 
-  const acceptedCount = Object.values(decisions).filter((d) => d === 'accepted').length;
+  // Disposition badge for one issue (author's decision): applied / dismissed / pending.
+  const dispositionBadge = (f: any) => f.disposition === 'accept' ? e(Badge, { variant: 'default' }, 'applied')
+    : f.disposition === 'dismiss' ? e(Badge, { variant: 'outline' }, 'dismissed')
+    : adjudicating ? e(StatusDot, { status: 'running', pulse: true }) : null;
 
   return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
     e('div', { style: { padding: '18px var(--page-pad) 14px', borderBottom: '1px solid var(--border)' } },
       e('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 16 } },
         e('div', { style: { flex: 1 } },
-          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 6 } }, panel.specId + ' · Review panel'),
-          e('h1', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 21, fontWeight: 600, letterSpacing: '-0.02em' } }, 'Cross-model review, grounded in the source'),
-          e('p', { style: { margin: '6px 0 0', fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 640, lineHeight: 1.5 } }, 'Different models have different blind spots. Each reviewer critiques the same specification independently; agreement is surfaced, and accepted points are routed back to the spec author.')),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 6 } }, panel.specId + ' · Author-adjudicated review'),
+          e('h1', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 21, fontWeight: 600, letterSpacing: '-0.02em' } }, 'Reviewers critique, the author adjudicates'),
+          e('p', { style: { margin: '6px 0 0', fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 660, lineHeight: 1.5 } }, 'Two models review the specification independently; the spec-author then folds in the valid critiques and justifies what it declines. You review the outcome and approve.')),
         e('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-          e(Badge, { variant: running ? 'secondary' : panel.status === 'failed' ? 'outline' : 'default' }, running ? 'Reviewing…' : panel.status === 'failed' ? 'Panel failed' : 'Review complete'),
+          e(Badge, { variant: statusVariant }, statusLabel),
           e(Button, { variant: 'outline', size: 'sm', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring'))),
-      panel.notice ? e(Callout, { variant: 'default', style: { marginTop: 12 } }, panel.notice) : null,
+      panel.collisionNote ? e(Callout, { variant: 'default', style: { marginTop: 12, borderColor: 'var(--warning)' } }, panel.collisionNote) : null,
       e('div', { style: { display: 'flex', gap: 10, marginTop: 14, alignItems: 'center' } },
         e(Badge, { variant: 'secondary' }, allIssues.length + ' issues'),
         e('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, e(StatusDot, { status: 'agree' }), e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } }, agreed.size + ' in agreement')),
-        e('div', { style: { flex: 1 } }),
-        acceptedCount ? e(Badge, { variant: 'default' }, acceptedCount + ' routed to authoring') : null)),
+        e(Badge, { variant: 'outline' }, 'Round ' + round + (converged ? ' · done' : ' of 3')),
+        (panel.rounds || []).map((rd: any) => e('span', { key: rd.round, style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)' } }, `r${rd.round}: +${rd.applied}/−${rd.dismissed}${rd.reconvened ? ' ↻' : ''}`)))),
     e('div', { style: { flex: 1, overflowY: 'auto', padding: 'var(--page-pad)' } },
-      e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(' + Math.max(reviewers.length, 1) + ', 1fr)', gap: 14, marginBottom: 18 } },
+      // Converged report: the human's single decision point.
+      converged ? e(Card, { padding: 0, style: { marginBottom: 18, borderColor: unresolved.length ? 'var(--warning)' : 'var(--success)' } },
+        e('div', { style: { padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 } },
+          e('div', { style: { flex: 1 } },
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600 } }, (panel.reachedCap ? 'Review stopped at the round cap' : 'Review converged') + ' in ' + (panel.convergedRounds || round) + ' round' + ((panel.convergedRounds || round) === 1 ? '' : 's')),
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: panel.reachedCap ? 'var(--warning)' : 'var(--muted-foreground)', marginTop: 2 } }, panel.reachedCap ? 'The 3-round cap was reached while a blocker fix was still pending re-review — check the final changes before approving.' : 'The draft was auto-promoted to in-review. Approve it, or send it back to reopen authoring.')),
+          e(Button, { variant: 'outline', disabled: !!busy, onClick: sendBack }, busy === 'sendback' ? '…' : 'Send back'),
+          e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), disabled: !!busy, onClick: approve }, busy === 'approve' ? 'Approving…' : 'Approve specification')),
+        unresolved.length ? e('div', { style: { padding: '12px 16px' } },
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--warning)', marginBottom: 8 } }, unresolved.length + ' blocking issue' + (unresolved.length === 1 ? '' : 's') + ' the author declined — review before approving'),
+          e('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+            unresolved.map((b: any) => e('div', { key: b.issueId, style: { padding: '10px 12px', border: '1px solid var(--warning)', borderRadius: 'var(--radius-md)', background: 'var(--card)' } },
+              e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--foreground)' } }, b.text),
+              e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', marginTop: 3 } }, (b.section || '').toLowerCase()),
+              b.rationale ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)', marginTop: 4, fontStyle: 'italic' } }, '“' + b.rationale + '”') : null)))) : null) : null,
+      failed ? e(Callout, { variant: 'default', style: { marginBottom: 18, borderColor: 'var(--destructive)' } }, 'The review did not complete. Re-run it from the authoring cockpit.') : null,
+      // Reviewer columns — each issue tagged with the author's disposition (applied / dismissed).
+      e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(' + Math.max(reviewers.length, 1) + ', 1fr)', gap: 14 } },
         reviewers.map((r: any) => e(Card, { key: r.role, padding: 0 },
           e('div', { style: { padding: '12px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 } },
             e('div', { style: { flex: 1 } },
@@ -107,33 +132,14 @@ function LiveReview() {
           e('div', { style: { padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
             r.status === 'error' ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--destructive)', padding: '6px 0' } }, r.error || 'reviewer failed')
             : (r.issues || []).length === 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--neutral-400)', padding: '6px 0' } }, r.status === 'running' ? 'reading the spec & source…' : 'no issues raised')
-            : (r.issues || []).map((f: any) => e('div', { key: f.issueId, style: { display: 'flex', gap: 8, alignItems: 'flex-start' } },
+            : (r.issues || []).map((f: any) => e('div', { key: f.issueId, style: { display: 'flex', gap: 8, alignItems: 'flex-start', opacity: f.disposition === 'dismiss' ? 0.6 : 1 } },
                 e('span', { style: { marginTop: 3, flex: 'none' } }, e(StatusDot, { status: agreed.has(f.issueId) ? 'agree' : SEV_STATUS[f.severity] || 'diverge' })),
-                e('div', null,
+                e('div', { style: { flex: 1, minWidth: 0 } },
                   e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, lineHeight: 1.5, color: 'var(--foreground)' } }, f.text),
-                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', marginTop: 2 } }, (f.section || '').toLowerCase() + ' · ' + f.severity + (agreed.has(f.issueId) ? ' · concurred' : '')))))),
-        ))),
-      adjList.length
-        ? e('div', null,
-            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 10 } }, 'Adjudicate — the reviewers propose, the human decides'),
-            e('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
-              adjList.map((f: any) => {
-                const d = decisions[f.issueId];
-                const isBusy = busy === f.issueId;
-                const needsConfirm = confirmNeeded[f.issueId];
-                return e('div', { key: f.issueId, style: { display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1px solid ' + (d === 'accepted' ? 'var(--success)' : 'var(--border)'), borderRadius: 'var(--radius-lg)', background: d === 'accepted' ? 'var(--success-bg)' : d === 'dismissed' ? 'var(--muted)' : 'var(--card)', opacity: d === 'dismissed' ? 0.6 : 1 } },
-                  e(StatusDot, { status: agreed.has(f.issueId) ? 'agree' : 'diverge' }),
-                  e('div', { style: { flex: 1, minWidth: 0 } },
-                    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--foreground)' } }, f.text),
-                    e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', marginTop: 2 } }, (f.section || '').toLowerCase() + ' · ' + f.severity + ' · raised by ' + f.role + (agreed.has(f.issueId) ? ' (concurred)' : ''))),
-                  needsConfirm ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--destructive)' } }, 'section changed — confirm') : null,
-                  d ? e(Badge, { variant: d === 'accepted' ? 'default' : 'outline' }, d === 'accepted' ? 'routed' : d === 'sent-back' ? 'sent back' : 'dismissed')
-                    : e('div', { style: { display: 'flex', gap: 6 } },
-                        e(Button, { size: 'sm', disabled: isBusy, onClick: () => decide(f.issueId, 'accepted') }, needsConfirm ? 'Confirm accept' : isBusy ? '…' : 'Accept'),
-                        e(Button, { size: 'sm', variant: 'outline', disabled: isBusy, onClick: () => decide(f.issueId, 'sent-back') }, 'Send back'),
-                        e(Button, { size: 'sm', variant: 'ghost', disabled: isBusy, onClick: () => decide(f.issueId, 'dismissed') }, 'Dismiss')));
-              })))
-        : e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)' } }, running ? 'Waiting for reviewers to surface blocking or concurred issues…' : 'No blocking or concurred issues to adjudicate.')),
+                  e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', marginTop: 2 } }, (f.section || '').toLowerCase() + ' · ' + f.severity + (agreed.has(f.issueId) ? ' · concurred' : '')),
+                  f.disposition === 'dismiss' && f.rationale ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, color: 'var(--muted-foreground)', marginTop: 3, fontStyle: 'italic' } }, '“' + f.rationale + '”') : null),
+                e('span', { style: { flex: 'none', marginTop: 1 } }, dispositionBadge(f))))),
+        )))),
   );
 }
 

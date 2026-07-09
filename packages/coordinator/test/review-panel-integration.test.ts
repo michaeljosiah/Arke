@@ -22,7 +22,15 @@ import { GrantStore } from "../src/grant-store.js";
 import { ProjectRegistry } from "../src/project-registry.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 
-const BRANCH = "feat/multi-model-review-panel";
+/**
+ * SPEC-035 author-adjudicated review, end to end. Reviewers critique on distinct models; the spec-author
+ * then adjudicates every issue (accept → applied; dismiss → rationale) and the coordinator loops up to
+ * three rounds (reconvening only on a blocker-driven material change) before converging and auto-promoting
+ * the draft to `in-review`. The `ScriptedAdapter` lets each test drive both halves — reviewer issues per
+ * round and the author's disposition (including an actual file edit to force a normative change).
+ */
+
+const BRANCH = "feat/spec-035-agent-adjudicated-review";
 const SECTION = "requirements > Requirement: A thing";
 
 function git(cwd: string, ...args: string[]) {
@@ -54,12 +62,12 @@ The system SHALL do a thing.
 - **THEN** the system does the thing
 
 ## Change history
-- 2026-06-30 · ${BRANCH} · draft — ADDED x
+- 2026-07-10 · ${BRANCH} · draft — ADDED x
 `;
 }
 
 function repoWithSpec(): string {
-  const dir = mkdtempSync(join(tmpdir(), "arke-panel-"));
+  const dir = mkdtempSync(join(tmpdir(), "arke-loop-"));
   git(dir, "init", "-q");
   git(dir, "config", "user.email", "t@example.com");
   git(dir, "config", "user.name", "Tester");
@@ -71,6 +79,8 @@ function repoWithSpec(): string {
   git(dir, "commit", "-q", "-m", "init");
   return dir;
 }
+
+const specPath = (dir: string) => resolve(dir, "docs", "specifications", "test.md");
 
 /** An agent image pinning a concrete model on an OpenCode harness (SPEC-016 revised — agent IS model). */
 function agentImage(name: string, model: string): AgentImage {
@@ -85,21 +95,39 @@ function agentImage(name: string, model: string): AgentImage {
   };
 }
 
-/** A roster with distinct reviewer models so a default panel validates (a single model → dup → reject). */
-function reviewerAgents(models = ["anthropic/opus", "github-copilot/gpt"]): AgentRegistry {
-  const images = [
-    agentImage("spec-author", "anthropic/opus"),
-    agentImage("reviewer-a", models[0]!),
-    agentImage("reviewer-b", models[1] ?? models[0]!),
-  ];
-  return new AgentRegistry(images, { "opencode-local": { harness: "opencode", host: "localhost", port: 4096, credentialsRef: "o/g" } });
+/** A roster of author + two reviewers with the given models (default: three pairwise-distinct). */
+function roster(author = "anthropic/opus", a = "anthropic/sonnet", b = "github-copilot/gpt"): AgentRegistry {
+  return new AgentRegistry(
+    [agentImage("spec-author", author), agentImage("reviewer-a", a), agentImage("reviewer-b", b)],
+    { "opencode-local": { harness: "opencode", host: "localhost", port: 4096, credentialsRef: "o/g" } },
+  );
 }
 
-/** An adapter that, when a reviewer is dispatched, emits a completed turn carrying JSON issues. */
-class ReviewMockAdapter implements HarnessAdapter {
-  readonly id = "ReviewMock";
+type Issue = { section: string; severity: string; text: string };
+type Disposition = { issueId: string; action: "accept" | "dismiss"; rationale: string };
+interface Script {
+  /** Issues each reviewer raises in a given (1-based) round. */
+  reviewers: (round: number) => Record<string, Issue[]>;
+  /** The author's plan for a round, given the issues it was handed (parsed from the prompt). */
+  author: (round: number, issues: Array<{ issueId: string; severity: string }>) => { edit?: boolean; dispositions: Disposition[] };
+}
+
+/** Extract `[issue-id] (severity …` entries the coordinator listed in the adjudication prompt. */
+function issuesFromPrompt(prompt: string): Array<{ issueId: string; severity: string }> {
+  const out: Array<{ issueId: string; severity: string }> = [];
+  const re = /- \[(issue-[^\]]+)\] \((\w+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(prompt))) out.push({ issueId: m[1]!, severity: m[2]! });
+  return out;
+}
+
+/** Drives reviewers AND the spec-author from a per-round {@link Script}. */
+class ScriptedAdapter implements HarnessAdapter {
+  readonly id = "ScriptedMock";
   private q: DomainEvent[] = [];
   private n = 0;
+  private round = 0;
+  constructor(private readonly dir: string, private readonly script: Script) {}
   capabilities(): ReadonlySet<Capability> {
     return new Set<Capability>(["events", "diff"]);
   }
@@ -112,15 +140,23 @@ class ReviewMockAdapter implements HarnessAdapter {
   async sendMessage(i: SendMessageInput): Promise<SendReceipt> {
     return { sessionId: i.sessionId, correlationId: "c" };
   }
+  private answer(sessionId: string, payload: unknown): void {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId, specId: "SPEC-TEST", kind: "task", status: "running" } as DomainEvent);
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId, messageId: `m-${sessionId}`, role: "assistant", text: JSON.stringify(payload), toolCalls: [], isStreaming: false } as DomainEvent);
+  }
   async dispatchAsync(i: SendMessageInput): Promise<SendReceipt> {
-    const issues: Record<string, Array<{ section: string; severity: string; text: string }>> = {
-      "reviewer-a": [{ section: SECTION, severity: "blocking", text: "a-concern" }],
-      "reviewer-b": [{ section: SECTION, severity: "suggestion", text: "b-concern" }],
-    };
-    const mine = issues[i.agent];
-    if (mine) {
-      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId: i.sessionId, specId: "SPEC-TEST", kind: "task", status: "running" } as DomainEvent);
-      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId: i.sessionId, messageId: `m-${i.sessionId}`, role: "assistant", text: JSON.stringify(mine), toolCalls: [], isStreaming: false } as DomainEvent);
+    if (i.agent === "reviewer-a") this.round++; // reviewer-a leads each round
+    if (i.agent === "reviewer-a" || i.agent === "reviewer-b") {
+      const mine = this.script.reviewers(this.round)[i.agent] ?? [];
+      this.answer(i.sessionId, mine);
+    } else if (i.agent === "spec-author") {
+      const prompt = (i.parts.find((p) => p.type === "text") as { text?: string } | undefined)?.text ?? "";
+      const plan = this.script.author(this.round, issuesFromPrompt(prompt));
+      if (plan.edit) {
+        const t = readFileSync(specPath(this.dir), "utf8");
+        writeFileSync(specPath(this.dir), t.replace("SHALL do a thing", `SHALL do a thing (revised in round ${this.round})`), "utf8");
+      }
+      this.answer(i.sessionId, plan.dispositions);
     }
     return { sessionId: i.sessionId, correlationId: "c" };
   }
@@ -132,15 +168,15 @@ class ReviewMockAdapter implements HarnessAdapter {
         continue;
       }
       await new Promise<void>((r) => {
-        const t = setTimeout(r, 10);
+        const t = setTimeout(r, 5);
         signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
       });
     }
   }
 }
 
-async function start(dir: string, reg: AgentRegistry) {
-  const c = new Coordinator(new ReviewMockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
+async function start(dir: string, adapter: HarnessAdapter, reg: AgentRegistry) {
+  const c = new Coordinator(adapter, new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
     projectRoot: dir,
     registry: new ProjectRegistry({ persist: false }),
     agents: reg,
@@ -179,171 +215,291 @@ function connect(port: number) {
   return { ws, ready, waitFor, request, ev, frames };
 }
 
-test("a panel runs end to end: issues, agreement, completion — and satisfies the approval gate", async () => {
+const status = (dir: string) => /status:\s*(\S+)/.exec(readFileSync(specPath(dir), "utf8"))?.[1];
+
+test("a review converges in one round (dismiss the blocker with a rationale) and auto-promotes to in-review", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, reviewerAgents());
+  const script: Script = {
+    reviewers: () => ({
+      "reviewer-a": [{ section: SECTION, severity: "blocking", text: "a-blocker" }],
+      "reviewer-b": [{ section: SECTION, severity: "suggestion", text: "b-nit" }],
+    }),
+    // Accept the suggestion, dismiss the blocker WITH a rationale → no blocker accepted → converge.
+    author: (_round, issues) => ({
+      dispositions: issues.map((i) => i.severity === "blocking"
+        ? { issueId: i.issueId, action: "dismiss", rationale: "the concern does not hold" }
+        : { issueId: i.issueId, action: "accept", rationale: "folded in" }),
+    }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
   after(() => c.stop());
   const { ws, ready, request, ev, frames } = connect(port);
   await ready;
 
-  const conv = await request("convenePanel", { specId: "SPEC-TEST" });
+  const conv = await request("reviewSpec", { specId: "SPEC-TEST" });
   assert.equal(conv.ok, true);
-  assert.equal(conv.result.reviewers.length, 2);
-  assert.ok(/·/.test(conv.result.reviewers[0].model)); // client-safe label (harness · model), not a bare vendor id
+  assert.ok(/·/.test(conv.result.reviewers[0].model)); // client label, never a bare vendor id
 
   await ev("panel.started");
   await ev("panel.issue", (e) => e.reviewerRole === "reviewer-a");
-  await ev("panel.issue", (e) => e.reviewerRole === "reviewer-b"); // BOTH reviewers' issues captured (no dropped-on-race)
-  await ev("panel.agreed", (e) => e.section === SECTION); // both reviewers hit the same section
-  const complete = await ev("panel.complete");
-  assert.equal(complete.event.status, "complete");
-  assert.equal(complete.event.specId, "SPEC-TEST"); // panel.complete carries its own specId (gate keys off it)
+  await ev("panel.adjudicating", (e) => e.round === 1);
+  await ev("panel.disposition", (e) => e.actor === "spec-author");
+  const rc = await ev("panel.round-complete");
+  assert.equal(rc.event.reconvened, false);
+  const converged = await ev("review.converged");
+  assert.equal(converged.event.rounds, 1);
+  assert.equal(converged.event.unresolvedBlockers.length, 1); // the dismissed blocker is surfaced
+  await ev("spec.status", (e) => e.status === "in-review"); // auto-promoted
 
-  // panel.started must reach the client before any panel.issue, so the UI has columns to fold into.
+  // panel.started must precede panel.issue so the UI has columns to fold into.
   const idx = (pred: (e: any) => boolean) => frames.findIndex((f) => f.type === "event" && pred(f.event));
   assert.ok(idx((e) => e.type === "panel.started") < idx((e) => e.type === "panel.issue"));
-
-  // The finalisation gate is now satisfied → approveDraft commits.
-  const appr = await request("approveDraft", { specId: "SPEC-TEST" });
-  assert.equal(appr.ok, true);
-  assert.equal(appr.result.status, "in-review");
-  assert.ok(/status:\s*in-review/.test(readFileSync(resolve(dir, "docs", "specifications", "test.md"), "utf8")));
+  assert.equal(status(dir), "in-review");
   ws.close();
 });
 
-test("approveDraft is blocked by the review gate until a panel completes", async () => {
+test("a blocker the author accepts on a materially-changed spec reconvenes, then converges", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, reviewerAgents());
+  const script: Script = {
+    reviewers: (round) => round === 1
+      ? { "reviewer-a": [{ section: SECTION, severity: "blocking", text: "fix the thing" }], "reviewer-b": [] }
+      : { "reviewer-a": [{ section: SECTION, severity: "suggestion", text: "tiny nit" }], "reviewer-b": [] },
+    author: (round, issues) => round === 1
+      // Round 1: accept the blocker AND edit the spec (material change) → reconvene.
+      ? { edit: true, dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "applied" })) }
+      // Round 2: only a suggestion, accept it, no blocker → converge.
+      : { dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "applied" })) },
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const r1 = await ev("panel.round-complete", (e) => e.round === 1);
+  assert.equal(r1.event.reconvened, true, "an accepted blocker + material change reconvenes");
+  await ev("panel.round-complete", (e) => e.round === 2);
+  const converged = await ev("review.converged");
+  assert.equal(converged.event.rounds, 2);
+  // Two panels convened (one per round).
+  const panels = frames.filter((f) => f.type === "event" && f.event?.type === "panel.started").length;
+  assert.equal(panels, 2);
+  ws.close();
+});
+
+test("a dismiss-only round does not reconvene even though a blocker was raised", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "blocking", text: "b" }], "reviewer-b": [] }),
+    // Dismiss the blocker (with rationale) and edit nothing → no material change → converge, one round.
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "dismiss", rationale: "wrong" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const converged = await ev("review.converged");
+  assert.equal(converged.event.rounds, 1);
+  assert.equal(frames.filter((f) => f.type === "event" && f.event?.type === "panel.started").length, 1);
+  ws.close();
+});
+
+test("the loop is capped at three rounds even if every round accepts a blocker and changes the spec", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "blocking", text: "still wrong" }], "reviewer-b": [] }),
+    author: (_r, issues) => ({ edit: true, dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "applied" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const converged = await ev("review.converged", () => true, 8000);
+  assert.equal(converged.event.rounds, 3, "stops at the cap");
+  assert.equal(converged.event.reachedCap, true, "flags that it stopped at the cap with a pending re-review");
+  assert.equal(frames.filter((f) => f.type === "event" && f.event?.type === "panel.started").length, 3);
+  ws.close();
+});
+
+test("an accepted blocker that makes NO normative change is surfaced as an unresolved blocker (hollow accept)", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "blocking", text: "fix me" }], "reviewer-b": [] }),
+    // Accept the blocker but DO NOT edit the file → acceptedBlocker true, changed false → converge,
+    // and the accepted-but-unapplied blocker must be surfaced (not silently counted as applied).
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "will fix" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const converged = await ev("review.converged");
+  assert.equal(converged.event.rounds, 1, "no material change → no reconvene");
+  assert.equal(converged.event.unresolvedBlockers.length, 1, "the hollow accept is surfaced to the human");
+  assert.match(converged.event.unresolvedBlockers[0].rationale, /did not change/);
+  ws.close();
+});
+
+test("every reviewer issue receives a disposition — an omitted suggestion is recorded, not dropped", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "suggestion", text: "s1" }], "reviewer-b": [{ section: "design", severity: "question", text: "q1" }] }),
+    // The author only disposes the FIRST issue, always omitting the other → after re-prompt it is defaulted.
+    author: (_r, issues) => ({ dispositions: issues.slice(0, 1).map((i) => ({ issueId: i.issueId, action: "accept", rationale: "ok" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  await ev("review.converged");
+  // Both issues got a panel.disposition (one accepted by the author, one defaulted to dismiss).
+  const disposed = frames.filter((f) => f.type === "event" && f.event?.type === "panel.disposition").length;
+  assert.equal(disposed, 2, "no reviewer issue is left without a traced disposition");
+  ws.close();
+});
+
+test("accept-or-justify: an unjustified blocker dismissal re-prompts, then fails the loop (gate unsatisfied)", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "blocking", text: "b" }], "reviewer-b": [] }),
+    // Dismiss the blocker with NO rationale, every time → re-prompt once, then fail.
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "dismiss", rationale: "" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const failed = await ev("review.gate-failed", (e) => /blocking issue/.test(e.reason));
+  assert.ok(failed);
+  assert.equal(status(dir), "draft"); // never promoted
+  // The gate is unsatisfied: a direct approve is refused.
+  const appr = await request("approveDraft", { specId: "SPEC-TEST" });
+  assert.equal(appr.ok, false);
+  ws.close();
+});
+
+test("adjudicator-model collision (author shares reviewer-a's model) warns but does not block convergence", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "suggestion", text: "nit" }], "reviewer-b": [] }),
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "ok" })) }),
+  };
+  // spec-author and reviewer-a share a model; reviewer-b differs (so the panel still validates).
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster("anthropic/opus", "anthropic/opus", "github-copilot/gpt"));
+  after(() => c.stop());
+  const { ws, ready, request, ev } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const collision = await ev("panel.adjudicator-model-collision", (e) => e.reviewerRole === "reviewer-a");
+  assert.ok(collision, "the shared-model collision is surfaced");
+  await ev("review.converged"); // …and the loop still converges
+  ws.close();
+});
+
+test("approveDraft is blocked until the review loop converges", async () => {
+  const dir = repoWithSpec();
+  const script: Script = { reviewers: () => ({}), author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "" })) }) };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;
   const appr = await request("approveDraft", { specId: "SPEC-TEST" });
   assert.equal(appr.ok, false);
-  assert.match(appr.error, /no completed review/i);
+  assert.match(appr.error, /review not converged/i);
   await ev("review.gate-failed");
-  // status unchanged on disk
-  assert.ok(/status:\s*draft/.test(readFileSync(resolve(dir, "docs", "specifications", "test.md"), "utf8")));
+  assert.equal(status(dir), "draft");
   ws.close();
 });
 
-test("convenePanel rejects a roster whose reviewers declare the same model", async () => {
+test("reviewSpec rejects a roster whose reviewers declare the same model", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, reviewerAgents(["anthropic/opus"])); // reviewer-b falls back to the same model
+  const script: Script = { reviewers: () => ({}), author: () => ({ dispositions: [] }) };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster("anthropic/opus", "anthropic/opus", "anthropic/opus"));
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;
-  const conv = await request("convenePanel", { specId: "SPEC-TEST" });
+  const conv = await request("reviewSpec", { specId: "SPEC-TEST" });
   assert.equal(conv.ok, false);
   await ev("panel.config-error");
   ws.close();
 });
 
 /**
- * Adapter that reproduces the real harness ordering: the reviewer's own PROMPT arrives first as a
- * completed `message.updated` with role "user" — and that prompt embeds an example issues array —
- * followed by the reviewer's real assistant answer. The panel must ingest ONLY the assistant answer.
+ * The adjudication prompt embeds an EXAMPLE disposition array; the author's own prompt arrives first as a
+ * completed `message.updated` with role "user". The loop must ingest ONLY the author's assistant answer —
+ * otherwise it would parse the example's `issue-abc`/`issue-def` ids (which match no real issue) and stall.
  */
-class PromptEchoMockAdapter implements HarnessAdapter {
-  readonly id = "PromptEchoMock";
+class AuthorEchoAdapter implements HarnessAdapter {
+  readonly id = "AuthorEchoMock";
   private q: DomainEvent[] = [];
   private n = 0;
-  capabilities(): ReadonlySet<Capability> {
-    return new Set<Capability>(["events", "diff"]);
-  }
-  readiness(): Readiness {
-    return { ready: true };
-  }
-  async createSession(input: CreateSessionInput): Promise<SessionRef> {
-    return { sessionId: `${input.specId}-s${++this.n}` };
-  }
-  async sendMessage(i: SendMessageInput): Promise<SendReceipt> {
-    return { sessionId: i.sessionId, correlationId: "c" };
+  capabilities(): ReadonlySet<Capability> { return new Set<Capability>(["events", "diff"]); }
+  readiness(): Readiness { return { ready: true }; }
+  async createSession(input: CreateSessionInput): Promise<SessionRef> { return { sessionId: `${input.specId}-s${++this.n}` }; }
+  async sendMessage(i: SendMessageInput): Promise<SendReceipt> { return { sessionId: i.sessionId, correlationId: "c" }; }
+  private push(sessionId: string, role: "user" | "assistant", text: string) {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId, messageId: `${role}-${sessionId}`, role, text, toolCalls: [], isStreaming: false } as DomainEvent);
   }
   async dispatchAsync(i: SendMessageInput): Promise<SendReceipt> {
-    const real: Record<string, string> = {
-      "reviewer-a": JSON.stringify([{ section: SECTION, severity: "blocking", text: "REAL-a-concern" }]),
-      "reviewer-b": JSON.stringify([{ section: SECTION, severity: "suggestion", text: "REAL-b-concern" }]),
-    };
-    const mine = real[i.agent];
-    if (mine) {
-      const promptWithExample = [
-        "You are a reviewer. End with a fenced block like:",
-        "```json",
-        '[{"section":"PROMPT EXAMPLE","severity":"blocking","text":"EXAMPLE-FROM-PROMPT-MUST-BE-IGNORED"}]',
-        "```",
-      ].join("\n");
-      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "session.status", sessionId: i.sessionId, specId: "SPEC-TEST", kind: "task", status: "running" } as DomainEvent);
-      // The user prompt is a COMPLETED (non-streaming) message.updated — the exact shape that fooled the parser.
-      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId: i.sessionId, messageId: `u-${i.sessionId}`, role: "user", text: promptWithExample, toolCalls: [], isStreaming: false } as DomainEvent);
-      this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId: i.sessionId, messageId: `m-${i.sessionId}`, role: "assistant", text: mine, toolCalls: [], isStreaming: false } as DomainEvent);
+    if (i.agent === "reviewer-a") this.push(i.sessionId, "assistant", JSON.stringify([{ section: SECTION, severity: "suggestion", text: "nit" }]));
+    else if (i.agent === "reviewer-b") this.push(i.sessionId, "assistant", JSON.stringify([]));
+    else if (i.agent === "spec-author") {
+      const prompt = (i.parts.find((p) => p.type === "text") as { text?: string } | undefined)?.text ?? "";
+      const realId = issuesFromPrompt(prompt)[0]?.issueId ?? "issue-none";
+      this.push(i.sessionId, "user", prompt); // the prompt echo — contains issue-abc/issue-def EXAMPLES
+      this.push(i.sessionId, "assistant", JSON.stringify([{ issueId: realId, action: "accept", rationale: "ok" }]));
     }
     return { sessionId: i.sessionId, correlationId: "c" };
   }
   async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
     while (!signal?.aborted) {
       const next = this.q.shift();
-      if (next) {
-        yield next;
-        continue;
-      }
-      await new Promise<void>((r) => {
-        const t = setTimeout(r, 10);
-        signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
-      });
+      if (next) { yield next; continue; }
+      await new Promise<void>((r) => { const t = setTimeout(r, 5); signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
     }
   }
 }
 
-test("the panel ingests the reviewer's ANSWER, never the example array embedded in its prompt", async () => {
+test("the loop ingests the author's disposition ANSWER, never the example array echoed in its prompt", async () => {
   const dir = repoWithSpec();
-  const c = new Coordinator(new PromptEchoMockAdapter(), new Trace(join(dir, ".arke", "trace.ndjson")), new GrantStore(join(dir, ".arke", "grants.ndjson")), 0, {
-    projectRoot: dir,
-    registry: new ProjectRegistry({ persist: false }),
-    agents: reviewerAgents(),
-    idleTtlMs: 0,
-  });
-  const port = await c.start();
+  const { c, port } = await start(dir, new AuthorEchoAdapter(), roster());
   after(() => c.stop());
   const { ws, ready, request, ev, frames } = connect(port);
   await ready;
-
-  const conv = await request("convenePanel", { specId: "SPEC-TEST" });
-  assert.equal(conv.ok, true);
-
-  const issueA = await ev("panel.issue", (e) => e.reviewerRole === "reviewer-a");
-  const issueB = await ev("panel.issue", (e) => e.reviewerRole === "reviewer-b");
-  await ev("panel.complete");
-
-  // The REAL answers are ingested…
-  assert.equal(issueA.event.text, "REAL-a-concern");
-  assert.equal(issueB.event.text, "REAL-b-concern");
-  // …and the example from the prompt is NEVER surfaced as an issue.
-  const anyExample = frames.some((f) => f.type === "event" && f.event?.type === "panel.issue" && /EXAMPLE-FROM-PROMPT|PROMPT EXAMPLE/.test(f.event.text + f.event.section));
-  assert.equal(anyExample, false, "the prompt's example array must not be parsed as a reviewer issue");
-  // Exactly one issue per reviewer (the user echo did not also produce one).
-  const issueCount = frames.filter((f) => f.type === "event" && f.event?.type === "panel.issue").length;
-  assert.equal(issueCount, 2);
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const disp = await ev("panel.disposition");
+  assert.equal(disp.event.action, "accept");
+  await ev("review.converged"); // converged using the REAL disposition, not the prompt example
+  // The prompt's example ids were never surfaced as dispositions.
+  const exampleUsed = frames.some((f) => f.type === "event" && f.event?.type === "panel.disposition" && /issue-abc|issue-def/.test(f.event.issueId));
+  assert.equal(exampleUsed, false);
   ws.close();
 });
 
-test("adjudicate: dismiss records the decision; accept routes to the authoring agent", async () => {
+test("sendBackReview clears the converged gate and reopens authoring (in-review → draft)", async () => {
   const dir = repoWithSpec();
-  const { c, port } = await start(dir, reviewerAgents());
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "suggestion", text: "nit" }], "reviewer-b": [] }),
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "ok" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
   after(() => c.stop());
   const { ws, ready, request, ev } = connect(port);
   await ready;
-  const conv = await request("convenePanel", { specId: "SPEC-TEST" });
-  const panelId = conv.result.panelId;
-  const issue = await ev("panel.issue");
-  const issueId = issue.event.issueId;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  await ev("spec.status", (e) => e.status === "in-review");
 
-  const dismiss = await request("adjudicateIssue", { panelId, issueId, action: "dismissed", rationale: "out of scope" });
-  assert.equal(dismiss.ok, true);
-
-  // accept a (second) issue → routed to spec-author (no stale change yet → no warning)
-  const issue2 = await ev("panel.issue", (e) => e.issueId !== issueId);
-  const accept = await request("adjudicateIssue", { panelId, issueId: issue2.event.issueId, action: "accepted" });
-  assert.equal(accept.ok, true);
-  assert.notEqual(accept.result.staleWarning, true);
+  const back = await request("sendBackReview", { specId: "SPEC-TEST" });
+  assert.equal(back.ok, true);
+  await ev("spec.status", (e) => e.status === "draft");
+  assert.equal(status(dir), "draft");
+  // Gate cleared: a direct approve is refused again.
+  const appr = await request("approveDraft", { specId: "SPEC-TEST" });
+  assert.equal(appr.ok, false);
   ws.close();
 });
