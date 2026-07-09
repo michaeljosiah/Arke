@@ -40,9 +40,10 @@ const NAV = [
 ];
 
 // Temporarily hidden from the nav to focus the MVP on the author -> review -> deliver spine:
-// the downstream artifact-generation + system-of-record projection surfaces (Generation, Record
-// sync, Integrations). The screens/routes still exist — remove an id here to restore the item.
-const HIDDEN_FOR_MVP = new Set(['generation', 'projections', 'integrations']);
+// the system-of-record projection surfaces (Record sync, Integrations). The screens/routes still
+// exist — remove an id here to restore the item. Generation is live (SPEC-013): its workspace renders
+// the agent's pre-write artefact proposal for review, so it stays in the nav.
+const HIDDEN_FOR_MVP = new Set(['projections', 'integrations']);
 
 function NavItem({ it, active, onClick, badge }: any) {
   const [hover, setHover] = React.useState(false);
@@ -72,8 +73,11 @@ const CONN_UI: Record<string, { status: string; pulse: boolean; label: string }>
 };
 
 function Sidebar() {
-  const { view, project, notifs, harnesses, connection, connectionAttempts, live } = useStore();
+  const { view, project, notifs, harnesses, connection, connectionAttempts, live, generation } = useStore();
   const unread = notifs.filter((n) => !n.read).length;
+  // A pending pre-write proposal (SPEC-013) badges the Generation item so an auto-triggered proposal is
+  // discoverable — it arrives on spec approval without the user navigating here.
+  const genPending = generation && generation.status === 'pending-review' ? (generation.artifacts || []).length : 0;
   // Escalate a SUSTAINED reconnect failure to a distinct "coordinator unreachable" (the coordinator
   // crashed / stopped) rather than an indefinite "reconnecting…" — the client can't reach the control
   // plane at all, not merely a transient blip.
@@ -95,7 +99,7 @@ function Sidebar() {
         return e('div', { key: grp.group, style: { marginBottom: 14 } },
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--neutral-400)', padding: '0 8px', marginBottom: 4 } }, grp.group),
           items.map((it) => e(NavItem, { key: it.id, it, active: view === it.id || (view === 'session' && it.id === 'board') || (view === 'diff' && it.id === 'board'),
-            onClick: () => go(it.id), badge: it.id === 'notifications' && unread ? unread : null })),
+            onClick: () => go(it.id), badge: it.id === 'notifications' && unread ? unread : it.id === 'generation' && genPending ? genPending : null })),
         );
       }),
     ),

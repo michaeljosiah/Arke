@@ -3,7 +3,8 @@ import { Icon } from '../icons';
 import { Button, Badge, Card, Callout, StatusDot, Tabs } from '../ds';
 import { Page, SectionHead } from '../utils';
 import { store, engine, useStore } from '../store';
-import { adjudicateIssueLive } from '../live';
+import { adjudicateIssueLive, triggerGenerationLive, approveGenerationLive, rejectGenerationLive } from '../live';
+import { collectApproval, approveAll as approveAllArtifacts, isApprovable, needsSorTarget, effectiveSorTarget, type ArtifactDecision, type ArtifactEditInput } from '../generation-logic';
 
 const e = React.createElement;
 
@@ -219,7 +220,161 @@ const ARTIFACTS = [
   { id: 'k1', group: 'Tracking', target: 'board · SPEC-014', det: true, title: 'Tracking entry from spec state', preview: 'Projected delivery state from frontmatter status + session + CI. No manual card.' },
 ];
 
+/** The generation workspace renders live (wired to the coordinator) once a snapshot has arrived, else the demo. */
 export function Generation() {
+  const live = useStore((s: any) => s.live);
+  return live ? e(LiveGeneration) : e(DemoGeneration);
+}
+
+const TARGET_LABEL: Record<string, string> = { docs: 'Documentation', tests: 'Tests', ticket: 'Tickets', tracking: 'Tracking' };
+const SOR_TARGETS = ['jira', 'github', 'azure-devops'];
+
+/** Centred empty state — no live proposal yet; offers to trigger generation for the active spec. */
+function GenEmpty({ activeSpec }: { activeSpec?: string }) {
+  const [busy, setBusy] = React.useState(false);
+  const gen = async () => {
+    if (!activeSpec) return;
+    setBusy(true);
+    const res = await triggerGenerationLive(activeSpec);
+    setBusy(false);
+    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `generation failed — ${res.error}` } }));
+  };
+  return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 40 } },
+    e('span', { style: { display: 'flex', color: 'var(--muted-foreground)' } }, e(Icon, { name: 'sparkle', size: 26 })),
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'No generation proposal'),
+    e('p', { style: { margin: 0, fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)', maxWidth: 480, textAlign: 'center', lineHeight: 1.5 } },
+      'When a specification is approved, an agent proposes the downstream artefacts — documentation, tickets, test scaffolds and tracking entries — for you to review here. Nothing is written until you approve.'),
+    e('div', { style: { display: 'flex', gap: 8, marginTop: 2 } },
+      activeSpec ? e(Button, { disabled: busy, iconLeft: e(Icon, { name: busy ? 'refresh' : 'sparkle', size: 14 }), onClick: gen }, busy ? 'Generating…' : 'Generate for ' + activeSpec) : null,
+      e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring')));
+}
+
+/** Centred error/timeout state with a Retry that re-triggers generation for the spec. */
+function GenError({ specId, error }: { specId: string; error?: string }) {
+  const [busy, setBusy] = React.useState(false);
+  const retry = async () => {
+    setBusy(true);
+    const res = await triggerGenerationLive(specId);
+    setBusy(false);
+    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `generation failed — ${res.error}` } }));
+  };
+  return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 40 } },
+    e('span', { style: { display: 'flex', color: 'var(--destructive)' } }, e(Icon, { name: 'alert', size: 26 })),
+    e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, 'Generation failed'),
+    e('p', { style: { margin: 0, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted-foreground)', maxWidth: 480, textAlign: 'center', lineHeight: 1.5 } }, error || 'The agent did not return a usable proposal.'),
+    e('div', { style: { display: 'flex', gap: 8, marginTop: 2 } },
+      e(Button, { disabled: busy, iconLeft: e(Icon, { name: 'refresh', size: 14 }), onClick: retry }, busy ? 'Retrying…' : 'Retry generation'),
+      e(Button, { variant: 'outline', onClick: () => store.set({ view: 'cockpit' }) }, 'Back to authoring')));
+}
+
+/**
+ * Live generation workspace (SPEC-013): renders the agent's pre-write artefact proposal for review.
+ * The human approves, edits or rejects each artefact on a preview; a ticket/tracking artefact with no
+ * integration target is flagged invalid and cannot be approved until a target is supplied. Approving
+ * sends the decision + final content to the coordinator, which records it to the trace BEFORE any write
+ * and fans out. Nothing is written before approval; this screen holds no authoritative state.
+ */
+function LiveGeneration() {
+  const { generation, activeSpec } = useStore();
+  const proposalId = generation?.proposalId;
+  const [decisions, setDecisions] = React.useState({} as Record<string, ArtifactDecision>);
+  const [edits, setEdits] = React.useState({} as Record<string, ArtifactEditInput>);
+  const [sel, setSel] = React.useState(null as string | null);
+  const [editing, setEditing] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+
+  // A fresh proposal (new proposalId) resets all local review state and selects its first artefact.
+  React.useEffect(() => {
+    setDecisions({}); setEdits({}); setEditing(false);
+    const first = generation && generation.artifacts && generation.artifacts[0];
+    setSel(first ? first.id : null);
+  }, [proposalId]);
+
+  if (!generation) return e(GenEmpty, { activeSpec });
+  if (generation.status === 'error') return e(GenError, { specId: generation.specId, error: generation.error });
+
+  const artifacts = (generation.artifacts || []) as any[];
+  const groups = [...new Set(artifacts.map((a) => a.target))];
+  const selected = artifacts.find((a) => a.id === sel) || null;
+  const approvedCount = artifacts.filter((a) => decisions[a.id] === 'approved').length;
+  const set = (id: string, d: ArtifactDecision) => setDecisions((s) => ({ ...s, [id]: d }));
+  const patchEdit = (id: string, patch: ArtifactEditInput) => setEdits((s) => ({ ...s, [id]: { ...s[id], ...patch } }));
+
+  const approve = async () => {
+    const { approvedArtifactIds, edits: editList } = collectApproval(artifacts, decisions, edits);
+    if (approvedArtifactIds.length === 0) return;
+    setBusy(true);
+    const res = await approveGenerationLive(generation.specId, generation.proposalId, approvedArtifactIds, editList);
+    setBusy(false);
+    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval failed — ${res.error}` } }));
+    // On success the coordinator emits generation.decided, which clears the proposal → the empty state shows.
+  };
+  const reject = async () => {
+    setBusy(true);
+    const res = await rejectGenerationLive(generation.specId, generation.proposalId);
+    setBusy(false);
+    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `reject failed — ${res.error}` } }));
+  };
+
+  return e('div', { style: { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } },
+    e('div', { style: { padding: '18px var(--page-pad) 0' } },
+      e(SectionHead, { eyebrow: generation.specId + ' · Generation', title: 'Propose, decide, execute',
+        sub: 'An agent proposed the downstream artefacts from the approved specification. Approve, edit or reject each on its preview — nothing is written to any system of record before you approve.',
+        action: e('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+          e(Badge, { variant: 'secondary' }, approvedCount + ' of ' + artifacts.length + ' approved'),
+          e(Button, { size: 'sm', variant: 'outline', disabled: busy, onClick: () => setDecisions(approveAllArtifacts(artifacts, edits)) }, 'Approve all'),
+          e(Button, { size: 'sm', variant: 'ghost', disabled: busy, onClick: reject }, 'Reject'),
+          e(Button, { disabled: approvedCount === 0 || busy, iconLeft: e(Icon, { name: 'zap', size: 15 }), onClick: approve }, busy ? 'Writing…' : 'Approve & write')) })),
+    e('div', { style: { flex: 1, display: 'flex', gap: 0, minHeight: 0, borderTop: '1px solid var(--border)' } },
+      // Left: the artefacts grouped by target, with a per-item review-state icon.
+      e('div', { style: { width: 420, flex: 'none', borderRight: '1px solid var(--border)', overflowY: 'auto', padding: '14px 18px' } },
+        groups.map((g) => e('div', { key: g, style: { marginBottom: 16 } },
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted-foreground)', marginBottom: 8 } }, TARGET_LABEL[g] || g),
+          artifacts.filter((a) => a.target === g).map((a) => {
+            const d = decisions[a.id];
+            const approvable = isApprovable(a, edits[a.id]);
+            const icon = d === 'approved' ? 'checkCircle' : d === 'rejected' ? 'x' : !approvable ? 'alert' : 'dot';
+            const iconColor = d === 'approved' ? 'var(--success)' : d === 'rejected' ? 'var(--destructive)' : !approvable ? 'var(--warning)' : 'var(--neutral-400)';
+            return e('button', { key: a.id, onClick: () => { setSel(a.id); setEditing(false); }, style: { display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '10px 12px', marginBottom: 6, border: '1px solid ' + (sel === a.id ? 'var(--foreground)' : 'var(--border)'), borderRadius: 'var(--radius-lg)', background: 'var(--card)', cursor: 'pointer' } },
+              e('span', { style: { flex: 'none', display: 'flex', color: iconColor } }, e(Icon, { name: icon, size: 16 })),
+              e('div', { style: { flex: 1, minWidth: 0 } },
+                e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 500, color: 'var(--foreground)' } }, a.title),
+                e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, effectiveSorTarget(a, edits[a.id]) ? (effectiveSorTarget(a, edits[a.id]) + ' · ' + a.target) : a.target)));
+          }))),
+      ),
+      // Right: the selected artefact's preview, review controls, inline edit, and invalid-target fix.
+      e('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
+        selected ? e(ArtifactPane, { key: selected.id, a: selected, decision: decisions[selected.id], edit: edits[selected.id], editing, setEditing, set, patchEdit }) : null),
+    ),
+  );
+}
+
+/** The right-hand preview of one artefact: title, review-state controls, inline edit, invalid-target fix. */
+function ArtifactPane({ a, decision, edit, editing, setEditing, set, patchEdit }: any) {
+  const effTarget = effectiveSorTarget(a, edit);
+  const approvable = isApprovable(a, edit);
+  const content = edit?.content !== undefined ? edit.content : a.content;
+  const invalid = needsSorTarget(a.target) && !effTarget;
+  return e('div', { style: { flex: 1, overflowY: 'auto', padding: 22 } },
+    e('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14 } },
+      e('div', { style: { flex: 1, minWidth: 0 } },
+        e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600 } }, a.title),
+        e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--muted-foreground)', marginTop: 2 } }, (effTarget ? effTarget + ' · ' : '') + a.target)),
+      e('div', { style: { display: 'flex', gap: 6, flex: 'none' } },
+        e(Button, { size: 'sm', variant: decision === 'approved' ? 'default' : 'outline', disabled: !approvable, onClick: () => set(a.id, 'approved') }, decision === 'approved' ? 'Approved' : 'Approve'),
+        e(Button, { size: 'sm', variant: decision === 'rejected' ? 'destructive' : 'ghost', onClick: () => set(a.id, 'rejected') }, decision === 'rejected' ? 'Rejected' : 'Reject'),
+        e(Button, { size: 'sm', variant: 'ghost', iconLeft: e(Icon, { name: 'pencil', size: 14 }), onClick: () => setEditing((x: boolean) => !x) }, editing ? 'Done' : 'Edit'))),
+    invalid ? e(Callout, { variant: 'default', label: 'Invalid — no integration target specified', style: { marginBottom: 14, borderColor: 'var(--warning)' } },
+      e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 } },
+        e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'Route this to:'),
+        SOR_TARGETS.map((t) => e('button', { key: t, onClick: () => patchEdit(a.id, { sorTarget: t }), style: { fontFamily: 'var(--font-mono)', fontSize: 11, padding: '3px 9px', borderRadius: 999, cursor: 'pointer', border: '1px solid ' + (effTarget === t ? 'var(--foreground)' : 'var(--border)'), background: effTarget === t ? 'var(--foreground)' : 'var(--card)', color: effTarget === t ? 'var(--background)' : 'var(--foreground)' } }, t)))) : null,
+    editing
+      ? e('textarea', { value: content, onChange: (ev: any) => patchEdit(a.id, { content: ev.target.value }), spellCheck: false, style: { width: '100%', minHeight: 260, boxSizing: 'border-box', background: 'var(--neutral-950)', borderRadius: 'var(--radius-lg)', padding: '16px 18px', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7, color: '#E5E5E5', border: '1px solid var(--border)', resize: 'vertical' } })
+      : e('div', { style: { background: 'var(--neutral-950)', borderRadius: 'var(--radius-lg)', padding: '16px 18px', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7, color: '#E5E5E5', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, content),
+    edit?.content !== undefined && edit.content !== a.content ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--muted-foreground)', marginTop: 8 } }, 'edited — your version will be written, not the original proposal') : null);
+}
+
+function DemoGeneration() {
   const [state, setState] = React.useState(() => Object.fromEntries(ARTIFACTS.map((a) => [a.id, 'proposed'])));
   const [sel, setSel] = React.useState(ARTIFACTS[0].id);
   const [executing, setExecuting] = React.useState(false);
