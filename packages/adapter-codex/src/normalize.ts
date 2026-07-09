@@ -70,13 +70,15 @@ export function normalize(
 
   switch (m) {
     case "turn.started": {
-      const model = str(params.model) ?? str((params.turn as { model?: string } | undefined)?.model);
+      // The model rides on the turn object (verified against the real protocol: TurnStartedNotification
+      // = { threadId, turn }); absent → the harness's own default.
+      const model = str((params.turn as { model?: string } | undefined)?.model);
       return [{ ...base, type: "session.status", status: "running", ...(model ? { model } : {}) }];
     }
 
-    case "item.agentMessage.delta":
-    case "item.agent_message.delta": {
-      const messageId = str(params.itemId) ?? str(params.item_id) ?? str(item.id) ?? sessionId;
+    case "item.agentMessage.delta": {
+      // Real shape: AgentMessageDeltaNotification = { threadId, turnId, itemId, delta: string }.
+      const messageId = str(params.itemId) ?? str(item.id) ?? sessionId;
       const delta = deltaText(params);
       if (!delta) return [];
       const next = state.partByMessage.get(messageId) ?? 0;
@@ -84,34 +86,41 @@ export function normalize(
       return [{ ...e, correlationId: messageId, type: "message.part", sessionId, messageId, partIndex: next, delta, role: "assistant", done: false }];
     }
 
-    case "item.started":
-    case "item.updated":
     case "item.completed": {
-      if (itemType === "agent_message") {
-        // Only a COMPLETED agent message carries the full text — emit a non-streaming snapshot so the
-        // read model converges even if deltas were missed (live-tail has no replay).
-        if (m !== "item.completed") return [];
+      // A completed `agentMessage` ThreadItem carries the full text — a non-streaming snapshot so the
+      // read model converges even if deltas were missed (live-tail has no replay). The real item type is
+      // `agentMessage` (camelCase), verified against the app-server's generated ThreadItem union.
+      if (itemType === "agentMessage") {
         const messageId = str(item.id) ?? sessionId;
         const text = str(item.text) ?? "";
         return [{ ...e, correlationId: messageId, type: "message.updated", sessionId, messageId, role: "assistant", text, toolCalls: [], isStreaming: false }];
       }
-      if (itemType === "plan_update" || itemType === "todo_list") {
-        return [{ ...e, type: "todo.updated", sessionId, todos: planTodos(item) }];
-      }
-      // command_execution / file_change / reasoning / mcp_tool_call / web_search — internal to Codex;
-      // file changes surface through git-derived getDiff, not an event (Decision #4).
+      // commandExecution / fileChange / reasoning / mcpToolCall / webSearch — internal to Codex; file
+      // changes surface through git-derived getDiff, not an event (Decision #4). Plan updates arrive as
+      // their own `turn/plan/updated` notification (below), not an item.
       return [];
     }
 
+    case "turn.plan.updated": {
+      // Real shape: TurnPlanUpdatedNotification = { threadId, turnId, explanation, plan: [{ step, status }] }
+      // where status is pending | inProgress | completed.
+      return [{ ...e, type: "todo.updated", sessionId, todos: planTodos(params) }];
+    }
+
     case "turn.completed": {
-      const turnId = str(params.turnId) ?? str(params.turn_id) ?? str(params.threadId) ?? sessionId;
+      // Real shape: TurnCompletedNotification = { threadId, turn } where turn = { id, status, error }.
+      const turn = (params.turn ?? {}) as { id?: string; status?: string };
+      const turnId = str(turn.id) ?? str(params.threadId) ?? sessionId;
+      // A FAILED turn must surface as error, not idle — else this completion would overwrite the
+      // preceding `error` notification's `session.status error` (review). Still emit quiescence so the
+      // coordinator sees the turn settle either way.
+      const status = turn.status === "failed" || turn.status === "interrupted" ? "error" : "idle";
       return [
-        { ...base, type: "session.status", status: "idle" },
+        { ...base, type: "session.status", status },
         { ...e, correlationId: turnId, type: "turn.quiescent", sessionId, turnId },
       ];
     }
 
-    case "turn.failed":
     case "error": {
       return [{ ...base, type: "session.status", status: "error" }];
     }

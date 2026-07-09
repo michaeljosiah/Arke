@@ -35,8 +35,9 @@ class FakeTransport implements CodexTransport {
 }
 
 function defaultResponder(method: string): unknown {
-  if (method === "thread/start") return { threadId: "T1" };
-  if (method === "turn/start") return { turnId: "turn-1" };
+  // Real shapes: ThreadStartResponse = { thread: Thread }; TurnStartResponse carries the turn.
+  if (method === "thread/start") return { thread: { id: "T1" } };
+  if (method === "turn/start") return { turn: { id: "turn-1" } };
   return {};
 }
 
@@ -66,11 +67,40 @@ test("init handshakes; createSession starts a thread; a prompt starts a turn", a
   assert.equal((threadStart.params as any).approvalPolicy, "on-request", "defaults to on-request so approvals round-trip");
   assert.equal((threadStart.params as any).cwd, "/repo");
 
-  await adapter.sendMessage({ sessionId: ref.sessionId, agent: "impl", model: { provider: "openai", name: "gpt-5.4" }, parts: [{ type: "text", text: "hi" }] });
+  // dispatchAsync starts the turn without blocking on completion (sendMessage is the awaiting path).
+  await adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "impl", model: { provider: "openai", name: "gpt-5.4" }, parts: [{ type: "text", text: "hi" }] });
   const turnStart = transport.byMethod("turn/start")!;
   assert.equal((turnStart.params as any).threadId, "T1", "the turn targets the session's bound thread");
-  assert.deepEqual((turnStart.params as any).input, [{ type: "text", text: "hi" }]);
+  assert.deepEqual((turnStart.params as any).input, [{ type: "text", text: "hi", text_elements: [] }]);
   assert.equal((turnStart.params as any).model, "gpt-5.4", "the agent's model id is passed through");
+});
+
+test("sendMessage resolves only when the turn completes; dispatchAsync does not block", async () => {
+  const { transport, adapter } = harness();
+  await adapter.init();
+  const ref = await adapter.createSession({ specId: "S1" });
+  await tick();
+
+  let resolved = false;
+  const p = adapter.sendMessage({ sessionId: ref.sessionId, agent: "impl", parts: [{ type: "text", text: "go" }] }).then(() => { resolved = true; });
+  await tick();
+  assert.equal(resolved, false, "sendMessage stays pending while the turn runs");
+  transport.emit({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "T1", turn: { id: "turn-1" } } });
+  await p;
+  assert.equal(resolved, true, "sendMessage resolves once turn/completed arrives");
+});
+
+test("a non-approval server request is answered with an error, never left hanging", async () => {
+  const { transport, adapter } = harness();
+  await adapter.init();
+  await adapter.createSession({ specId: "S1" });
+  await tick();
+  // A permissions-scope request (or MCP elicitation, tool user-input, …) isn't a decision Arke can gate.
+  transport.emit({ jsonrpc: "2.0", id: 42, method: "item/permissions/requestApproval", params: { threadId: "T1" } });
+  await tick();
+  const reply = transport.sent.find((m) => m.id === 42);
+  assert.ok(reply, "the server request was answered");
+  assert.ok((reply as any).error, "answered with a JSON-RPC error (declined), so Codex isn't left waiting");
 });
 
 test("notifications normalise into the event stream", async () => {
@@ -79,9 +109,9 @@ test("notifications normalise into the event stream", async () => {
   const ref = await adapter.createSession({ specId: "S1" });
   await tick();
 
-  transport.emit({ jsonrpc: "2.0", method: "turn/started", params: { threadId: "T1", model: "gpt-5.4" } });
-  transport.emit({ jsonrpc: "2.0", method: "item/completed", params: { threadId: "T1", item: { id: "m1", type: "agent_message", text: "Hello" } } });
-  transport.emit({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "T1", turnId: "turn-1" } });
+  transport.emit({ jsonrpc: "2.0", method: "turn/started", params: { threadId: "T1", turn: { id: "turn-1", model: "gpt-5.4" } } });
+  transport.emit({ jsonrpc: "2.0", method: "item/completed", params: { threadId: "T1", item: { id: "m1", type: "agentMessage", text: "Hello" } } });
+  transport.emit({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "T1", turn: { id: "turn-1" } } });
   await tick();
 
   const types = events.map((e) => e.type);
@@ -112,7 +142,7 @@ test("a Codex approval request routes through the human gate and back", async ()
   assert.equal(ack.status, "confirmed");
   const reply = transport.sent.find((m) => m.id === 99 && m.method === undefined);
   assert.ok(reply, "a JSON-RPC response to id 99 was sent");
-  assert.equal(reply!.result, "accept");
+  assert.deepEqual(reply!.result, { decision: "accept" }, "the real response shape is { decision }, not a bare string");
   await tick();
   assert.ok(events.some((e) => e.type === "permission.replied" && e.granted === true), "permission.replied granted");
 
@@ -129,7 +159,7 @@ test("a rejected approval replies decline", async () => {
   transport.emit({ jsonrpc: "2.0", id: 7, method: "item/fileChange/requestApproval", params: { threadId: "T1", changes: [{ path: "a.ts", kind: "edit" }] } });
   await tick();
   await adapter.respondToPermission({ permissionId: "codex-approval-7", decision: "reject" });
-  assert.equal(transport.sent.find((m) => m.id === 7 && m.method === undefined)!.result, "decline");
+  assert.deepEqual(transport.sent.find((m) => m.id === 7 && m.method === undefined)!.result, { decision: "decline" });
 });
 
 test("todos come from plan_update; listModels serves the config-driven catalog", async () => {
@@ -137,7 +167,7 @@ test("todos come from plan_update; listModels serves the config-driven catalog",
   await adapter.init();
   const ref = await adapter.createSession({ specId: "S1" });
   await tick();
-  transport.emit({ jsonrpc: "2.0", method: "item/completed", params: { threadId: "T1", item: { type: "plan_update", plan: [{ step: "One", status: "completed" }, { step: "Two", status: "pending" }] } } });
+  transport.emit({ jsonrpc: "2.0", method: "turn/plan/updated", params: { threadId: "T1", plan: [{ step: "One", status: "completed" }, { step: "Two", status: "pending" }] } });
   await tick();
   const todos = await adapter.getTodos({ sessionId: ref.sessionId });
   assert.deepEqual(todos, [{ id: "plan-0", text: "One", done: true }, { id: "plan-1", text: "Two", done: false }]);

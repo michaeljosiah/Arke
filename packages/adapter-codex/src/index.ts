@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   type Capability,
   type CreateSessionInput,
@@ -84,6 +86,8 @@ export class CodexAdapter implements HarnessAdapter {
   private readonly channel = new EventChannel();
   private readonly approvals = new Approvals();
   private readonly lastTodos = new Map<string, TodoItem[]>();
+  /** threadId → resolvers for a synchronous sendMessage awaiting that thread's next `turn/completed`. */
+  private readonly turnWaiters = new Map<string, Array<() => void>>();
 
   constructor(
     private readonly config: CodexConfig,
@@ -105,6 +109,14 @@ export class CodexAdapter implements HarnessAdapter {
       this.ready = true;
     } catch (err) {
       this.ready = false;
+      // Close the spawned app-server so a failed init doesn't leak the child process (review): the
+      // coordinator degrades to NullAdapter, and a retry must not stack orphaned Codex processes.
+      try {
+        server.close();
+      } catch {
+        /* already gone */
+      }
+      this.server = null;
       throw err;
     }
   }
@@ -129,23 +141,26 @@ export class CodexAdapter implements HarnessAdapter {
       cwd,
       approvalPolicy: this.config.approvalPolicy ?? "on-request",
       sandbox: this.config.sandbox ?? "workspace-write",
-    })) as { threadId?: string; thread_id?: string; id?: string } | undefined;
-    const threadId = strOf(res?.threadId) ?? strOf(res?.thread_id) ?? strOf(res?.id);
+    })) as { thread?: { id?: string } } | undefined;
+    // Real shape: ThreadStartResponse = { thread: Thread, … } where Thread.id is the thread id.
+    const threadId = strOf(res?.thread?.id);
     if (threadId) this.sessions.bindThread(sessionId, threadId);
     return { sessionId };
   }
 
   async sendMessage(input: SendMessageInput): Promise<SendReceipt> {
-    return this.startTurn(input);
+    // Synchronous send (HarnessAdapter contract): resolve when the TURN COMPLETES, not when `turn/start`
+    // is merely accepted — else the cockpit's prompt.send re-enables input mid-turn (review).
+    return this.startTurn(input, true);
   }
 
   async dispatchAsync(input: SendMessageInput): Promise<SendReceipt> {
-    // `turn/start` is already fire-and-stream (the turn executes via notifications), so send + dispatch
-    // share a path — mirrors the Omnigent adapter.
-    return this.startTurn(input);
+    // Fire-and-watch (FR-8): `turn/start` returns as soon as the turn is accepted; the turn streams via
+    // notifications. dispatchAsync must NOT block on completion.
+    return this.startTurn(input, false);
   }
 
-  private async startTurn(input: SendMessageInput): Promise<SendReceipt> {
+  private async startTurn(input: SendMessageInput, awaitCompletion: boolean): Promise<SendReceipt> {
     if (!this.sessions.get(input.sessionId)) {
       this.sessions.record(input.sessionId, { specId: input.sessionId, kind: "spec" });
     }
@@ -154,13 +169,33 @@ export class CodexAdapter implements HarnessAdapter {
     const text = input.parts.map((p) => p.text).join("");
     const params: Record<string, unknown> = {
       threadId,
-      input: [{ type: "text", text }],
+      // Real shape: TurnStartParams.input is UserInput[]; the text variant carries `text_elements`.
+      input: [{ type: "text", text, text_elements: [] }],
       // The agent pins its own model (SPEC-016 revised); Codex serves the OpenAI id (the model `name`).
       ...(input.model ? { model: input.model.name } : {}),
     };
-    const res = (await this.srv().request("turn/start", params)) as { turnId?: string; turn_id?: string } | undefined;
-    const correlationId = input.correlationId ?? strOf(res?.turnId) ?? strOf(res?.turn_id) ?? `turn_${threadId}_${++this.n}`;
+    const res = (await this.srv().request("turn/start", params)) as { turn?: { id?: string } } | undefined;
+    const correlationId = input.correlationId ?? strOf(res?.turn?.id) ?? `turn_${threadId}_${++this.n}`;
+    if (awaitCompletion) await this.awaitTurnCompletion(threadId);
     return { sessionId: input.sessionId, correlationId };
+  }
+
+  /** Resolve when this thread's next `turn/completed` arrives — or on a bounded timeout / server close. */
+  private awaitTurnCompletion(threadId: string): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, TURN_TIMEOUT_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      const arr = this.turnWaiters.get(threadId) ?? [];
+      arr.push(finish);
+      this.turnWaiters.set(threadId, arr);
+    });
   }
 
   streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
@@ -171,7 +206,8 @@ export class CodexAdapter implements HarnessAdapter {
     const pending = this.approvals.take(decision.permissionId);
     if (!pending) return { permissionId: decision.permissionId, status: "stale" };
     // Answer the exact open JSON-RPC approval request; then confirm with a permission.replied event.
-    this.srv().respond(pending.jsonRpcId, codexDecision(decision.decision));
+    // Real response shape: `{ decision }` (e.g. CommandExecutionRequestApprovalResponse), not a bare string.
+    this.srv().respond(pending.jsonRpcId, { decision: codexDecision(decision.decision) });
     this.pushEvent({
       seq: 0,
       ts: 0,
@@ -194,7 +230,23 @@ export class CodexAdapter implements HarnessAdapter {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    // Config-driven / known catalog — Codex has no enumeration API (SPEC-034 Decision #3).
+    // The app-server DOES expose a catalog via `model/list` (verified against the real protocol — the
+    // Codex CLI can't enumerate, but the app-server can). Use it, falling back to the config-driven /
+    // known list when unavailable (not yet initialised, offline, unauthenticated, or an older server).
+    if (this.server) {
+      try {
+        const res = (await this.server.request("model/list", {})) as { data?: Array<{ id?: string; model?: string; displayName?: string }> } | undefined;
+        const data = res?.data;
+        if (Array.isArray(data) && data.length > 0) {
+          const mapped = data
+            .map((m) => ({ id: strOf(m.model) ?? strOf(m.id) ?? "", provider: "openai", ...(strOf(m.displayName) ? { displayName: m.displayName as string } : {}) }))
+            .filter((m) => m.id);
+          if (mapped.length > 0) return mapped;
+        }
+      } catch {
+        /* fall through to the config catalog */
+      }
+    }
     return codexModelCatalog(this.config.models);
   }
 
@@ -210,13 +262,24 @@ export class CodexAdapter implements HarnessAdapter {
   private wireHandlers(server: CodexAppServer): void {
     server.onNotification((method, params) => this.onNotification(method, params));
     server.onServerRequest((method, params, id) => this.onServerRequest(method, params, id));
+    // The app-server process exiting must be observed — else readiness() keeps reporting ready and
+    // streamEvents() stays open while every request silently times out (review). Release any awaiting
+    // sendMessage so it can't hang on a turn that will never complete.
+    server.onClose(() => {
+      this.ready = false;
+      for (const arr of this.turnWaiters.values()) for (const r of arr) r();
+      this.turnWaiters.clear();
+      this.channel.close();
+    });
   }
 
-  /** Resolve the Arke session a thread-scoped notification belongs to (falling back to the last session). */
+  /** Resolve the Arke session a thread-scoped notification belongs to. */
   private sessionForParams(params: Record<string, unknown>): string | null {
-    const threadId = strOf(params.threadId) ?? strOf(params.thread_id) ?? strOf((params.item as { threadId?: string } | undefined)?.threadId);
+    const threadId = strOf(params.threadId) ?? strOf((params.item as { threadId?: string } | undefined)?.threadId);
     if (threadId) return this.sessions.arkeForThread(threadId);
-    return this.lastSession;
+    // No thread id on the frame (rare — real notifications carry one). Fall back to the active session
+    // ONLY when there is exactly one, so a stray frame can't be misattributed across concurrent sessions.
+    return this.sessions.size === 1 ? this.lastSession : null;
   }
 
   private onNotification(method: string, params: Record<string, unknown>): void {
@@ -229,10 +292,25 @@ export class CodexAdapter implements HarnessAdapter {
       if (parsed.data.type === "todo.updated") this.lastTodos.set(sessionId, parsed.data.todos);
       this.channel.push(parsed.data);
     }
+    // A completed turn releases any synchronous sendMessage awaiting it (keyed by the Codex thread).
+    if (method.replace(/\//g, ".") === "turn.completed") {
+      const threadId = strOf(params.threadId) ?? this.sessions.threadFor(sessionId);
+      const waiters = threadId ? this.turnWaiters.get(threadId) : undefined;
+      if (threadId && waiters) {
+        this.turnWaiters.delete(threadId);
+        for (const r of waiters) r();
+      }
+    }
   }
 
   private onServerRequest(method: string, params: Record<string, unknown>, id: number | string): void {
-    if (!isApprovalRequest(method)) return; // unknown server request — not answerable here; leave it
+    if (!isApprovalRequest(method)) {
+      // Any other server-initiated request (permissions-scope grant, MCP elicitation, tool user-input, …)
+      // is not something Arke's decision gate can answer — reply with a JSON-RPC error so Codex isn't left
+      // waiting on it forever (review). Declining-by-default is the safe posture.
+      this.srv().respondError(id, -32601, `Arke does not handle the '${method}' server request`);
+      return;
+    }
     const sessionId = this.sessionForParams(params) ?? this.lastSession ?? "";
     const permissionId = this.approvals.register(id, sessionId);
     const { title, detail } = approvalTitle(method, params);
@@ -246,27 +324,48 @@ export class CodexAdapter implements HarnessAdapter {
   }
 }
 
+/** Upper bound on how long a synchronous `sendMessage` waits for a turn to complete before resolving. */
+const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+
 function strOf(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
-/** Derive a {@link DiffSummary} from git in `cwd` — the on-disk truth (SPEC-034 Decision #4). Best-effort. */
+/**
+ * Derive a {@link DiffSummary} from git in `cwd` — the on-disk truth (SPEC-034 Decision #4). Diffs the
+ * working tree against HEAD (so STAGED + unstaged tracked changes both count) and adds UNTRACKED files —
+ * a plain `git diff` misses both, which would show an empty diff for a Codex turn that stages or creates
+ * files (review). Best-effort: any git failure degrades to zeros rather than throwing.
+ */
 function gitDiffSummary(cwd: string): DiffSummary {
   try {
-    const numstat = spawnSync("git", ["diff", "--numstat"], { cwd, encoding: "utf8" });
-    if (numstat.status !== 0) return { added: 0, removed: 0, files: 0 };
     let added = 0;
     let removed = 0;
-    let files = 0;
-    for (const line of numstat.stdout.split("\n")) {
-      const m = /^(\d+|-)\t(\d+|-)\t/.exec(line);
-      if (!m) continue;
-      files++;
-      if (m[1] !== "-") added += Number(m[1]);
-      if (m[2] !== "-") removed += Number(m[2]);
+    const files = new Set<string>();
+    const numstat = spawnSync("git", ["diff", "--numstat", "HEAD"], { cwd, encoding: "utf8" });
+    if (numstat.status === 0) {
+      for (const line of numstat.stdout.split("\n")) {
+        const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+        if (!m) continue;
+        files.add(m[3]!);
+        if (m[1] !== "-") added += Number(m[1]);
+        if (m[2] !== "-") removed += Number(m[2]);
+      }
     }
-    const patch = spawnSync("git", ["diff"], { cwd, encoding: "utf8" });
-    return { added, removed, files, ...(patch.status === 0 && patch.stdout ? { patch: patch.stdout } : {}) };
+    // Untracked files (git diff ignores them): count each new file's lines as additions.
+    const untracked = spawnSync("git", ["ls-files", "--others", "--exclude-standard"], { cwd, encoding: "utf8" });
+    if (untracked.status === 0) {
+      for (const f of untracked.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+        files.add(f);
+        try {
+          added += readFileSync(resolve(cwd, f), "utf8").split("\n").length;
+        } catch {
+          /* binary/unreadable — the file still counts, just not its line delta */
+        }
+      }
+    }
+    const patch = spawnSync("git", ["diff", "HEAD"], { cwd, encoding: "utf8" });
+    return { added, removed, files: files.size, ...(patch.status === 0 && patch.stdout ? { patch: patch.stdout } : {}) };
   } catch {
     return { added: 0, removed: 0, files: 0 };
   }

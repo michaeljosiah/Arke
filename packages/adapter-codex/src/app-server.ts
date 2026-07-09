@@ -47,6 +47,9 @@ export class StdioTransport implements CodexTransport {
     this.proc = spawn(bin, ["app-server"], { cwd: config.cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (chunk: string) => this.onData(chunk));
+    // Drain stderr so a verbose app-server (tracing / repeated config/auth warnings) can't fill the OS
+    // pipe buffer and block the child — which would stall stdout and time out every request (review).
+    this.proc.stderr.on("data", () => {});
     this.proc.on("close", () => this.closeCb?.());
     this.proc.on("error", () => this.closeCb?.());
   }
@@ -141,6 +144,12 @@ export class CodexAppServer {
   respond(id: number | string, result: unknown): void {
     if (this.closed) return;
     this.transport.send({ jsonrpc: "2.0", id, result });
+  }
+
+  /** Answer a server→client request with a JSON-RPC error — so an unsupported request isn't left hanging. */
+  respondError(id: number | string, code: number, message: string): void {
+    if (this.closed) return;
+    this.transport.send({ jsonrpc: "2.0", id, error: { code, message } });
   }
 
   onNotification(cb: NotificationHandler): void {

@@ -6,8 +6,8 @@ const IDENT: SessionIdentity = { specId: "SPEC-1", kind: "spec" };
 const run = (method: string, params: Record<string, unknown>) =>
   normalize(method, params, "sess-1", IDENT, "Codex", createNormalizeState());
 
-test("turn/started → session.status running (with model when present)", () => {
-  const evs = run("turn/started", { threadId: "T1", model: "gpt-5.4" });
+test("turn/started → session.status running (model from the turn object when present)", () => {
+  const evs = run("turn/started", { threadId: "T1", turn: { id: "turn-1", model: "gpt-5.4" } });
   assert.equal(evs.length, 1);
   assert.equal(evs[0]!.type, "session.status");
   assert.equal((evs[0] as any).status, "running");
@@ -26,8 +26,9 @@ test("item/agentMessage/delta → a streaming message.part with a stable partInd
   assert.equal((b[0] as any).delta, "lo");
 });
 
-test("item/completed agent_message → a non-streaming message.updated snapshot", () => {
-  const evs = run("item/completed", { item: { id: "m1", type: "agent_message", text: "Done." } });
+test("item/completed agentMessage → a non-streaming message.updated snapshot", () => {
+  // Real ThreadItem: { type: "agentMessage", id, text } (camelCase, verified against the generated protocol).
+  const evs = run("item/completed", { threadId: "T1", item: { id: "m1", type: "agentMessage", text: "Done." } });
   assert.equal(evs.length, 1);
   assert.equal(evs[0]!.type, "message.updated");
   assert.equal((evs[0] as any).text, "Done.");
@@ -35,9 +36,11 @@ test("item/completed agent_message → a non-streaming message.updated snapshot"
   assert.equal((evs[0] as any).role, "assistant");
 });
 
-test("item/completed plan_update → todo.updated with done derived from status", () => {
-  const evs = run("item/completed", {
-    item: { type: "plan_update", plan: [{ step: "Read spec", status: "completed" }, { step: "Implement", status: "in_progress" }] },
+test("turn/plan/updated → todo.updated with done derived from status", () => {
+  // Real notification: TurnPlanUpdatedNotification = { threadId, turnId, explanation, plan: [{ step, status }] }.
+  const evs = run("turn/plan/updated", {
+    threadId: "T1",
+    plan: [{ step: "Read spec", status: "completed" }, { step: "Implement", status: "inProgress" }],
   });
   assert.equal(evs.length, 1);
   assert.equal(evs[0]!.type, "todo.updated");
@@ -47,8 +50,8 @@ test("item/completed plan_update → todo.updated with done derived from status"
   ]);
 });
 
-test("turn/completed → session.status idle + turn.quiescent", () => {
-  const evs = run("turn/completed", { threadId: "T1", turnId: "turn-9", usage: { output_tokens: 12 } });
+test("turn/completed → session.status idle + turn.quiescent (turnId from the turn object)", () => {
+  const evs = run("turn/completed", { threadId: "T1", turn: { id: "turn-9" } });
   assert.equal(evs.length, 2);
   assert.equal(evs[0]!.type, "session.status");
   assert.equal((evs[0] as any).status, "idle");
@@ -56,14 +59,19 @@ test("turn/completed → session.status idle + turn.quiescent", () => {
   assert.equal((evs[1] as any).turnId, "turn-9");
 });
 
-test("turn/failed and error → session.status error", () => {
-  assert.equal((run("turn/failed", { error: { message: "boom" } })[0] as any).status, "error");
-  assert.equal((run("error", {})[0] as any).status, "error");
+test("error → session.status error", () => {
+  assert.equal((run("error", { threadId: "T1" })[0] as any).status, "error");
 });
 
-test("internal and unknown items normalise to nothing", () => {
-  assert.deepEqual(run("item/completed", { item: { type: "command_execution", command: "ls" } }), []);
-  assert.deepEqual(run("item/completed", { item: { type: "file_change", changes: [] } }), []);
-  assert.deepEqual(run("thread/started", { threadId: "T1" }), []);
+test("a FAILED turn/completed surfaces error, not idle (so it doesn't overwrite a prior error)", () => {
+  const evs = run("turn/completed", { threadId: "T1", turn: { id: "turn-1", status: "failed" } });
+  assert.equal((evs[0] as any).status, "error", "failed turn → error status");
+  assert.equal(evs[1]!.type, "turn.quiescent", "still emits quiescence so the turn settles");
+});
+
+test("internal items and unknown notifications normalise to nothing", () => {
+  assert.deepEqual(run("item/completed", { threadId: "T1", item: { type: "commandExecution", command: "ls" } }), []);
+  assert.deepEqual(run("item/completed", { threadId: "T1", item: { type: "fileChange", changes: [] } }), []);
+  assert.deepEqual(run("thread/started", { thread: { id: "T1" } }), []);
   assert.deepEqual(run("something/unmapped", {}), []);
 });

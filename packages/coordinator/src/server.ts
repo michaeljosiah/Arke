@@ -854,6 +854,10 @@ export function codexInstanceFor(configPath: string): InstanceConfig | undefined
   const pick = (insts: InstanceConfig[]): InstanceConfig | undefined =>
     insts.some((i) => i.driver === "opencode") ? undefined : insts.find((i) => i.driver === "codex");
   if (project.length > 0) return pick(project);
+  // No local `registry.instances`. But a project that configures any PROVIDER (the OpenCode provider/model
+  // shape) is an OpenCode project — do NOT let a machine-level Codex instance win over it (review). Only a
+  // project with neither instances nor providers of its own inherits the global harness config (SPEC-019).
+  if (Object.keys(readProviders(configPath)).length > 0) return undefined;
   return pick(loadGlobalConfig(globalConfigPath())?.instances ?? []);
 }
 
@@ -861,8 +865,11 @@ export function codexInstanceFor(configPath: string): InstanceConfig | undefined
  * Build a {@link CodexConfig} for a project root (SPEC-034). Codex has no HTTP endpoint — it runs the
  * app-server in the project root, and its auth is host-side (NFR-1), so the config carries only the cwd.
  */
-function loadCodexConfig(root: string, _inst: InstanceConfig): CodexConfig {
-  return { cwd: root };
+function loadCodexConfig(root: string, inst: InstanceConfig): CodexConfig {
+  // Honor a configured instance cwd (like other harnesses): resolve it against the project root; the
+  // default "." yields the root, an absolute path is respected, a relative one is joined (review).
+  const cwd = inst.cwd && inst.cwd !== "." ? resolve(root, inst.cwd) : root;
+  return { cwd };
 }
 
 /** Construct + init a {@link CodexAdapter}, degrading to a {@link NullAdapter} if the app-server won't start. */

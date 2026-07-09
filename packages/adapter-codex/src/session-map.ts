@@ -31,6 +31,11 @@ export class SessionMap {
     return this.byArke.get(arkeId);
   }
 
+  /** How many sessions are recorded — lets a thread-less frame fall back safely only when unambiguous. */
+  get size(): number {
+    return this.byArke.size;
+  }
+
   identity(arkeId: string): SessionIdentity {
     const e = this.byArke.get(arkeId);
     return e ? { specId: e.specId, kind: e.kind } : { specId: arkeId, kind: "spec" };

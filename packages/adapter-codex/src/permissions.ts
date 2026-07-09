@@ -9,13 +9,17 @@ import type { PermissionVerb } from "@arke/contracts";
  * `codex exec` cannot do it — which is why the adapter integrates via the app-server (Decision #1).
  */
 
+// The approval requests Arke gates through its human decision (accept/decline). Both answer with a
+// `{ decision }` payload. `item/permissions/requestApproval` is DELIBERATELY excluded — its response is a
+// structured `{ permissions, scope }` grant, not a decision (verified against the real protocol), which
+// Arke's allow/ask/deny gate cannot construct; it is declined-by-default via a JSON-RPC error instead so
+// Codex is never left waiting (SPEC-034 review).
 const APPROVAL_METHODS = new Set([
   "item.commandExecution.requestApproval",
   "item.fileChange.requestApproval",
-  "item.permissions.requestApproval",
 ]);
 
-/** Whether a server→client request method is one of Codex's approval requests (slash- or dot-form). */
+/** Whether a server→client request is a decision-shaped approval Arke gates (slash- or dot-form). */
 export function isApprovalRequest(method: string): boolean {
   return APPROVAL_METHODS.has(method.replace(/\//g, "."));
 }
