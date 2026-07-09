@@ -152,10 +152,13 @@ function toEditorTools(full: Record<string, any>): { mcp: any[]; rest: Record<st
   for (const [name, t] of Object.entries(full || {})) {
     if (t && (t as any).type === 'mcp') {
       const tool = t as any;
+      // Carry `orig` so save can preserve fields the editor doesn't render (enabled / tools whitelist /
+      // description), and `origArgs` so an unedited arg containing spaces survives (SPEC-021 review).
       if (tool.transport === 'remote' || (tool.url && !tool.command)) {
-        mcp.push({ name, transport: 'remote', url: tool.url || '', headers: Object.entries(tool.headers || {}).map(([k, v]) => ({ k, v })), environment: [] });
+        mcp.push({ name, transport: 'remote', url: tool.url || '', headers: Object.entries(tool.headers || {}).map(([k, v]) => ({ k, v })), environment: [], orig: tool });
       } else {
-        mcp.push({ name, transport: 'local', command: tool.command || '', argsText: (tool.args || []).join(' '), environment: Object.entries(tool.environment || {}).map(([k, v]) => ({ k, v })), headers: [] });
+        const origArgs = Array.isArray(tool.args) ? tool.args : [];
+        mcp.push({ name, transport: 'local', command: tool.command || '', argsText: origArgs.join(' '), origArgs, environment: Object.entries(tool.environment || {}).map(([k, v]) => ({ k, v })), headers: [], orig: tool });
       }
     } else {
       rest[name] = t; // function / agent tool — kept as-is, re-sent on save so it isn't lost
@@ -169,11 +172,20 @@ function buildMcpToolMap(tools: any[]): Record<string, any> {
   const map: Record<string, any> = {};
   for (const t of tools) {
     if (!t.name) continue;
+    const orig = t.orig || {};
+    // Preserve metadata the editor does not render, so saving an edit doesn't silently drop a `tools`
+    // whitelist, an `enabled: false`, or a `description` (SPEC-021 review).
+    const meta = { ...(orig.tools ? { tools: orig.tools } : {}), ...(orig.enabled !== undefined ? { enabled: orig.enabled } : {}), ...(orig.description ? { description: orig.description } : {}) };
     if (t.transport === 'remote') {
-      map[t.name] = { type: 'mcp', transport: 'remote', url: t.url, ...(t.headers?.length ? { headers: Object.fromEntries(t.headers.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
+      map[t.name] = { type: 'mcp', transport: 'remote', url: t.url, ...(t.headers?.length ? { headers: Object.fromEntries(t.headers.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}), ...meta };
     } else {
-      const args = (t.argsText || '').trim() ? t.argsText.trim().split(/\s+/) : undefined;
-      map[t.name] = { type: 'mcp', transport: 'local', command: t.command, ...(args ? { args } : {}), ...(t.environment?.length ? { environment: Object.fromEntries(t.environment.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}) };
+      // Keep the ORIGINAL args array when the field is unchanged (so an arg with spaces isn't split into
+      // several); only re-split when the operator actually edited the text (a known limitation of the
+      // space-separated field, called out in the placeholder).
+      const origArgs: string[] = Array.isArray(t.origArgs) ? t.origArgs : [];
+      const txt = (t.argsText || '').trim();
+      const args = txt === origArgs.join(' ').trim() ? (origArgs.length ? origArgs : undefined) : (txt ? txt.split(/\s+/) : undefined);
+      map[t.name] = { type: 'mcp', transport: 'local', command: t.command, ...(args ? { args } : {}), ...(t.environment?.length ? { environment: Object.fromEntries(t.environment.filter((p: any) => p.k).map((p: any) => [p.k, p.v])) } : {}), ...meta };
     }
   }
   return map;
@@ -205,6 +217,10 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
   // fetch from sending an empty map that would clear the agent's tools.
   const [preservedTools, setPreservedTools] = React.useState<Record<string, any>>({});
   const [toolsLoaded, setToolsLoaded] = React.useState<boolean>(!existing);
+  // `toolsDirty` gates whether an edit save touches tools at all — a model/permission-only edit must NOT
+  // re-write (and re-materialise) the tools block, which would round-trip it through the lossy editor
+  // shape. Only true once the operator adds/removes/edits a tool row (SPEC-021 review).
+  const [toolsDirty, setToolsDirty] = React.useState<boolean>(false);
   const [catalog, setCatalog] = React.useState<any[]>([]);
   const [caps, setCaps] = React.useState<any>(null);
   const [saving, setSaving] = React.useState(false);
@@ -268,9 +284,10 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
     if (isEdit) {
       // Pass permission (even {}) so removing all rows clears the block, and mode so a primary/subagent
       // change persists. An empty model = "leave as-is" (the coordinator keeps a default-model agent).
-      // Send tools ONLY when the current picture loaded (else leave them untouched), merging the
-      // preserved non-MCP tools back so the MCP editor never drops a function/agent tool (SPEC-021).
-      const fullTools = toolsLoaded ? { ...preservedTools, ...toolMap } : undefined;
+      // Send tools ONLY when the operator actually edited them (toolsDirty) AND the current picture
+      // loaded (toolsLoaded) — else leave the block untouched. Merge the preserved non-MCP tools back so
+      // the MCP editor never drops a function/agent tool (SPEC-021 review).
+      const fullTools = toolsDirty && toolsLoaded ? { ...preservedTools, ...toolMap } : undefined;
       res = await configureAgent(name, provider, model, effort === 'default' ? undefined : effort, permission, mode, fullTools);
     } else {
       res = await createAgent({
@@ -331,8 +348,8 @@ function AgentEditor({ existing, harnessDefault, onClose, onSaved }: any) {
         mcpUnavailable
           ? e(Callout, { variant: 'default' }, 'This harness does not support MCP tools.')
           : e('div', null,
-              tools.map((t, i) => e(ToolEditor, { key: i, tool: t, caps, onChange: (nt: any) => setTools(tools.map((x, j) => j === i ? nt : x)), onRemove: () => setTools(tools.filter((_, j) => j !== i)) })),
-              e('button', { onClick: () => setTools([...tools, { name: '', transport: (caps && caps.mcp?.local === false) ? 'remote' : 'local', environment: [], headers: [] }]), style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add MCP server'),
+              tools.map((t, i) => e(ToolEditor, { key: i, tool: t, caps, onChange: (nt: any) => { setToolsDirty(true); setTools(tools.map((x, j) => j === i ? nt : x)); }, onRemove: () => { setToolsDirty(true); setTools(tools.filter((_, j) => j !== i)); } })),
+              e('button', { onClick: () => { setToolsDirty(true); setTools([...tools, { name: '', transport: (caps && caps.mcp?.local === false) ? 'remote' : 'local', environment: [], headers: [] }]); }, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0' } }, '+ add MCP server'),
               Object.keys(preservedTools).length
                 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--neutral-400)', marginTop: 6 } }, `${Object.keys(preservedTools).length} function/agent tool(s) preserved — edit via config.yaml`)
                 : null)),

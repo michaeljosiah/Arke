@@ -261,6 +261,26 @@ export function setAgentTools(dir: string, tools: Tools): void {
   }
 }
 
+/**
+ * The TOP-LEVEL `tools:` map from an agent's `config.yaml`, typed + validated — the editor's editable
+ * surface (SPEC-021). Deliberately EXCLUDES directory-discovered tools (`tools/{mcp,python,typescript}/`
+ * and `agents/`): those are the directory's own source of truth and the surgical `config.yaml` writer
+ * cannot round-trip them, so the editor must not treat them as editable (a discovered function tool
+ * re-sent inline would even fail loader validation). Returns `{}` when the config or its `tools:` block
+ * is absent. Carries only `${VAR}` references (NFR-1), never resolved secrets. Throws on invalid YAML.
+ */
+export function readConfigTools(dir: string): Tools {
+  const configPath = join(dir, "config.yaml");
+  if (!existsSync(configPath)) return {};
+  let raw: RawConfig;
+  try {
+    raw = (parseYaml(readFileSync(configPath, "utf8")) ?? {}) as RawConfig;
+  } catch (err) {
+    throw new AgentImageError(`config.yaml is not valid YAML: ${reason(err)}`);
+  }
+  return parseTools(raw.tools, raw.name ?? dir);
+}
+
 /** A structured request to create a new agent image (SPEC-021) — the write half of the editor's create flow. */
 export interface NewAgentSpec {
   name: string;

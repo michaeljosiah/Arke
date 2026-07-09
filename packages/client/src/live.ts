@@ -588,9 +588,13 @@ export async function configureAgent(name: string, provider: string, model: stri
  * carries names + kinds only, so the editor loads this to populate the MCP tool fields for editing.
  */
 export async function fetchAgentTools(name: string): Promise<Record<string, any>> {
-  if (!isCoordinatorConnected()) return {};
+  // THROW on a failed/unavailable read (offline, timeout, or ok:false) rather than resolving to `{}`:
+  // the editor's guard treats a rejected fetch as "leave tools untouched", so an unrelated model/
+  // permission save can't clear the agent's tools after a transient read failure (SPEC-021 review).
+  if (!isCoordinatorConnected()) throw new Error('offline — cannot load the agent’s tools');
   const res = await liveRequest('agent.get', { name });
-  return res?.ok && res.result?.tools ? res.result.tools : {};
+  if (!res?.ok) throw new Error(res?.error || 'failed to load the agent’s tools');
+  return res.result?.tools ?? {};
 }
 
 /**

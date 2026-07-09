@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentImageError, loadAgentImage, setAgentMode, setAgentModel, setAgentPermission, setAgentTools, writeNewAgent } from "../src/index.js";
+import { AgentImageError, loadAgentImage, readConfigTools, setAgentMode, setAgentModel, setAgentPermission, setAgentTools, writeNewAgent } from "../src/index.js";
 
 function imageDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "arke-image-"));
@@ -236,6 +236,21 @@ test("setAgentTools writes the keyed tools map, preserving the rest, and round-t
   // Untouched: the executor model and the permission block survive the tools rewrite.
   assert.equal(img.executor.config.model, "anthropic/opus");
   assert.equal(img.permission.bash, "ask");
+});
+
+test("readConfigTools returns ONLY the top-level config tools, excluding directory-discovered tools (SPEC-021)", () => {
+  const dir = imageDir({
+    "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  inline:\n    type: mcp\n    command: uv\n",
+    "tools/mcp/discovered.yaml": "command: npx\nargs: [-y, some-mcp]\n",
+    "tools/python/summarize.py": "def summarize(): ...\n",
+  });
+  // The LOADED image merges directory-discovered + inline tools…
+  const img = loadAgentImage(dir);
+  assert.ok(img.tools.inline && img.tools.discovered && img.tools.summarize, "the loaded image sees all three");
+  // …but the EDITABLE surface (what the editor round-trips) is the top-level config.yaml block only —
+  // discovered tools are directory-owned and the surgical writer must not re-write them.
+  assert.deepEqual(Object.keys(readConfigTools(dir)), ["inline"], "only the config.yaml tools block is editable");
+  assert.equal((readConfigTools(dir).inline as any).command, "uv");
 });
 
 test("setAgentTools with an empty map removes the tools block", () => {

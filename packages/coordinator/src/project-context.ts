@@ -68,7 +68,7 @@ import {
   type ArtifactProposal,
 } from "./generation.js";
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
-import { loadAgentImage, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
+import { loadAgentImage, readConfigTools, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
 import { computeRepoStatus, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
@@ -784,18 +784,21 @@ export class ProjectContext {
   }
 
   /**
-   * Return one agent's FULL editable capability wiring (SPEC-021) — the read half of the tools editor.
-   * Unlike the roster projection (names + kinds only), this carries each MCP tool's command/args/url and
-   * its `environment`/`headers` — but ONLY as they sit in the tracked `config.yaml`, which by NFR-1 holds
-   * `${VAR}` references, never resolved secrets. It is safe to return to the operator (who can already
-   * read the file); no credential value is ever materialised here.
+   * Return one agent's editable capability wiring (SPEC-021) — the read half of the tools editor. Unlike
+   * the roster projection (names + kinds only), this carries each MCP tool's command/args/url and its
+   * `environment`/`headers` — but ONLY the TOP-LEVEL `config.yaml` `tools:` block (via `readConfigTools`),
+   * which is what the surgical writer can round-trip. Directory-discovered tools (`tools/…`, `agents/…`)
+   * are deliberately excluded — they are the directory's source of truth and re-writing them into the YAML
+   * would duplicate them (or, for a discovered function tool, fail validation). The block holds `${VAR}`
+   * references only (NFR-1), never resolved secrets, and the operator can already read the file.
    */
   agentImageTools(rawName: unknown): { name: string; tools: Record<string, unknown> } {
     const name = String(rawName ?? "");
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(`invalid agent name '${name}'`);
-    const img = this.agents.image(name);
-    if (!img) throw new Error(`unknown agent '${name}'`);
-    return { name, tools: img.tools as Record<string, unknown> };
+    if (!this.agents.has(name)) throw new Error(`unknown agent '${name}'`);
+    const agentDir = resolve(this.root, "agents", name);
+    if (!isWithinRoot(this.root, agentDir)) throw new Error("agent image path escapes the project root");
+    return { name, tools: readConfigTools(agentDir) as Record<string, unknown> };
   }
 
   /**
