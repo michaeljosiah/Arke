@@ -313,6 +313,79 @@ test("agent.create materialises the new agent into the harness (PR #37 re-review
   ws.close();
 });
 
+test("agent.configure writes the tools map, re-materialises capabilities, and refreshes the roster (SPEC-021)", async () => {
+  const dir = project();
+  const capMaterialized: string[] = [];
+  const spy = new MockAdapter() as any;
+  spy.materializeAgent = async () => {};
+  spy.materializeCapabilities = async (img: any) => { capMaterialized.push(img.name); return { registered: ["github"], unsupported: [] }; };
+  const { c, port } = await start(dir, spy);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", {
+    name: "implementer", provider: "gateway", model: "",
+    tools: { github: { type: "mcp", transport: "local", command: "uv", args: ["run", "mcp"], environment: { GH_TOKEN: "${GH_TOKEN}" } } },
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.result.tools, [{ name: "github", kind: "mcp" }]);
+
+  // The image on disk gained the tools map with the ${VAR} kept unresolved (NFR-1); the rest is intact.
+  const img = loadAgentImage(resolve(dir, "agents", "implementer"));
+  assert.equal((img.tools.github as any).command, "uv");
+  assert.equal((img.tools.github as any).environment.GH_TOKEN, "${GH_TOKEN}");
+  assert.equal(img.executor.config.model, "gateway/implementer"); // model untouched by a tools-only edit
+
+  // The edit reached native config (materializeCapabilities) and the roster shows names+kinds only.
+  assert.ok(capMaterialized.includes("implementer"), "materializeCapabilities ran on the tools edit");
+  const snap = await request("registry.get");
+  const impl = snap.result.agents.find((a: any) => a.name === "implementer");
+  assert.deepEqual(impl.tools, [{ name: "github", kind: "mcp" }]);
+  ws.close();
+});
+
+test("agent.get returns an agent's editable tool wiring (${VAR} refs, no resolved secret) — SPEC-021", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  await request("agent.configure", {
+    name: "implementer", provider: "gateway", model: "",
+    tools: { docs: { type: "mcp", transport: "remote", url: "https://x/mcp", headers: { Authorization: "Bearer ${DOCS_TOKEN}" } } },
+  });
+  const got = await request("agent.get", { name: "implementer" });
+  assert.equal(got.ok, true);
+  assert.equal(got.result.name, "implementer");
+  assert.equal(got.result.tools.docs.url, "https://x/mcp");
+  assert.equal(got.result.tools.docs.headers.Authorization, "Bearer ${DOCS_TOKEN}", "the ${VAR} ref is returned unresolved, never a secret value");
+  ws.close();
+});
+
+test("agent.configure rejects a literal secret in a tool and rolls the image back (NFR-1, SPEC-021)", async () => {
+  const dir = project();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  const { ws, ready, waitFor, request } = connect(port);
+  await ready;
+  await waitFor((f) => f.type === "snapshot");
+
+  const res = await request("agent.configure", {
+    name: "implementer", provider: "gateway", model: "",
+    tools: { docs: { type: "mcp", transport: "remote", url: "https://x/mcp", headers: { Authorization: "Bearer sk-LITERAL" } } },
+  });
+  assert.equal(res.ok, false);
+  // The image is untouched — the rejected tools edit rolled back, so no tools block landed.
+  const raw = readFileSync(resolve(dir, "agents", "implementer", "config.yaml"), "utf8");
+  assert.ok(!/tools:/.test(raw), "no tools block was written");
+  assert.match(raw, /model: gateway\/implementer/); // rest intact
+  ws.close();
+});
+
 test("agent.create rejects a duplicate name and a path-traversal name", async () => {
   const dir = project();
   const { c, port } = await start(dir);

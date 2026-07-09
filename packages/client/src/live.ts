@@ -567,18 +567,34 @@ export async function fetchModels(): Promise<Array<{ id: string; provider: strin
  * refreshes the roster (the coordinator emits `registry.updated`, so the cockpit chip updates live).
  * A governed write — refuse offline rather than queue-and-replay it later.
  */
-export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string, permission?: Record<string, string>, mode?: string): Promise<{ ok: boolean; error?: string; model?: string }> {
+export async function configureAgent(name: string, provider: string, model: string, reasoningEffort?: string, permission?: Record<string, string>, mode?: string, tools?: Record<string, any>): Promise<{ ok: boolean; error?: string; model?: string }> {
   if (!isCoordinatorConnected()) return { ok: false, error: 'offline — reconnect to change an agent’s model' };
   // `permission` is sent whenever DEFINED (even `{}`) so the editor can clear all rules; `undefined`
   // (the cockpit model chip) leaves the block untouched. `model` may be empty for a permission/mode-only
-  // save on a default-model agent — the coordinator then leaves the model as-is.
-  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), ...(permission !== undefined ? { permission } : {}), ...(mode ? { mode } : {}) });
+  // save on a default-model agent — the coordinator then leaves the model as-is. `tools` is the FULL
+  // merged map (SPEC-021) sent only when the editor touched tools — `undefined` leaves the block.
+  const res = await liveRequest('agent.configure', { name, provider, model, ...(reasoningEffort ? { reasoningEffort } : {}), ...(permission !== undefined ? { permission } : {}), ...(mode ? { mode } : {}), ...(tools !== undefined ? { tools } : {}) });
   if (!res?.ok) return { ok: false, error: res?.error };
   // Refresh the roster from the authoritative snapshot: the live `registry.updated` event carries
   // only the harness endpoints, so the agent roster (which drives the model chip) is re-read here.
   const snap = await liveRequest('registry.get');
   if (snap?.ok && snap.result) applyRegistrySnapshot(snap.result);
   return { ok: true, model: res.result?.model };
+}
+
+/**
+ * Fetch one agent's FULL editable tool wiring (SPEC-021) — command/args/url + `environment`/`headers`
+ * (`${VAR}` references only; the tracked config.yaml holds no resolved secret). The roster projection
+ * carries names + kinds only, so the editor loads this to populate the MCP tool fields for editing.
+ */
+export async function fetchAgentTools(name: string): Promise<Record<string, any>> {
+  // THROW on a failed/unavailable read (offline, timeout, or ok:false) rather than resolving to `{}`:
+  // the editor's guard treats a rejected fetch as "leave tools untouched", so an unrelated model/
+  // permission save can't clear the agent's tools after a transient read failure (SPEC-021 review).
+  if (!isCoordinatorConnected()) throw new Error('offline — cannot load the agent’s tools');
+  const res = await liveRequest('agent.get', { name });
+  if (!res?.ok) throw new Error(res?.error || 'failed to load the agent’s tools');
+  return res.result?.tools ?? {};
 }
 
 /**

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentImageError, loadAgentImage, setAgentMode, setAgentModel, setAgentPermission, writeNewAgent } from "../src/index.js";
+import { AgentImageError, loadAgentImage, readConfigTools, setAgentMode, setAgentModel, setAgentPermission, setAgentTools, writeNewAgent } from "../src/index.js";
 
 function imageDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "arke-image-"));
@@ -217,6 +217,58 @@ test("setAgentPermission replaces the permission grid, preserving the rest (SPEC
   assert.equal(image.permission.github_mcp_search, "allow");
   assert.equal(image.description, "keep me"); // untouched
   assert.equal(image.executor.config.model, "x/y");
+});
+
+test("setAgentTools writes the keyed tools map, preserving the rest, and round-trips (SPEC-021)", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\n    model: anthropic/opus\npermission:\n  bash: ask\n" });
+  setAgentTools(dir, {
+    github: { type: "mcp", transport: "local", command: "uv", args: ["run", "gh"], environment: { GITHUB_TOKEN: "${GITHUB_TOKEN}" } },
+    docs: { type: "mcp", transport: "remote", url: "https://x/mcp", headers: { Authorization: "Bearer ${DOCS_TOKEN}" } },
+  } as any);
+  const img = loadAgentImage(dir);
+  const gh = img.tools.github as any;
+  assert.equal(gh.transport, "local");
+  assert.equal(gh.command, "uv");
+  assert.deepEqual(gh.args, ["run", "gh"]);
+  assert.equal(gh.environment.GITHUB_TOKEN, "${GITHUB_TOKEN}");
+  assert.equal((img.tools.docs as any).url, "https://x/mcp");
+  assert.equal((img.tools.docs as any).headers.Authorization, "Bearer ${DOCS_TOKEN}");
+  // Untouched: the executor model and the permission block survive the tools rewrite.
+  assert.equal(img.executor.config.model, "anthropic/opus");
+  assert.equal(img.permission.bash, "ask");
+});
+
+test("readConfigTools returns ONLY the top-level config tools, excluding directory-discovered tools (SPEC-021)", () => {
+  const dir = imageDir({
+    "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  inline:\n    type: mcp\n    command: uv\n",
+    "tools/mcp/discovered.yaml": "command: npx\nargs: [-y, some-mcp]\n",
+    "tools/python/summarize.py": "def summarize(): ...\n",
+  });
+  // The LOADED image merges directory-discovered + inline tools…
+  const img = loadAgentImage(dir);
+  assert.ok(img.tools.inline && img.tools.discovered && img.tools.summarize, "the loaded image sees all three");
+  // …but the EDITABLE surface (what the editor round-trips) is the top-level config.yaml block only —
+  // discovered tools are directory-owned and the surgical writer must not re-write them.
+  assert.deepEqual(Object.keys(readConfigTools(dir)), ["inline"], "only the config.yaml tools block is editable");
+  assert.equal((readConfigTools(dir).inline as any).command, "uv");
+});
+
+test("setAgentTools with an empty map removes the tools block", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  x:\n    type: mcp\n    command: uv\n" });
+  setAgentTools(dir, {} as any);
+  assert.equal(Object.keys(loadAgentImage(dir).tools).length, 0);
+});
+
+test("setAgentTools rejects an inline literal secret and rolls back the file (NFR-1)", () => {
+  const dir = imageDir({ "config.yaml": "spec_version: 1\nname: t\nexecutor:\n  config:\n    harness: opencode-native\ntools:\n  keep:\n    type: mcp\n    command: uv\n" });
+  const before = readFileSync(join(dir, "config.yaml"), "utf8");
+  assert.throws(
+    () => setAgentTools(dir, { bad: { type: "mcp", transport: "remote", url: "https://x", headers: { Authorization: "Bearer sk-LITERAL" } } } as any),
+    AgentImageError,
+  );
+  // Rolled back: the original tools survive and the rejected edit left nothing behind.
+  assert.equal(readFileSync(join(dir, "config.yaml"), "utf8"), before, "the file is restored on a rejected edit");
+  assert.ok(loadAgentImage(dir).tools.keep, "the original tool is intact");
 });
 
 test("setAgentPermission with an empty map removes the permission block", () => {
