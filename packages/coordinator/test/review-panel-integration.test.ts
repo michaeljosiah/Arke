@@ -389,6 +389,58 @@ test("reviewSpec rejects a roster whose reviewers declare the same model", async
   ws.close();
 });
 
+/**
+ * The adjudication prompt embeds an EXAMPLE disposition array; the author's own prompt arrives first as a
+ * completed `message.updated` with role "user". The loop must ingest ONLY the author's assistant answer —
+ * otherwise it would parse the example's `issue-abc`/`issue-def` ids (which match no real issue) and stall.
+ */
+class AuthorEchoAdapter implements HarnessAdapter {
+  readonly id = "AuthorEchoMock";
+  private q: DomainEvent[] = [];
+  private n = 0;
+  capabilities(): ReadonlySet<Capability> { return new Set<Capability>(["events", "diff"]); }
+  readiness(): Readiness { return { ready: true }; }
+  async createSession(input: CreateSessionInput): Promise<SessionRef> { return { sessionId: `${input.specId}-s${++this.n}` }; }
+  async sendMessage(i: SendMessageInput): Promise<SendReceipt> { return { sessionId: i.sessionId, correlationId: "c" }; }
+  private push(sessionId: string, role: "user" | "assistant", text: string) {
+    this.q.push({ seq: 0, ts: 0, harness: this.id, type: "message.updated", sessionId, messageId: `${role}-${sessionId}`, role, text, toolCalls: [], isStreaming: false } as DomainEvent);
+  }
+  async dispatchAsync(i: SendMessageInput): Promise<SendReceipt> {
+    if (i.agent === "reviewer-a") this.push(i.sessionId, "assistant", JSON.stringify([{ section: SECTION, severity: "suggestion", text: "nit" }]));
+    else if (i.agent === "reviewer-b") this.push(i.sessionId, "assistant", JSON.stringify([]));
+    else if (i.agent === "spec-author") {
+      const prompt = (i.parts.find((p) => p.type === "text") as { text?: string } | undefined)?.text ?? "";
+      const realId = issuesFromPrompt(prompt)[0]?.issueId ?? "issue-none";
+      this.push(i.sessionId, "user", prompt); // the prompt echo — contains issue-abc/issue-def EXAMPLES
+      this.push(i.sessionId, "assistant", JSON.stringify([{ issueId: realId, action: "accept", rationale: "ok" }]));
+    }
+    return { sessionId: i.sessionId, correlationId: "c" };
+  }
+  async *streamEvents(signal?: AbortSignal): AsyncIterable<DomainEvent> {
+    while (!signal?.aborted) {
+      const next = this.q.shift();
+      if (next) { yield next; continue; }
+      await new Promise<void>((r) => { const t = setTimeout(r, 5); signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
+    }
+  }
+}
+
+test("the loop ingests the author's disposition ANSWER, never the example array echoed in its prompt", async () => {
+  const dir = repoWithSpec();
+  const { c, port } = await start(dir, new AuthorEchoAdapter(), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const disp = await ev("panel.disposition");
+  assert.equal(disp.event.action, "accept");
+  await ev("review.converged"); // converged using the REAL disposition, not the prompt example
+  // The prompt's example ids were never surfaced as dispositions.
+  const exampleUsed = frames.some((f) => f.type === "event" && f.event?.type === "panel.disposition" && /issue-abc|issue-def/.test(f.event.issueId));
+  assert.equal(exampleUsed, false);
+  ws.close();
+});
+
 test("sendBackReview clears the converged gate and reopens authoring (in-review → draft)", async () => {
   const dir = repoWithSpec();
   const script: Script = {
