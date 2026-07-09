@@ -4,14 +4,14 @@ import { Icon } from './icons';
 
 const e = React.createElement;
 
-// Accent swatch options matching the prototype
+// Accent swatch options — the brand-accent set the theme engine actually understands (store
+// ACCENT_HEX). `teal` is the SPEC-033 default; `mono` restores the near-black monochrome primary.
 const ACCENTS = [
-  { label: 'Graphite', value: 'graphite', hex: '#6b7280' },
-  { label: 'Slate', value: 'slate', hex: '#475569' },
-  { label: 'Zinc', value: 'zinc', hex: '#71717a' },
-  { label: 'Stone', value: 'stone', hex: '#78716c' },
-  { label: 'Indigo', value: 'indigo', hex: '#4f46e5' },
-  { label: 'Violet', value: 'violet', hex: '#7c3aed' },
+  { label: 'Teal', value: 'teal', hex: '#0E7490' },
+  { label: 'Mono', value: 'mono', hex: '#171717' },
+  { label: 'Indigo', value: 'indigo', hex: '#4F46E5' },
+  { label: 'Green', value: 'green', hex: '#15803D' },
+  { label: 'Amber', value: 'amber', hex: '#B45309' },
 ];
 
 function AccentSwatches({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -82,6 +82,6 @@ export function Tweaks() {
       // Accent
       e('div', null,
         e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted-foreground)', marginBottom: 7 } }, 'Accent'),
-        e(AccentSwatches, { value: accent ?? 'graphite', onChange: (v) => set({ accent: v }) })),
+        e(AccentSwatches, { value: accent ?? 'teal', onChange: (v) => set({ accent: v }) })),
     ));
 }

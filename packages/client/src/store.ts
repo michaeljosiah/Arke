@@ -65,7 +65,10 @@ export const store = createStore({
   theme: 'light',
   density: 'comfortable',
   runtimeMode: 'supervised',
-  accent: 'mono',
+  // SPEC-033: the default brand accent is teal (#0E7490 via ACCENT_HEX), applied by applyTheme to
+  // --primary/--ring. Surfaces, text and the neutral --accent hover token stay monochrome; 'mono'
+  // restores the near-black primary. Selectable in the tweaks panel.
+  accent: 'teal',
   liveStream: true,
   // SPEC-030: per-project auto-PR preference — when true, the implementer opens the PR itself on
   // delivery; when false (default), delivery stops at the human diff-review gate. Seeded from the
@@ -165,6 +168,10 @@ function acceptDiff(id) {
   notify('merge', id + ' merged into main', 'board');
 }
 
+// SPEC-033: brand-accent hexes applied to --primary/--ring. `teal` (#0E7490) is the default; it
+// clears WCAG AA in both themes (≈5.1:1 white-on-teal for text; ≈3.7:1 teal-on-#0A0A0A for the
+// component/focus ring in dark), so a separate dark-theme teal is not needed. `mono` = no override
+// (near-black primary from the tokens).
 const ACCENT_HEX = { mono: null, indigo: '#4F46E5', teal: '#0E7490', green: '#15803D', amber: '#B45309' };
 function applyTheme() {
   const s = store.get();
