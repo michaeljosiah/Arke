@@ -217,16 +217,18 @@ function CopyButton({ text }: any) {
 
 /** A fenced code block: neutral surface + Geist Mono, shiki highlight when the language is known and
  *  the highlighter is ready, else plain monospace. Highlighting never blocks the surrounding text. */
-function CodeBlock({ code, lang, isDark }: any) {
+function CodeBlock({ code, lang, isDark, streaming }: any) {
   const norm = normalizeLang(lang);
   const [html, setHtml] = React.useState<string | null>(null);
   React.useEffect(() => {
     let alive = true;
     setHtml(null);
-    if (!norm) return; // unknown/absent language → stay plain
+    // Unknown/absent language stays plain. While the turn is still streaming we also stay plain and
+    // highlight only once it finalises — otherwise a growing fence re-highlights shiki on every delta.
+    if (!norm || streaming) return;
     highlightCode(code, norm, isDark).then((h) => { if (alive) setHtml(h); }).catch(() => { /* stay plain */ });
     return () => { alive = false; };
-  }, [code, norm, isDark]);
+  }, [code, norm, isDark, streaming]);
   return e('div', { className: 'arke-code', 'data-lang': norm || undefined },
     e(CopyButton, { text: code }),
     html
@@ -235,7 +237,7 @@ function CodeBlock({ code, lang, isDark }: any) {
   );
 }
 
-function makeMarkdownComponents(isDark: boolean): any {
+function makeMarkdownComponents(isDark: boolean, streaming?: boolean): any {
   return {
     // Unwrap <pre> — CodeBlock provides its own container, so we avoid a <div> inside <pre>.
     pre: ({ children }: any) => children,
@@ -244,7 +246,7 @@ function makeMarkdownComponents(isDark: boolean): any {
       const m = /language-([\w-]+)/.exec(className || '');
       const isBlock = !!m || raw.includes('\n');
       if (!isBlock) return e('code', { className: 'arke-inline-code' }, children);
-      return e(CodeBlock, { code: raw.replace(/\n$/, ''), lang: m ? m[1] : null, isDark });
+      return e(CodeBlock, { code: raw.replace(/\n$/, ''), lang: m ? m[1] : null, isDark, streaming });
     },
     a: ({ href, children }: any) => {
       const safe = safeHref(href);
@@ -261,7 +263,7 @@ function makeMarkdownComponents(isDark: boolean): any {
  */
 export const Markdown = React.memo(function Markdown({ text, mode, streaming }: any) {
   const isDark = useStore((s: any) => s.theme === 'dark');
-  const components = React.useMemo(() => makeMarkdownComponents(isDark), [isDark]);
+  const components = React.useMemo(() => makeMarkdownComponents(isDark, streaming), [isDark, streaming]);
   const md = React.useMemo(
     () => e(ReactMarkdown as any, { remarkPlugins: [remarkGfm], urlTransform: (u: string) => safeHref(u) ?? '', components }, text || ''),
     [text, components],
@@ -349,7 +351,11 @@ export function SplitPane({ left, right, storageKey, defaultRatio = 0.38, minLef
     const width = containerRef.current ? containerRef.current.getBoundingClientRect().width : 0;
     setRatio((r) => { const nr = clampRatio(r + delta, width); persist(nr); return nr; });
   };
-  const reset = () => { persist(defaultRatio); setRatio(defaultRatio); };
+  const reset = () => {
+    const width = containerRef.current ? containerRef.current.getBoundingClientRect().width : 0;
+    const r = clampRatio(defaultRatio, width);
+    persist(r); setRatio(r);
+  };
   const onKeyDown = (ev: any) => {
     if (ev.key === 'ArrowLeft') { ev.preventDefault(); nudge(-0.03); }
     else if (ev.key === 'ArrowRight') { ev.preventDefault(); nudge(0.03); }
