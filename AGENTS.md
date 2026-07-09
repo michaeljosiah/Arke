@@ -69,6 +69,14 @@ follow its links to related documents. Foundational grounding (product/business/
 as typed OKF documents anywhere in `docs/` and is selected by `type`, not by folder (SPEC-027) — there
 is no dedicated grounding folder.
 
+**Reviewer checklist — committing a grounding document is a leak surface (SPEC-027).** A grounding
+document under `docs/` (`type: product-overview` / `business-context` / `domain-glossary` /
+`architecture` / `convention`) is tracked, public-safe project truth — it ships in a fresh clone. When
+adding or editing one, review it for anything that must not be public: secrets, tokens, private
+endpoints, client or customer detail. Sensitive or private material belongs in the git-ignored
+**`.arke/grounding/`** local tier instead, which grounds the local agent but is never committed or
+auto-promoted into the tracked tree. There is no automated secret scan — this review is the control.
+
 ## Completion gates
 
 Before any task is "done":

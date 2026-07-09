@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -16,6 +16,12 @@ import {
   renderBundleIndex,
   renderSpecIndex,
   specEntryFromFile,
+  groundingDocFromFile,
+  renderGroundingDigest,
+  GROUNDING_TYPES,
+  type GroundingDigest,
+  type GroundingDoc,
+  type GroundingSpecEntry,
   type AgentImage,
   type AgentModel,
   type CapabilityMaterialisation,
@@ -199,6 +205,8 @@ export class ProjectContext {
   private docsWatcher: FSWatcher | null = null;
   /** SPEC-026: per-bundle debounce timers, coalescing rapid `docs/` edits into one regeneration. */
   private readonly indexDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  /** SPEC-027: the assembled grounding digest, cached until a `docs/` change or grounding upload. */
+  private groundingDigestCache: GroundingDigest | null = null;
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -275,6 +283,9 @@ export class ProjectContext {
    * the rendered text differs, so a no-op regeneration touches nothing (and cannot loop the watcher).
    */
   private regenerateBundleIndex(dir: string): void {
+    // Any docs/ document change (add/edit/delete, a governed status write) flows through here, so this is
+    // the single choke-point to invalidate the grounding digest cache (SPEC-027) — cheap: it only nulls.
+    this.groundingDigestCache = null;
     const bundle = relative(this.root, dir).replaceAll("\\", "/") || ".";
     try {
       if (!existsSync(dir)) return;
@@ -369,6 +380,98 @@ export class ProjectContext {
     }
     for (const t of this.indexDebounce.values()) clearTimeout(t);
     this.indexDebounce.clear();
+  }
+
+  // ---- typed grounding digest (SPEC-027) ----------------------------------
+
+  /**
+   * Assemble the three-part typed grounding digest (SPEC-027) injected at BOTH sites — authoring and
+   * review. (a) business grounding = the grounding-typed OKF documents anywhere under `docs/`, selected
+   * by `type` (not folder); (b) the existing spec corpus from `docs/specifications/` (SPEC-026); (c) the
+   * `.arke/grounding/` local uploads, referenced by explicit path. Cached per project-context and
+   * invalidated whenever a `docs/` bundle regenerates (any doc add/edit/status change flows through
+   * {@link regenerateBundleIndex}) or a grounding file is uploaded — so the walk is not repeated per turn.
+   */
+  private buildGroundingDigest(): GroundingDigest {
+    if (this.groundingDigestCache) return this.groundingDigestCache;
+    const digest: GroundingDigest = {
+      businessGrounding: this.collectGroundingDocs(),
+      specIndex: this.collectSpecIndexDigest(),
+      sessionUploads: this.groundingList().map((g) => ({ path: `.arke/grounding/${g.name}` })),
+    };
+    this.groundingDigestCache = digest;
+    return digest;
+  }
+
+  /** Walk `docs/` recursively and collect every grounding-typed document (SPEC-027, part a). */
+  private collectGroundingDocs(): GroundingDoc[] {
+    const docsRoot = resolve(this.root, "docs");
+    if (!existsSync(docsRoot)) return [];
+    const summaryBudget = Number(process.env.ARKE_GROUNDING_SUMMARY_BUDGET) || undefined;
+    const out: GroundingDoc[] = [];
+    const walk = (dir: string): void => {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        const abs = resolve(dir, name);
+        let st;
+        try {
+          // lstat (not stat): a symlink resolves to isFile()/isDirectory() = false, so it is NEITHER
+          // descended into NOR read — this both prevents a symlink cycle (e.g. `docs/loop -> ..`) from
+          // hanging the walk AND stops a symlink escaping the project root, matching the realpath/
+          // isWithinRoot confinement `findSpecFile`/`specLibrary` already enforce elsewhere (SPEC-027).
+          st = lstatSync(abs);
+        } catch {
+          continue;
+        }
+        if (st.isDirectory()) {
+          if (name === "assets" || name === "examples") continue; // not OKF document folders
+          walk(abs);
+          continue;
+        }
+        if (!st.isFile() || !name.endsWith(".md") || name === "index.md") continue; // generated index is `type: index`, never grounding
+        const relPath = relative(this.root, abs).replaceAll("\\", "/");
+        try {
+          const doc = groundingDocFromFile(relPath, readFileSync(abs, "utf8"), summaryBudget ? { summaryBudget } : {});
+          if (doc) out.push(doc);
+        } catch {
+          /* an unreadable/odd file is skipped — grounding is best-effort context */
+        }
+      }
+    };
+    walk(docsRoot);
+    // Deterministic order: by the grounding vocabulary (product-overview first), then path.
+    out.sort((a, b) => rankGroundingType(a.type) - rankGroundingType(b.type) || a.path.localeCompare(b.path));
+    return out;
+  }
+
+  /** Project `docs/specifications/` into the compact spec-index digest (SPEC-027, part b), ordered by NNN. */
+  private collectSpecIndexDigest(): GroundingSpecEntry[] {
+    const dir = resolve(this.root, "docs", "specifications");
+    if (!existsSync(dir)) return [];
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return [];
+    }
+    const entries: GroundingSpecEntry[] = [];
+    for (const f of names.filter(isSpecFile)) {
+      try {
+        const e = specEntryFromFile(f, readFileSync(resolve(dir, f), "utf8"));
+        if (e.parseState === "ok") {
+          entries.push({ number: e.number, title: e.title, status: e.status, capabilities: e.capabilities, path: `docs/specifications/${e.path}` });
+        }
+      } catch {
+        /* an unparseable spec is skipped from grounding (it still surfaces, flagged, in the index) */
+      }
+    }
+    entries.sort((a, b) => a.number.localeCompare(b.number) || a.path.localeCompare(b.path));
+    return entries;
   }
 
   /** Whether the pump is (or could be) streaming — used by idle eviction to avoid killing live work. */
@@ -1734,6 +1837,7 @@ export class ProjectContext {
       sectionHashes.set(s.title.toLowerCase(), h);
     }
     const requirementsSectionHash = sectionHashes.get("requirements") ?? sectionHashOf("");
+    this.groundingDigestCache = null; // ground the panel on the CURRENT docs/ tree (SPEC-027, see session.create)
     const grounding = this.groundingSummary();
     const prompt = buildReviewerPrompt(found.text, grounding);
     const panel: ReviewPanel = {
@@ -1808,14 +1912,23 @@ export class ProjectContext {
     }
   }
 
-  /** A short grounding summary for reviewers: the AGENTS.md head, if present (host-side, SPEC-007). */
+  /**
+   * Grounding for reviewers (SPEC-007, upgraded by SPEC-027): the AGENTS.md house-rules head plus the
+   * typed grounding digest — foundational business grounding, the existing spec corpus, and the
+   * `.arke/grounding/` session uploads (by explicit path). `buildReviewerPrompt` wraps this under a
+   * `## Project grounding` heading, so the digest's own `###` subsections nest cleanly beneath it.
+   */
   private groundingSummary(): string {
+    const parts: string[] = [];
     try {
-      const agents = readFileSync(resolve(this.root, "AGENTS.md"), "utf8");
-      return agents.slice(0, 2000);
+      const agents = readFileSync(resolve(this.root, "AGENTS.md"), "utf8").slice(0, 2000).trim();
+      if (agents) parts.push(`### House rules (AGENTS.md, head)\n\n${agents}`);
     } catch {
-      return "";
+      /* no AGENTS.md — the digest below still grounds the reviewer */
     }
+    const digest = renderGroundingDigest(this.buildGroundingDigest());
+    if (digest) parts.push(digest);
+    return parts.join("\n\n");
   }
 
   /**
@@ -2099,28 +2212,47 @@ export class ProjectContext {
     if (size > max) throw new ValidationError("content", `grounding file exceeds the ${max}-byte limit`);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, "utf8");
-    await this.trace.write({ kind: "grounding.upload", projectId: this.projectId, name: basename(abs), size });
-    return { name: basename(abs), path: relative(this.root, abs).replaceAll("\\", "/"), size };
+    this.groundingDigestCache = null; // SPEC-027: a new upload changes part (c) of the digest
+    // Report the path relative to the grounding root (posix) so a nested upload is named the way the
+    // recursive listing surfaces it (SPEC-027) — `grounding.list` and the injected path then agree.
+    const name = relative(root, abs).replaceAll("\\", "/");
+    await this.trace.write({ kind: "grounding.upload", projectId: this.projectId, name, size });
+    return { name, path: relative(this.root, abs).replaceAll("\\", "/"), size };
   }
 
-  /** List the grounding files under this project's `.arke/grounding/` (name + size). */
+  /**
+   * List the grounding files under this project's `.arke/grounding/` (SPEC-020, widened to recurse for
+   * SPEC-027). Recursion matters because `groundingUpload` accepts nested paths, and the injected digest
+   * references each upload by EXPLICIT path (the agent's `glob`/`grep` skip the git-ignored dot-dir) —
+   * so a nested upload must be surfaced or it is silently unreachable. `name` is the POSIX path relative
+   * to the grounding root, so the caller renders `.arke/grounding/${name}` correctly for nested files.
+   */
   groundingList(): Array<{ name: string; size: number }> {
     const root = resolve(this.root, ".arke", "grounding");
-    try {
-      return readdirSync(root)
-        .map((f) => {
-          try {
-            const st = statSync(resolve(root, f));
-            return st.isFile() ? { name: f, size: st.size } : null;
-          } catch {
-            return null;
-          }
-        })
-        .filter((x): x is { name: string; size: number } => x !== null)
-        .sort((a, b) => a.name.localeCompare(b.name));
-    } catch {
-      return [];
-    }
+    const out: Array<{ name: string; size: number }> = [];
+    const walk = (dir: string): void => {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const f of names) {
+        const abs = resolve(dir, f);
+        let st;
+        try {
+          // lstat (not stat) so a symlink is neither followed out of the grounding root nor descended
+          // into — a symlink cycle can't hang the walk, and an escaping link can't leak external paths.
+          st = lstatSync(abs);
+        } catch {
+          continue;
+        }
+        if (st.isDirectory()) walk(abs);
+        else if (st.isFile()) out.push({ name: relative(root, abs).replaceAll("\\", "/"), size: st.size });
+      }
+    };
+    walk(root);
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // ---- op surface (per project) -------------------------------------------
@@ -2132,6 +2264,11 @@ export class ProjectContext {
       case "session.create": {
         const specId = String(a.specId ?? "");
         const parent = a.parent ? String(a.parent) : undefined;
+        // Re-ground each new session on the CURRENT docs/ tree (SPEC-027): the digest cache lives for the
+        // whole project-context, and under the sweep-only fallback (headless/CI, no docs watcher) a
+        // grounding doc added after project-open would otherwise never invalidate it. Nulling at the
+        // session boundary — "session starts" — keeps a fresh session's grounding current regardless.
+        this.groundingDigestCache = null;
         const ref = await this.adapter.createSession({ specId, ...(parent ? { parent } : {}) });
         await this.emit({
           seq: 0,
@@ -2187,12 +2324,12 @@ export class ProjectContext {
           if (found) {
             specContext = `Working specification: ${found.relPath} (spec_id: ${found.canonicalId}). Read and edit THIS file for this conversation; do not pick a different specification unless explicitly asked.\n`;
           }
-          // Grounding is invisible to the agent's own search (`.arke/` is a dot-dir AND gitignored,
-          // which glob/grep skip) — name the exact paths so the agent reads them directly (SPEC-020).
-          const grounding = this.groundingList();
-          if (grounding.length > 0) {
-            specContext += `Grounding files uploaded by the engineer — source material for this discussion; read them at these exact paths (they will not appear in file searches):\n${grounding.map((g) => `- .arke/grounding/${g.name}`).join("\n")}\n`;
-          }
+          // Typed grounding digest (SPEC-027): foundational business grounding + the existing spec corpus
+          // + the `.arke/grounding/` session uploads (referenced by explicit path — the agent's glob/grep
+          // skip the git-ignored dot-dir, so it cannot discover them by search). Each part is distinctly
+          // framed and the whole is size-bounded, so it stays bounded as the corpus grows.
+          const digest = renderGroundingDigest(this.buildGroundingDigest());
+          if (digest) specContext += `${specContext ? "\n" : ""}## Project grounding\n${digest}\n`;
           if (specContext) specContext += "\n";
         } catch {
           /* context is a nicety — never block the send on it */
@@ -2973,4 +3110,10 @@ function fileSha(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Rank a grounding `type` by the vocabulary order (product-overview first) for a deterministic digest. */
+function rankGroundingType(type: string): number {
+  const i = (GROUNDING_TYPES as readonly string[]).indexOf(type);
+  return i === -1 ? GROUNDING_TYPES.length : i;
 }
