@@ -384,16 +384,22 @@ function applyEvent(ev: any) {
       break;
     }
     case 'panel.started': {
-      // A multi-model review panel began (SPEC-007). `reviewers[].model` is a tier LABEL, never a
-      // vendor model id (SPEC-005). Replace any prior panel for this spec.
-      store.set({
-        panel: {
-          panelId: ev.panelId, specId: ev.specId, status: 'running',
-          reviewers: (ev.reviewers || []).map((r: any) => ({ role: r.role, model: r.model, status: 'running', issues: [] })),
-          agreedIds: [], notice: null,
-        },
+      // A review panel began (SPEC-007/035). `reviewers[].model` is a tier LABEL, never a vendor id
+      // (SPEC-005). A round-1 panel starts a fresh review; a reconvene (round>1) for the same spec CARRIES
+      // the prior rounds' summaries forward so the converged report shows cumulative progress (SPEC-035).
+      store.set((s: any) => {
+        const carry = ev.round > 1 && s.panel && s.panel.specId === ev.specId;
+        return {
+          panel: {
+            panelId: ev.panelId, specId: ev.specId, status: 'running', phase: 'reviewing', round: ev.round || 1,
+            reviewers: (ev.reviewers || []).map((r: any) => ({ role: r.role, model: r.model, status: 'running', issues: [] })),
+            agreedIds: [], notice: null,
+            rounds: carry ? (s.panel.rounds || []) : [],
+            unresolvedBlockers: carry ? (s.panel.unresolvedBlockers || []) : [],
+          },
+        };
       });
-      rail('panel.started', `panel.started · ${ev.specId} · ${(ev.reviewers || []).length} reviewers`, ts);
+      rail('panel.started', `panel.started · ${ev.specId} · round ${ev.round || 1} · ${(ev.reviewers || []).length} reviewers`, ts);
       break;
     }
     case 'panel.issue': {
@@ -467,7 +473,7 @@ function applyEvent(ev: any) {
       // draft→in-review; the human's remaining action is the approval (in-review → approved).
       store.set((s: any) => ({
         panel: s.panel && s.panel.specId === ev.specId
-          ? { ...s.panel, status: 'converged', phase: 'converged', rounds: s.panel.rounds || [], unresolvedBlockers: ev.unresolvedBlockers || [], convergedRounds: ev.rounds }
+          ? { ...s.panel, status: 'converged', phase: 'converged', rounds: s.panel.rounds || [], unresolvedBlockers: ev.unresolvedBlockers || [], convergedRounds: ev.rounds, reachedCap: !!ev.reachedCap }
           : s.panel,
         reviewedSpecs: s.reviewedSpecs.includes(ev.specId) ? s.reviewedSpecs : [...s.reviewedSpecs, ev.specId],
       }));
@@ -491,8 +497,13 @@ function applyEvent(ev: any) {
       break;
     }
     case 'review.gate-failed': {
-      // The finalisation gate rejected an approve issued without a completed review (SPEC-007).
-      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval blocked — ${ev.reason}` } }));
+      // The finalisation gate rejected an approve, OR the SPEC-035 loop failed (adjudication error /
+      // unresolved blocker after re-prompt). Mark the live panel failed so the review page shows a
+      // failed state + rerun prompt instead of a panel stuck "adjudicating".
+      store.set((s: any) => ({
+        cockpit: { ...s.cockpit, notice: `review blocked — ${ev.reason}` },
+        panel: s.panel && s.panel.specId === ev.specId ? { ...s.panel, status: 'failed', phase: 'failed', notice: ev.reason } : s.panel,
+      }));
       rail('review.gate-failed', `review.gate-failed · ${ev.specId} · ${ev.reason}`, ts);
       break;
     }

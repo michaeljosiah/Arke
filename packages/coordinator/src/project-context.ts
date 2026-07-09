@@ -1908,7 +1908,11 @@ export class ProjectContext {
     const resolvedBranch = fmBranch ?? branch;
     const reviewers = reviewersArg && reviewersArg.length > 0 ? reviewersArg : [{ role: "reviewer-a" }, { role: "reviewer-b" }];
 
-    // Seed the loop and convene round 1. A superseding review replaces any prior loop/gate for this spec.
+    // A superseding review replaces any prior loop/gate for this spec — TEAR DOWN the old loop first so its
+    // still-running reviewer/adjudication sessions leave the machinery/guard sets (else a stale author turn
+    // would be ignored by the approve guard and could commit mid-edit).
+    const prior = this.reviewLoops.get(cid);
+    if (prior) this.endReviewLoop(prior);
     const loop: ReviewLoopState = {
       specId: cid,
       round: 1,
@@ -1923,7 +1927,7 @@ export class ProjectContext {
     this.convergedReviews.delete(cid); // a fresh review must re-converge before the gate is satisfied
     let panel: ReviewPanel;
     try {
-      panel = await this.startPanel(cid, reviewers, resolvedBranch);
+      panel = await this.startPanel(cid, reviewers, resolvedBranch, 1);
     } catch (err) {
       this.reviewLoops.delete(cid);
       throw err;
@@ -1947,7 +1951,7 @@ export class ProjectContext {
    * emitting `panel.config-error`) if the reviewer configuration is invalid. Reads the file fresh so each
    * round reviews the current draft.
    */
-  private async startPanel(cid: string, reviewersArg: ReviewerConfig[], resolvedBranch?: string): Promise<ReviewPanel> {
+  private async startPanel(cid: string, reviewersArg: ReviewerConfig[], resolvedBranch?: string, round = 1): Promise<ReviewPanel> {
     const found = this.findSpecFile(cid);
     if (!found) throw new Error(`no specification file found for '${cid}' under docs/specifications`);
     const doc = parseSpecDoc(found.text);
@@ -2014,6 +2018,7 @@ export class ProjectContext {
       type: "panel.started",
       panelId,
       specId: cid,
+      round, // SPEC-035: the loop round this panel belongs to (1 = fresh review; >1 = a reconvene)
       reviewers: panel.reviewers.map((r) => ({ role: r.role, model: r.label })), // client sees the tier LABEL, never the vendor model id
     } as DomainEvent);
 
@@ -2038,6 +2043,9 @@ export class ProjectContext {
     for (const rec of await this.trace.readAll()) {
       if (rec.kind === "review.converged" && typeof rec.specId === "string") this.convergedReviews.add(rec.specId);
       if (rec.kind === "review.sent-back" && typeof rec.specId === "string") this.convergedReviews.delete(rec.specId);
+      // ANY regression to `draft` (a board send-back via spec.transition writes spec.lifecycle{status:"draft"},
+      // not review.sent-back) clears the converged gate — the reopened draft needs a fresh loop (SPEC-035).
+      if (rec.kind === "spec.lifecycle" && rec.status === "draft" && typeof rec.specId === "string") this.convergedReviews.delete(rec.specId);
       if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
     }
   }
@@ -2142,7 +2150,10 @@ export class ProjectContext {
    */
   private async startAdjudication(loop: ReviewLoopState, panel: ReviewPanel, retryNote?: string): Promise<void> {
     if (panel.issues.length === 0) {
-      await this.convergeLoop(loop); // no critique to fold in — the round (and loop) is done
+      // No critique to fold in — still record/emit the round decision (a clean review is a real round).
+      await this.trace.write({ kind: "review.round", projectId: this.projectId, specId: loop.specId, panelId: panel.panelId, round: loop.round, applied: 0, dismissed: 0, reconvened: false });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.round-complete", panelId: panel.panelId, specId: loop.specId, round: loop.round, applied: 0, dismissed: 0, reconvened: false } as DomainEvent);
+      await this.convergeLoop(loop, false);
       return;
     }
     const found = this.findSpecFile(loop.specId);
@@ -2202,30 +2213,38 @@ export class ProjectContext {
 
     const dispositions = parseDispositions(text);
     const byId = new Map(dispositions.map((d) => [d.issueId, d]));
-    // Accept-or-justify: every blocking issue needs a disposition, and a dismissal needs a rationale.
-    const blockers = panel.issues.filter((i) => i.severity === "blocking");
-    const missing = blockers.filter((b) => {
-      const d = byId.get(b.issueId);
-      return !d || (d.action === "dismiss" && !d.rationale);
-    });
-    if (missing.length > 0) {
+    // SPEC-035 R1: EVERY issue must receive a disposition; a blocking dismissal additionally needs a
+    // rationale (accept-or-justify). Re-prompt once for anything missing.
+    const bad = (i: PanelIssueState) => {
+      const d = byId.get(i.issueId);
+      if (!d) return true; // no disposition at all
+      if (i.severity === "blocking" && d.action === "dismiss" && !d.rationale) return true; // unjustified blocker
+      return false;
+    };
+    const missing = panel.issues.filter(bad);
+    if (missing.length > 0 && loop.adjudicationRetries < ADJUDICATION_RETRY_LIMIT) {
       this.adjudicationSessions.delete(sessionId); // this attempt is consumed
-      if (loop.adjudicationRetries < ADJUDICATION_RETRY_LIMIT) {
-        loop.adjudicationRetries++;
-        const note = `Your previous adjudication omitted a disposition (or a dismissal rationale) for these blocking issues: ${missing.map((m) => m.issueId).join(", ")}. Re-answer with the COMPLETE disposition array — every issue exactly once, and a concrete rationale for each dismissal.`;
-        await this.startAdjudication(loop, panel, note);
-      } else {
-        await this.failReviewLoop(loop, `author did not adjudicate ${missing.length} blocking issue(s) after re-prompt`);
-      }
+      loop.adjudicationRetries++;
+      const note = `Your previous adjudication omitted a disposition (or a dismissal rationale) for: ${missing.map((m) => m.issueId).join(", ")}. Re-answer with the COMPLETE disposition array — EVERY issue exactly once, with a concrete rationale for each dismissal.`;
+      await this.startAdjudication(loop, panel, note);
       return;
     }
+    // After the re-prompt: a still-unjustified BLOCKER fails the loop (the gate is not satisfied).
+    const badBlockers = missing.filter((i) => i.severity === "blocking");
+    if (badBlockers.length > 0) {
+      this.adjudicationSessions.delete(sessionId);
+      await this.failReviewLoop(loop, `author did not adjudicate ${badBlockers.length} blocking issue(s) after re-prompt`);
+      return;
+    }
+    // A still-undisposed NON-blocker is recorded as a default dismissal, so every issue stays in the audit
+    // and the report (R1) rather than silently vanishing.
+    for (const i of missing) if (!byId.has(i.issueId)) byId.set(i.issueId, { issueId: i.issueId, action: "dismiss", rationale: "the author did not address this issue" });
 
-    // Record every disposed issue: mark it, trace it (actor: spec-author), emit panel.disposition.
+    // Record every issue's disposition (all issues now have one): mark, trace (actor: spec-author), emit.
     let applied = 0;
     let dismissed = 0;
     for (const i of panel.issues) {
-      const d = byId.get(i.issueId);
-      if (!d) continue; // an undisposed suggestion/question — leave as raised
+      const d = byId.get(i.issueId)!;
       i.adjudication = d.action === "accept" ? "accepted" : "dismissed";
       if (d.action === "accept") applied++;
       else dismissed++;
@@ -2236,24 +2255,53 @@ export class ProjectContext {
       });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.disposition", panelId: panel.panelId, issueId: i.issueId, action: d.action, rationale: d.rationale, actor: "spec-author" } as DomainEvent);
     }
-    loop.unresolvedBlockers = panel.issues
-      .filter((i) => i.severity === "blocking" && i.adjudication === "dismissed")
-      .map((i) => ({ issueId: i.issueId, section: i.section, text: i.text, rationale: byId.get(i.issueId)?.rationale ?? "" }));
 
-    // Reconvene iff a BLOCKER was accepted (warrants re-review) AND the spec's normative content actually
-    // changed (so a dismiss-only or no-op round can't loop forever) AND we are under the round cap.
+    // Did the author's edits change the spec's normative content?
     const foundAfter = this.findSpecFile(loop.specId);
     const newHash = foundAfter ? normativeHash(foundAfter.text) : loop.normativeHashBeforeRound;
-    const acceptedBlocker = panel.issues.some((i) => i.severity === "blocking" && i.adjudication === "accepted");
     const changed = newHash !== loop.normativeHashBeforeRound;
-    const reconvene = acceptedBlocker && changed && loop.round < MAX_REVIEW_ROUNDS;
+    const acceptedBlocker = panel.issues.some((i) => i.severity === "blocking" && i.adjudication === "accepted");
+
+    // Unresolved blockers surfaced to the human at approval — accumulated across rounds (deduped by
+    // content), so an earlier round's dismissal is not lost when a later panel doesn't re-raise it:
+    //   · dismissed blockers (with the author's rationale), and
+    //   · accepted blockers whose "fix" produced NO normative change (a hollow accept — the fix didn't land).
+    // A blocker accepted AND applied (changed) this round resolves any prior entry with the same content.
+    if (changed) {
+      const resolved = new Set(panel.issues.filter((i) => i.severity === "blocking" && i.adjudication === "accepted").map((i) => `${i.section}::${i.text}`));
+      loop.unresolvedBlockers = loop.unresolvedBlockers.filter((b) => !resolved.has(`${b.section}::${b.text}`));
+    }
+    const roundUnresolved = panel.issues
+      .filter((i) => i.severity === "blocking" && (i.adjudication === "dismissed" || (i.adjudication === "accepted" && !changed)))
+      .map((i) => ({
+        issueId: i.issueId, section: i.section, text: i.text,
+        rationale: i.adjudication === "dismissed"
+          ? (byId.get(i.issueId)?.rationale ?? "")
+          : "marked accepted but the specification's normative content did not change — the fix may not have been applied",
+      }));
+    this.mergeUnresolvedBlockers(loop, roundUnresolved);
+
+    // Reconvene iff a blocker was accepted AND the spec materially changed AND under the cap. A round that
+    // would reconvene but hits the cap is flagged so the human sees "stopped at cap without re-review".
+    const underCap = loop.round < MAX_REVIEW_ROUNDS;
+    const reconvene = acceptedBlocker && changed && underCap;
+    const reachedCap = acceptedBlocker && changed && !underCap;
 
     this.adjudicationSessions.delete(sessionId);
     await this.trace.write({ kind: "review.round", projectId: this.projectId, specId: loop.specId, panelId: panel.panelId, round: loop.round, applied, dismissed, reconvened: reconvene });
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "panel.round-complete", panelId: panel.panelId, specId: loop.specId, round: loop.round, applied, dismissed, reconvened: reconvene } as DomainEvent);
 
     if (reconvene) await this.startReviewRound(loop);
-    else await this.convergeLoop(loop);
+    else await this.convergeLoop(loop, reachedCap);
+  }
+
+  /** Merge round-level unresolved blockers into the loop's set, deduped by section + text content. */
+  private mergeUnresolvedBlockers(loop: ReviewLoopState, items: ReviewLoopState["unresolvedBlockers"]): void {
+    const seen = new Set(loop.unresolvedBlockers.map((b) => `${b.section}::${b.text}`));
+    for (const b of items) {
+      const k = `${b.section}::${b.text}`;
+      if (!seen.has(k)) { seen.add(k); loop.unresolvedBlockers.push(b); }
+    }
   }
 
   /** Reconvene a fresh panel for the next review round (SPEC-035) on the revised draft. */
@@ -2268,7 +2316,7 @@ export class ProjectContext {
     loop.normativeHashBeforeRound = normativeHash(found.text);
     let panel: ReviewPanel;
     try {
-      panel = await this.startPanel(loop.specId, loop.reviewers, loop.branch);
+      panel = await this.startPanel(loop.specId, loop.reviewers, loop.branch, loop.round);
     } catch (err) {
       await this.failReviewLoop(loop, `could not reconvene the panel: ${err instanceof Error ? err.message : String(err)}`);
       return;
@@ -2283,10 +2331,10 @@ export class ProjectContext {
    * the human's only governed action is the approval. A precondition failure (malformed / branch
    * mismatch) surfaces via its own event and leaves the spec in `draft` — it does not throw here.
    */
-  private async convergeLoop(loop: ReviewLoopState): Promise<void> {
+  private async convergeLoop(loop: ReviewLoopState, reachedCap = false): Promise<void> {
     this.convergedReviews.add(loop.specId);
-    await this.trace.write({ kind: "review.converged", projectId: this.projectId, specId: loop.specId, rounds: loop.round, unresolvedBlockers: loop.unresolvedBlockers });
-    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.converged", specId: loop.specId, rounds: loop.round, unresolvedBlockers: loop.unresolvedBlockers } as DomainEvent);
+    await this.trace.write({ kind: "review.converged", projectId: this.projectId, specId: loop.specId, rounds: loop.round, reachedCap, unresolvedBlockers: loop.unresolvedBlockers });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "review.converged", specId: loop.specId, rounds: loop.round, reachedCap, unresolvedBlockers: loop.unresolvedBlockers } as DomainEvent);
     // Auto-promote draft→in-review. The gate won't fail on the review check (just satisfied); a
     // well-formedness or branch-guard failure emits spec.malformed / spec.branch-mismatch for a human fix.
     try {

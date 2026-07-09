@@ -318,7 +318,47 @@ test("the loop is capped at three rounds even if every round accepts a blocker a
   await request("reviewSpec", { specId: "SPEC-TEST" });
   const converged = await ev("review.converged", () => true, 8000);
   assert.equal(converged.event.rounds, 3, "stops at the cap");
+  assert.equal(converged.event.reachedCap, true, "flags that it stopped at the cap with a pending re-review");
   assert.equal(frames.filter((f) => f.type === "event" && f.event?.type === "panel.started").length, 3);
+  ws.close();
+});
+
+test("an accepted blocker that makes NO normative change is surfaced as an unresolved blocker (hollow accept)", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "blocking", text: "fix me" }], "reviewer-b": [] }),
+    // Accept the blocker but DO NOT edit the file → acceptedBlocker true, changed false → converge,
+    // and the accepted-but-unapplied blocker must be surfaced (not silently counted as applied).
+    author: (_r, issues) => ({ dispositions: issues.map((i) => ({ issueId: i.issueId, action: "accept", rationale: "will fix" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  const converged = await ev("review.converged");
+  assert.equal(converged.event.rounds, 1, "no material change → no reconvene");
+  assert.equal(converged.event.unresolvedBlockers.length, 1, "the hollow accept is surfaced to the human");
+  assert.match(converged.event.unresolvedBlockers[0].rationale, /did not change/);
+  ws.close();
+});
+
+test("every reviewer issue receives a disposition — an omitted suggestion is recorded, not dropped", async () => {
+  const dir = repoWithSpec();
+  const script: Script = {
+    reviewers: () => ({ "reviewer-a": [{ section: SECTION, severity: "suggestion", text: "s1" }], "reviewer-b": [{ section: "design", severity: "question", text: "q1" }] }),
+    // The author only disposes the FIRST issue, always omitting the other → after re-prompt it is defaulted.
+    author: (_r, issues) => ({ dispositions: issues.slice(0, 1).map((i) => ({ issueId: i.issueId, action: "accept", rationale: "ok" })) }),
+  };
+  const { c, port } = await start(dir, new ScriptedAdapter(dir, script), roster());
+  after(() => c.stop());
+  const { ws, ready, request, ev, frames } = connect(port);
+  await ready;
+  await request("reviewSpec", { specId: "SPEC-TEST" });
+  await ev("review.converged");
+  // Both issues got a panel.disposition (one accepted by the author, one defaulted to dismiss).
+  const disposed = frames.filter((f) => f.type === "event" && f.event?.type === "panel.disposition").length;
+  assert.equal(disposed, 2, "no reviewer issue is left without a traced disposition");
   ws.close();
 });
 

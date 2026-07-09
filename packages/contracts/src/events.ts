@@ -417,11 +417,14 @@ export const SpecApprovalFailedEvent = base.extend({
 export const ReviewSeverity = z.enum(["blocking", "suggestion", "question"]);
 export type ReviewSeverity = z.infer<typeof ReviewSeverity>;
 
-/** A panel started: the reviewers and the model LABEL each runs on (never a vendor id — SPEC-005). */
+/** A panel started: the reviewers and the model LABEL each runs on (never a vendor id — SPEC-005). The
+ *  `round` (SPEC-035) is the loop round this panel belongs to — 1 for a fresh review, >1 for a reconvene —
+ *  so the client resets vs. accumulates round summaries. */
 export const PanelStartedEvent = base.extend({
   type: z.literal("panel.started"),
   panelId: z.string(),
   specId: z.string(),
+  round: z.number().int().positive().default(1),
   reviewers: z.array(z.object({ role: z.string(), model: z.string() })),
 });
 
@@ -541,6 +544,9 @@ export const ReviewConvergedEvent = base.extend({
   type: z.literal("review.converged"),
   specId: z.string(),
   rounds: z.number().int().positive(),
+  /** True when the loop stopped at the round cap while a blocker fix was still pending re-review — the
+   *  human sees "stopped at cap without re-reviewing the final fix" rather than a clean convergence. */
+  reachedCap: z.boolean().default(false),
   unresolvedBlockers: z.array(
     z.object({ issueId: z.string(), section: z.string(), text: z.string(), rationale: z.string() }),
   ),

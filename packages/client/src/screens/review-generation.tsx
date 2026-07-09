@@ -64,8 +64,14 @@ function LiveReview() {
     setBusy('approve');
     const res = await transitionSpecLive(panel.specId, 'approved');
     setBusy(null);
-    if (res && res.ok === false) store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval failed — ${res.error || res.result?.error}` } }));
-    else store.set((s: any) => ({ view: 'board', cockpit: { ...s.cockpit, notice: `${panel.specId} approved` } }));
+    // spec.transition returns the coordinator frame: a governance/illegal-transition refusal arrives as
+    // ok:true with result.applied !== 'approved' (or result.error). Only a real 'approved' is success.
+    const applied = res?.result?.applied;
+    if (applied === 'approved') store.set((s: any) => ({ view: 'board', cockpit: { ...s.cockpit, notice: `${panel.specId} approved` } }));
+    else {
+      const why = (res && res.ok === false && res.error) || res?.result?.error || 'the server did not approve the specification';
+      store.set((s: any) => ({ cockpit: { ...s.cockpit, notice: `approval refused — ${why}` } }));
+    }
   };
   const sendBack = async () => {
     setBusy('sendback');
@@ -101,8 +107,8 @@ function LiveReview() {
       converged ? e(Card, { padding: 0, style: { marginBottom: 18, borderColor: unresolved.length ? 'var(--warning)' : 'var(--success)' } },
         e('div', { style: { padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 } },
           e('div', { style: { flex: 1 } },
-            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600 } }, 'Review converged in ' + (panel.convergedRounds || round) + ' round' + ((panel.convergedRounds || round) === 1 ? '' : 's')),
-            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)', marginTop: 2 } }, 'The draft was auto-promoted to in-review. Approve it, or send it back to reopen authoring.')),
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 600 } }, (panel.reachedCap ? 'Review stopped at the round cap' : 'Review converged') + ' in ' + (panel.convergedRounds || round) + ' round' + ((panel.convergedRounds || round) === 1 ? '' : 's')),
+            e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: panel.reachedCap ? 'var(--warning)' : 'var(--muted-foreground)', marginTop: 2 } }, panel.reachedCap ? 'The 3-round cap was reached while a blocker fix was still pending re-review — check the final changes before approving.' : 'The draft was auto-promoted to in-review. Approve it, or send it back to reopen authoring.')),
           e(Button, { variant: 'outline', disabled: !!busy, onClick: sendBack }, busy === 'sendback' ? '…' : 'Send back'),
           e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), disabled: !!busy, onClick: approve }, busy === 'approve' ? 'Approving…' : 'Approve specification')),
         unresolved.length ? e('div', { style: { padding: '12px 16px' } },
