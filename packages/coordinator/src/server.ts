@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { verifyGithubSignature } from "./spec-lifecycle.js";
+import { makeForge, webhookForgeId } from "./forge/index.js";
 import type { DomainEvent, HarnessAdapter } from "@arke/contracts";
 import {
   OpenCodeAdapter,
@@ -219,14 +219,18 @@ export class Coordinator {
       res.end(JSON.stringify({ ok: true, projects: this.contexts.size }));
       return;
     }
-    if (req.method === "POST" && req.url === "/webhooks/github") {
+    // The webhook forge is selected by the request URL PATH (SPEC-038 Decision #2) — verify+map happen
+    // before any project/branch is known, so the route decides the forge, NOT a per-project remote.
+    const forgeId = req.method === "POST" ? webhookForgeId(req.url ?? "") : null;
+    if (forgeId) {
+      const forge = makeForge(forgeId);
       let body = "";
       for await (const chunk of req) body += chunk;
       const secret = process.env.ARKE_WEBHOOK_SECRET;
       const allowUnsigned = process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "1" || process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "true";
-      const sig = req.headers["x-hub-signature-256"];
       if (secret) {
-        if (!verifyGithubSignature(secret, body, Array.isArray(sig) ? sig[0] : sig)) {
+        // Each forge verifies its own way — GitHub's X-Hub-Signature-256 HMAC, Azure's HTTP Basic auth.
+        if (!forge.verifyWebhook(req.headers, body, secret)) {
           res.writeHead(401, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "invalid signature" }));
           return;
@@ -247,11 +251,13 @@ export class Coordinator {
         res.end(JSON.stringify({ ok: false, error: "invalid json" }));
         return;
       }
+      // GitHub carries the event name in a header; Azure carries it in the payload (`eventType`), which its
+      // forge reads. Passing the GitHub header (empty for Azure) is correct for both.
       const eventName = (req.headers["x-github-event"] as string) ?? "";
       const results: Array<{ projectId: string; applied: string; specId?: string }> = [];
       for (const [projectId, ctx] of this.contexts) {
         try {
-          const r = await ctx.handleWebhook(eventName, payload);
+          const r = await ctx.handleWebhook(eventName, payload, forge);
           if (!r.applied.startsWith("no spec") && !r.applied.startsWith("ignored")) results.push({ projectId, ...r });
         } catch {
           /* one context's failure must not fail the whole delivery */

@@ -249,9 +249,10 @@ test("isSelfApproval is case-insensitive and owner-aware", () => {
 });
 
 // ---- helpers ----
-test("normaliseRemote handles https and ssh remotes", () => {
-  assert.equal(normaliseRemote("https://github.com/acme/arke.git"), "github.com/acme/arke");
-  assert.equal(normaliseRemote("git@github.com:acme/arke.git"), "github.com/acme/arke");
+test("normaliseRemote returns the structured { host, owner, repo, project? } shape (SPEC-038 refactor)", () => {
+  assert.deepEqual(normaliseRemote("https://github.com/acme/arke.git"), { host: "github.com", owner: "acme", repo: "arke" });
+  assert.deepEqual(normaliseRemote("git@github.com:acme/arke.git"), { host: "github.com", owner: "acme", repo: "arke" });
+  assert.deepEqual(normaliseRemote("https://dev.azure.com/acme/Platform/_git/arke"), { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "arke" });
   assert.equal(normaliseRemote(undefined), null);
 });
 

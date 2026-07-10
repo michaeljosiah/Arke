@@ -187,15 +187,16 @@ export class AzureReposForge implements ForgeAdapter {
    */
   autoOpenPrInstruction(baseBranch: string | undefined): AutoOpenPrInstruction {
     const targetFlag = baseBranch ? ` --target-branch ${baseBranch}` : "";
+    const target = baseBranch ? `the ${baseBranch} branch` : "the repository's default branch";
     const command = `az repos pr create${targetFlag}`;
     return {
       command,
       lines: [
         "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
-        `and merged: make sure both your current branch and ${baseBranch ?? "the target branch"} are pushed to the`,
-        `Azure Repos remote (push whichever is missing), then run \`${command}\` (it opens a PR from your current`,
-        `branch into ${baseBranch ?? "the target branch"}; add a --title if prompted). This project is configured`,
-        "to open the PR automatically.",
+        `and merged: make sure both your current branch and ${target} are pushed to the Azure Repos remote (push`,
+        `whichever is missing), then run \`${command}\` (it opens a PR from your current branch into`,
+        `${target}; add a --title if prompted). This project is configured to open the PR automatically on`,
+        "delivery — the engineer has pre-authorised it, so do not stop to ask for a separate diff approval first.",
       ],
     };
   }

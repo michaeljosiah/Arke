@@ -6,6 +6,8 @@
  * pure, deterministic, unit-testable piece: parsing the checklist and building the dispatch prompt.
  */
 import { createHash } from "node:crypto";
+import { GitHubForge } from "./forge/github.js";
+import type { AutoOpenPrInstruction } from "./forge/types.js";
 
 export interface ParsedTask {
   /** Display ordinal (position among task lines) — for readable logs, NOT identity. */
@@ -91,6 +93,12 @@ export interface DeliveryPromptOptions {
    * dropped and the instruction falls back to gh's default base. Omitted → no `--base`.
    */
   baseBranch?: string;
+  /**
+   * The resolved forge (SPEC-038) that authors the auto-PR instruction — a GitHub project instructs
+   * `gh pr create`, an Azure Repos project `az repos pr create` (its flags differ, so the whole instruction
+   * is forge-authored, not a token swap). Defaults to GitHub, so an unparameterised call is unchanged.
+   */
+  forge?: Pick<import("./forge/types.js").ForgeAdapter, "autoOpenPrInstruction">;
 }
 
 /**
@@ -126,21 +134,16 @@ export function buildDeliveryPrompt(specPath: string, tasks: ParsedTask[], opts:
   if (opts.autoOpenPr) {
     // Target the feature branch when known (SPEC-031): the agent is on `<featureBranch>--delivery`, so the
     // PR merges delivery → feature (which then merges to mainline = delivered). Only interpolate a branch
-    // with no special characters (isShellSafeBranch) — a crafted one is dropped, falling back to gh's
+    // with no special characters (isShellSafeBranch) — a crafted one is dropped, falling back to the forge's
     // default base — so it is inert in every shell (POSIX/cmd/PowerShell) AND in the Markdown below.
     const base = opts.baseBranch && isShellSafeBranch(opts.baseBranch) ? opts.baseBranch : undefined;
-    const baseFlag = base ? ` --base ${base}` : "";
-    const target = base ? `the ${base} branch` : "the repository's default branch";
-    // Push BOTH the current (delivery) branch AND the base: after a host-less/local approval the feature
-    // branch may not be on the remote yet, and `gh pr create --base` needs the base to exist there.
-    lines.push(
-      "",
-      "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
-      `and merged: make sure both your current branch and ${target} are pushed to the remote (push whichever`,
-      `is missing), then run \`gh pr create${baseFlag} --fill\` (it opens a PR from your current branch into`,
-      `${target}). This project is configured to open the PR automatically on delivery — the engineer has`,
-      "pre-authorised it, so do not stop to ask for a separate diff approval first.",
-    );
+    // The forge authors the instruction (SPEC-038): GitHub → `gh pr create`, Azure → `az repos pr create`.
+    // The gated (shell-safe) base is passed in, so the forge never sees a crafted branch. Push BOTH the
+    // current (delivery) branch AND the base: after a host-less/local approval the feature branch may not be
+    // on the remote yet, and the create command needs the base to exist there.
+    const forge = opts.forge ?? new GitHubForge();
+    const instr: AutoOpenPrInstruction = forge.autoOpenPrInstruction(base);
+    lines.push("", ...instr.lines);
   }
   lines.push("", "--- TASKS ---", list);
   return lines.join("\n");

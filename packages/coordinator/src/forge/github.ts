@@ -29,16 +29,19 @@ export class GitHubForge implements ForgeAdapter {
   }
 
   autoOpenPrInstruction(baseBranch: string | undefined): AutoOpenPrInstruction {
-    // Preserves the SPEC-031 wording; `--base <branch>` only when the base is shell-safe (the caller vets it).
+    // Byte-for-byte the SPEC-031 wording buildDeliveryPrompt emitted before the seam. `--base <branch>` only
+    // when a base is given (the caller vets it for shell-safety and passes undefined otherwise).
     const baseFlag = baseBranch ? ` --base ${baseBranch}` : "";
+    const target = baseBranch ? `the ${baseBranch} branch` : "the repository's default branch";
     const command = `gh pr create${baseFlag} --fill`;
     return {
       command,
       lines: [
         "When every task is checked off, open a pull request for your changes so this delivery can be reviewed",
-        `and merged: make sure both your current branch and ${baseBranch ?? "the base branch"} are pushed to the`,
-        `remote (push whichever is missing), then run \`${command}\` (it opens a PR from your current branch`,
-        `into ${baseBranch ?? "the base branch"}). This project is configured to open the PR automatically.`,
+        `and merged: make sure both your current branch and ${target} are pushed to the remote (push whichever`,
+        `is missing), then run \`${command}\` (it opens a PR from your current branch into`,
+        `${target}). This project is configured to open the PR automatically on delivery — the engineer has`,
+        "pre-authorised it, so do not stop to ask for a separate diff approval first.",
       ],
     };
   }

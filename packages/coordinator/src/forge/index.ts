@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { parseRemote } from "./remote.js";
 import { GitHubForge } from "./github.js";
 import { AzureReposForge } from "./azure.js";
@@ -45,4 +46,23 @@ export function makeForge(id: ForgeId): ForgeAdapter {
   if (id === "github") return new GitHubForge();
   if (id === "azure-repos") return new AzureReposForge();
   throw new Error(`forge '${id}' is not available yet`);
+}
+
+/**
+ * The forge for a project (board/delivery path, SPEC-038): an explicit `.arke/config.json` `forge.host`
+ * takes precedence, else the git `origin` remote decides (`dev.azure.com`/`*.visualstudio.com` → azure-repos,
+ * else GitHub). Reads the remote read-only via `git remote get-url origin`; an absent/unreadable remote
+ * resolves GitHub (today's behaviour — no existing project regresses).
+ */
+export function resolveForge(root: string, config?: ForgeConfig): ForgeAdapter {
+  let remoteUrl: string | undefined;
+  if (!config?.host) {
+    try {
+      const res = spawnSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8", timeout: 15_000 });
+      if (res.status === 0) remoteUrl = (res.stdout ?? "").trim();
+    } catch {
+      /* no remote → GitHub default */
+    }
+  }
+  return makeForge(forgeIdForRemote(remoteUrl, config));
 }
