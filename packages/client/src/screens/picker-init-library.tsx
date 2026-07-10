@@ -446,21 +446,33 @@ export function Initialisation() {
  */
 function NewSpecModal({ onClose }: any) {
   const [title, setTitle] = React.useState('');
+  const [format, setFormat] = React.useState<'markdown' | 'html'>('markdown'); // SPEC-036
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
   const create = async () => {
     setBusy(true); setErr(null);
     // An empty title is fine: the spec-author derives the real title from the conversation and
-    // rewrites the frontmatter/H1 once it understands the goal (SPEC-020).
-    const res = await createSpecLive(title.trim());
+    // rewrites the frontmatter/H1 once it understands the goal (SPEC-020). SPEC-036: `format` picks the
+    // serialisation — the coordinator scaffolds the matching `.md`/`.html` blank template.
+    const res = await createSpecLive(title.trim(), format);
     setBusy(false);
     if (res) onClose(); else setErr('could not create the specification');
   };
+  // Segmented Markdown/HTML picker (SPEC-036) — a spec is one format, chosen at creation.
+  const formatToggle = e('div', { role: 'group', 'aria-label': 'Specification format', style: { display: 'flex', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' } },
+    (['markdown', 'html'] as const).map((f) => e('button', {
+      key: f, onClick: () => setFormat(f), 'aria-pressed': format === f, type: 'button',
+      title: f === 'markdown' ? 'Author as Markdown (.md)' : 'Author as HTML (.html)',
+      style: { padding: '4px 12px', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 500, background: format === f ? 'var(--secondary)' : 'transparent', color: format === f ? 'var(--foreground)' : 'var(--muted-foreground)' },
+    }, f === 'markdown' ? 'Markdown' : 'HTML')));
   return e('div', { onClick: onClose, style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 } },
     e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 440, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', padding: 20, boxShadow: '0 12px 40px rgba(0,0,0,0.25)' } },
       e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, marginBottom: 6 } }, 'New specification'),
       e('p', { style: { margin: '0 0 14px', fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', lineHeight: 1.5 } }, 'Author it with the agents from a blank slate — the document fills in as you talk. Leave the name blank and the agents will title it once they understand the goal.'),
       e(Input, { placeholder: 'optional — e.g. Extract fields from an RFP', value: title, onChange: (ev: any) => setTitle(ev.target.value) }),
+      e('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 } },
+        e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--muted-foreground)' } }, 'Format'),
+        formatToggle),
       err ? e('p', { style: { margin: '8px 0 0', fontFamily: 'var(--font-sans)', fontSize: 11.5, color: 'var(--warning, #B45309)' } }, err) : null,
       e('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 } },
         e(Button, { variant: 'outline', onClick: onClose }, 'Cancel'),

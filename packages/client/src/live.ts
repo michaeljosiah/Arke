@@ -803,8 +803,10 @@ export async function refreshHostAgents(): Promise<void> {
  * Create a new blank-slate specification (SPEC-020) and open the cockpit on it. Returns the new
  * specId, or null on failure (surfaced to the caller).
  */
-export async function createSpecLive(title: string): Promise<{ specId: string } | null> {
-  const res = await liveRequest('spec.create', { title }, 30000);
+export async function createSpecLive(title: string, format?: 'markdown' | 'html'): Promise<{ specId: string } | null> {
+  // SPEC-036: `format` selects the serialisation (default markdown); the coordinator writes the matching
+  // blank template (`.md` or `.html`).
+  const res = await liveRequest('spec.create', { title, ...(format ? { format } : {}) }, 30000);
   if (!res?.ok) return null;
   await refreshSpecs();
   // kickoffFor arms the cockpit's one-shot opening nudge: the spec-author greets the engineer and
