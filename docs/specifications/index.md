@@ -48,3 +48,4 @@ updated: 2026-07-10
 | 035 | [Agent-adjudicated review — the spec-author triages the panel, the human only approves](035.agent-adjudicated-review.md) | draft | review-panel, spec-lifecycle |
 | 036 | [HTML specifications alongside markdown — a format-dispatched spec pipeline](036.html-specifications.md) | draft | spec-format, authoring-cockpit, spec-lifecycle |
 | 037 | [Omnigent meta-harness — from spike to production substrate](037.omnigent-production-substrate.md) | draft | harness-integration, omnigent-substrate, adapter-resilience |
+| 038 | [Azure Repos as a lifecycle host — a neutral forge seam](038.azure-repos-forge.md) | draft | forge-seam, spec-lifecycle, delivery |
