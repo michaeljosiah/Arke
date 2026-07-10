@@ -1,5 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { parseFrontmatter, parseSpecDoc, appendChangeHistory, detectSpecFormat, stripTags } from "@arke/contracts";
+import { parseRemote } from "./forge/remote.js";
+import type { NormalizedRemote } from "./forge/types.js";
 
 /**
  * Pure spec-lifecycle helpers (SPEC-008). Status is governed by pull-request state via webhooks; this
@@ -324,11 +326,13 @@ export function isSelfApproval(approver: string, owner: string | undefined): boo
   return approver.trim().toLowerCase() === owner.trim().toLowerCase();
 }
 
-/** Normalise a git remote URL (https or ssh) to `host/owner/repo` for routing webhooks to a project. */
-export function normaliseRemote(url: string | undefined): string | null {
-  if (!url) return null;
-  const m = /(?:git@|https?:\/\/)([^/:]+)[/:]([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url.trim());
-  return m ? `${m[1]}/${m[2]}/${m[3]}`.toLowerCase() : null;
+/**
+ * Normalise a git remote URL to the structured `{ host, owner, repo, project? }` shape (SPEC-038). Refactored
+ * from the old bare-`string` form (which had no production callers) because Azure Repos carries an org **and**
+ * a project the flat string couldn't. Delegates to the shared forge `parseRemote`; `null` when unrecognised.
+ */
+export function normaliseRemote(url: string | undefined): NormalizedRemote | null {
+  return parseRemote(url);
 }
 
 /** Build a library record's capabilities array from a spec's frontmatter `capabilities:` field. */

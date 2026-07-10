@@ -281,3 +281,117 @@ test("webhook fails closed: unsigned rejected without opt-in; bad signature reje
     process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED = "1"; // restore for any later tests
   }
 });
+
+// ---- SPEC-038: the Azure Repos forge drives the SAME lifecycle via POST /webhooks/azure -----------
+
+const AZ_REF = `refs/heads/${BRANCH}`;
+const azHook = (port: number, payload: unknown, headers: Record<string, string> = {}) =>
+  fetch(`http://127.0.0.1:${port}/webhooks/azure`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(payload),
+  });
+const azJson = (port: number, payload: unknown) => azHook(port, payload).then((r) => r.json() as Promise<any>);
+const azUpdated = (extra: Record<string, unknown>) => ({ eventType: "git.pullrequest.updated", resource: { pullRequestId: 3, sourceRefName: AZ_REF, ...extra } });
+
+test("SPEC-038: an Azure Service Hook advances a spec created → approved → delivered via /webhooks/azure", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+
+  let r = await azJson(port, { eventType: "git.pullrequest.created", resource: { pullRequestId: 3, status: "active", sourceRefName: AZ_REF } });
+  assert.equal(r.routed[0].applied, "in-review", "git.pullrequest.created → in-review");
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+
+  // A human reviewer's vote 10 (non-container, non-owner) → approved.
+  r = await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, uniqueName: "rae@fabrikam.com", isContainer: false }] }));
+  assert.equal(r.routed[0].applied, "approved", "a human vote 10 → approved");
+  assert.equal((await libraryVia(port))[0].status, "approved");
+
+  // Completed (merged) → delivered, flattening delta tags exactly as a GitHub merge does.
+  r = await azJson(port, azUpdated({ status: "completed" }));
+  assert.equal(r.routed[0].applied, "delivered", "status completed → delivered");
+  const onDisk = readFileSync(resolve(dir, "docs", "specifications", "life.md"), "utf8");
+  assert.ok(!/delta:/i.test(onDisk), "delta tags flattened on the Azure merge too");
+});
+
+test("SPEC-038: a container/team vote does not approve; an Azure Basic-auth webhook fails closed on a wrong credential", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+  await azJson(port, { eventType: "git.pullrequest.created", resource: { pullRequestId: 3, status: "active", sourceRefName: AZ_REF } });
+
+  // A container reviewer's vote must NOT advance to approved (no real approver identity).
+  const r = await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, isContainer: true }] }));
+  assert.notEqual(r.routed[0]?.applied, "approved", "a team/container vote does not approve");
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+
+  // Azure verifies HTTP Basic auth from its OWN credential var (NOT GitHub's ARKE_WEBHOOK_SECRET, NOT an HMAC).
+  delete process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED;
+  process.env.ARKE_AZURE_WEBHOOK_CREDENTIAL = "arke:s3cr3t";
+  process.env.ARKE_WEBHOOK_SECRET = "github-hmac-key"; // the GitHub key must NOT authenticate the Azure route
+  try {
+    const wrong = "Basic " + Buffer.from("arke:nope", "utf8").toString("base64");
+    const bad = await azHook(port, azUpdated({ status: "completed" }), { authorization: wrong });
+    assert.equal(bad.status, 401, "wrong Basic-auth credential → 401 (fail closed)");
+    const asGithubKey = "Basic " + Buffer.from("github-hmac-key", "utf8").toString("base64");
+    const notCrossUsable = await azHook(port, azUpdated({ status: "completed" }), { authorization: asGithubKey });
+    assert.equal(notCrossUsable.status, 401, "the GitHub HMAC secret does NOT double as the Azure Basic-auth password");
+    const ok = "Basic " + Buffer.from("arke:s3cr3t", "utf8").toString("base64");
+    const good = await azHook(port, azUpdated({ status: "completed" }), { authorization: ok });
+    assert.equal(good.status, 200, "the configured Azure Basic-auth credential is accepted");
+  } finally {
+    delete process.env.ARKE_AZURE_WEBHOOK_CREDENTIAL;
+    delete process.env.ARKE_WEBHOOK_SECRET;
+    process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED = "1";
+  }
+});
+
+test("SPEC-038: a reactivated PR carrying a STALE approval vote does NOT skip review — it reopens to in-review", async () => {
+  // The governance-bypass guard (correctness review P1): Azure retains reviewer votes across abandon→reactivate
+  // and re-sends the whole reviewers array, so a reactivation arrives as an `approved` transition with the old
+  // vote. Honouring it would jump draft→approved, skipping in-review + the review panel. It must reopen instead.
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+
+  await azJson(port, { eventType: "git.pullrequest.created", resource: { pullRequestId: 3, status: "active", sourceRefName: AZ_REF } });
+  await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, uniqueName: "rae@fabrikam.com", isContainer: false }] }));
+  assert.equal((await libraryVia(port))[0].status, "approved", "first, a genuine approval on the open PR advances");
+
+  // Abandon → draft (closed).
+  await azJson(port, azUpdated({ status: "abandoned" }));
+  assert.equal((await libraryVia(port))[0].status, "draft");
+
+  // Reactivate: status active, but the reviewers array STILL carries the stale vote===10.
+  const r = await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, uniqueName: "rae@fabrikam.com", isContainer: false }] }));
+  assert.equal(r.routed[0].applied, "in-review", "a stale vote on reactivation reopens to in-review, it does NOT re-approve");
+  assert.equal((await libraryVia(port))[0].status, "in-review", "governance preserved: the spec must be reviewed again, not silently re-approved");
+});
+
+test("SPEC-038: reopen advances only from a closed state — a plain Azure active edit is a no-op, GitHub reopen still works", async () => {
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+
+  await hook(port, "pull_request", pr("opened"));
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+
+  // Azure emits `reopened` as a candidate for ANY active git.pullrequest.updated (a title edit re-fires it).
+  // On an in-review (open, not closed) spec that must be a NO-OP — never a demote/reopen.
+  let r = await azJson(port, azUpdated({ status: "active" }));
+  assert.equal(r.routed[0]?.applied ?? "no-op", "no-op", "a plain active edit does not reopen an open spec");
+  assert.equal((await libraryVia(port))[0].status, "in-review");
+
+  // Close (unmerged) → draft, then an Azure active update (reactivation) from that CLOSED state → in-review.
+  await hook(port, "pull_request", pr("closed", false));
+  assert.equal((await libraryVia(port))[0].status, "draft");
+  r = await azJson(port, azUpdated({ status: "active" }));
+  assert.equal(r.routed[0].applied, "in-review", "reactivation from a closed state reopens");
+
+  // GitHub's explicit `reopened` from a closed (draft) state still advances — byte-for-byte unchanged.
+  await hook(port, "pull_request", pr("closed", false));
+  assert.equal((await libraryVia(port))[0].status, "draft");
+  r = await hook(port, "pull_request", pr("reopened"));
+  assert.equal(r.routed[0].applied, "in-review", "GitHub reopened from draft still → in-review");
+});

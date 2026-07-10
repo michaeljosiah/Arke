@@ -181,8 +181,15 @@ export function computeRepoStatus(opts: {
   defaultBranch: string;
   ghEnabled: boolean;
   prNumberFallback?: number;
+  /**
+   * The resolved forge's PR-status reader (SPEC-038) — a GitHub project reads `gh pr view`, an Azure project
+   * `az repos pr list`, both normalised to the same shape. Defaults to {@link githubPrStatus} so an
+   * unparameterised call is byte-for-byte unchanged. Injected (not imported) to keep this module forge-agnostic.
+   */
+  pullRequestStatus?: (root: string, branch: string) => { ok: true; pr: { number: number; status: "open" | "draft" } | null } | { ok: false; reason?: string };
 }): RepoStatusView {
   const { root, specId, branch, defaultBranch, ghEnabled, prNumberFallback } = opts;
+  const readPrStatus = opts.pullRequestStatus ?? githubPrStatus;
   const degraded: NonNullable<RepoStatusView["degraded"]> = [];
 
   const ab = gitAheadBehind(root, defaultBranch, branch);
@@ -223,12 +230,12 @@ export function computeRepoStatus(opts: {
     pr = prNumberFallback !== undefined ? { number: prNumberFallback, status: null } : null;
     degraded.push({ field: "pr", reason: "GitHub integration not configured" });
   } else {
-    const ph = githubPrStatus(root, branch);
+    const ph = readPrStatus(root, branch);
     if (ph.ok) {
       pr = ph.pr;
     } else {
       pr = prNumberFallback !== undefined ? { number: prNumberFallback, status: null } : null;
-      degraded.push({ field: "pr", reason: ph.reason });
+      degraded.push({ field: "pr", reason: ph.reason ?? "PR status unavailable" });
     }
   }
 

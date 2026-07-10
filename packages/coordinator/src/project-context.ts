@@ -42,10 +42,11 @@ import {
   flattenDeltaTags,
   isMaterialChange,
   isSelfApproval,
-  mapWebhookEvent,
   normativeHash,
   parseCapabilities,
 } from "./spec-lifecycle.js";
+import { makeForge, resolveForge } from "./forge/index.js";
+import type { ForgeAdapter } from "./forge/types.js";
 import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks } from "./delivery.js";
 import { loadAutoOpenPr, setAutoOpenPr } from "./delivery-config.js";
 import {
@@ -653,6 +654,10 @@ export class ProjectContext {
     }
     const ghEnabled = this.hostConfigured();
     const defaultBranch = id.default || "main";
+    // Resolve the forge ONCE (it shells `git remote`), not per spec row (SPEC-038). The arrow keeps the
+    // forge's `this` bound (AzureReposForge.pullRequestStatus reads the remote off the instance).
+    const forge = resolveForge(this.root);
+    const pullRequestStatus = (r: string, b: string) => forge.pullRequestStatus(r, b);
     for (const rec of records) {
       const status = computeRepoStatus({
         root: this.root,
@@ -660,6 +665,7 @@ export class ProjectContext {
         branch: rec.branch,
         defaultBranch,
         ghEnabled,
+        pullRequestStatus,
         ...(rec.prNumber !== undefined ? { prNumberFallback: rec.prNumber } : {}),
       });
       // Trace a fully-degraded row's reason once (NFR-7) so a missing binary/integration is visible.
@@ -1373,8 +1379,8 @@ export class ProjectContext {
    * transition, enforces the second-human (anti-self-approval) gate at the coordinator, runs the
    * merge-time delta flatten, and emits `spec.status` / governance trace. Returns a short outcome.
    */
-  async handleWebhook(eventName: string, payload: unknown): Promise<{ applied: string; specId?: string }> {
-    const t = mapWebhookEvent(eventName, payload);
+  async handleWebhook(eventName: string, payload: unknown, forge: ForgeAdapter = makeForge("github")): Promise<{ applied: string; specId?: string }> {
+    const t = forge.mapWebhookEvent(eventName, payload);
     if (t.kind === "ignored") return { applied: `ignored: ${t.reason}` };
     if (!t.branch) return { applied: "ignored: empty branch" }; // a malformed payload must not route by ""
     const found = this.findSpecByBranch(t.branch);
@@ -1387,13 +1393,29 @@ export class ProjectContext {
     const setStatus = (status: SpecStatus, reason: string, extra?: Partial<SpecRecordState>) =>
       this.commitStatus(specId, status, reason, { prNumber: "prNumber" in t ? (t as any).prNumber : undefined, extra });
 
+    // The coordinator's LAST-KNOWN status (SPEC-038). `specRecords` is an in-memory cache that is NOT
+    // hydrated from disk on load, so fall back to the persisted frontmatter status exactly as every other
+    // lifecycle read does — otherwise a reopen/reactivation arriving after a restart would read `undefined`
+    // and be silently dropped. A "closed" prior state is `draft` (after a close) or `delivered`.
+    const priorStatus = this.specRecords.get(specId)?.status ?? found.frontmatter.status ?? "draft";
+    const wasClosed = priorStatus === "draft" || priorStatus === "delivered";
+
     switch (t.kind) {
       case "opened":
         await setStatus("in-review", "pr-opened");
         return { applied: "in-review", specId };
-      case "reopened":
-        await setStatus("in-review", "pr-reopened");
-        return { applied: "in-review", specId };
+      case "reopened": {
+        // Apply a reopen ONLY from a closed state (SPEC-038). GitHub emits `reopened` solely on an explicit
+        // reopen (the prior state IS closed → draft), so this is unchanged for GitHub. Azure has no explicit
+        // reopen event — it emits `reopened` as a CANDIDATE for any active `git.pullrequest.updated` (a title
+        // edit re-fires it), so gating on a prior closed status is what makes it correct AND idempotent: a
+        // plain edit to an open/in-review/approved PR must NOT demote it back to in-review.
+        if (wasClosed) {
+          await setStatus("in-review", "pr-reopened");
+          return { applied: "in-review", specId };
+        }
+        return { applied: "no-op", specId };
+      }
       case "closed-unmerged":
         await setStatus("draft", "pr-closed");
         return { applied: "draft", specId };
@@ -1408,6 +1430,16 @@ export class ProjectContext {
         return { applied: "no-op", specId };
       }
       case "approved": {
+        // A spec in a CLOSED state cannot be freshly approved (SPEC-038). Azure retains reviewer votes across
+        // abandon→reactivate and re-sends the WHOLE reviewers array on every `git.pullrequest.updated`, so an
+        // "approved" signal arriving on a closed spec is a STALE vote riding a reactivation. Honouring it would
+        // jump draft→approved, skipping in-review and the review panel entirely — a governance bypass. Treat it
+        // as a reopen to in-review instead, so the spec is reviewed afresh. (GitHub approvals only fire on an
+        // open PR whose spec is already in-review, so this never triggers on the normal GitHub path.)
+        if (wasClosed) {
+          await setStatus("in-review", "pr-reopened");
+          return { applied: "in-review", specId };
+        }
         // Second-human gate, fail CLOSED (SPEC-024: shared `approveGate` with the manual path). An
         // approval from the owner, OR a spec with no `owner` to verify against, must NOT advance to
         // approved via a webhook — the governance invariant can't be verified.
@@ -1747,7 +1779,7 @@ export class ProjectContext {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, forge: resolveForge(this.root), ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
       return { ok: true, sessionId: ref.sessionId };
