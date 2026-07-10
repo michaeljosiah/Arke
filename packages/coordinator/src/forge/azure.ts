@@ -56,13 +56,42 @@ export function parseAzReposPrList(stdout: string): PrStatusResult {
   return { ok: true, pr: { number: Number(item.pullRequestId), status: item?.isDraft === true ? "draft" : "open" } };
 }
 
+/** The subset of a `.arke/config.json` `forge` block the Azure leaf consumes for its `az` board read. */
+export interface AzureForgeCoordinates {
+  host?: string;
+  owner?: string;
+  project?: string;
+  repo?: string;
+}
+
+/**
+ * Resolve the Azure org/project/repo for the `az` board read (SPEC-038), preferring an explicit
+ * `.arke/config.json` `forge` override per-field over the parsed git remote. Returns null — so the caller
+ * FAILS CLEARLY rather than aiming `az repos` at a non-Azure host — unless the resolved host is an Azure host
+ * (`dev.azure.com`/`*.visualstudio.com`) with an owner + repo. This is what lets `forge: { id: "azure-repos",
+ * host, owner, project, repo }` drive a project whose remote is masked/mirrored (not itself an Azure URL).
+ */
+export function resolveAzureCoordinates(config: AzureForgeCoordinates | undefined, parsed: NormalizedRemote | null): NormalizedRemote | null {
+  const host = (config?.host ?? parsed?.host ?? "").toLowerCase();
+  const owner = config?.owner ?? parsed?.owner;
+  const project = config?.project ?? parsed?.project;
+  const repo = config?.repo ?? parsed?.repo;
+  const isAzureHost = host === "dev.azure.com" || host.endsWith(".visualstudio.com");
+  if (!isAzureHost || !owner || !repo) return null;
+  return { host, owner, repo, ...(project ? { project } : {}) };
+}
+
 /**
  * The Azure Repos forge leaf (SPEC-038). Maps Azure DevOps **Service Hook** events to the SAME neutral
  * `LifecycleTransition`s the GitHub forge produces, verifies via Azure's **HTTP Basic auth** model (NOT an
- * HMAC — Azure Service Hooks do not sign the payload), and reads/opens PRs via the `az` CLI.
+ * HMAC — Azure Service Hooks do not sign the payload), and reads/opens PRs via the `az` CLI. An optional
+ * `.arke/config.json` `forge` override supplies the Azure org/project/repo when the git remote can't (a
+ * masked/mirror remote a pinned `forge: azure-repos` points at).
  */
 export class AzureReposForge implements ForgeAdapter {
   readonly id = "azure-repos" as const;
+
+  constructor(private readonly config?: AzureForgeCoordinates) {}
 
   /**
    * Azure Service Hooks authenticate with **HTTP Basic auth** (the subscription's configured credential),
@@ -149,7 +178,7 @@ export class AzureReposForge implements ForgeAdapter {
    */
   pullRequestStatus(root: string, branch: string): PrStatusResult {
     const remote = this.remoteForRoot(root);
-    if (!remote) return { ok: false, reason: "no Azure remote for project" };
+    if (!remote) return { ok: false, reason: "no Azure org/project resolvable (set forge.host/owner/project/repo in .arke/config.json for a non-Azure remote)" };
     try {
       const args = [
         "repos",
@@ -204,14 +233,19 @@ export class AzureReposForge implements ForgeAdapter {
     };
   }
 
-  /** The Azure remote (org/project/repo) for a project root, read from `origin`. */
+  /**
+   * The Azure org/project/repo for a project root — an explicit `.arke/config.json` `forge` override
+   * (`this.config`) takes precedence per-field over the parsed `origin` remote, so a pinned Azure forge on a
+   * masked/mirror remote still resolves. Null when no Azure coordinates are resolvable (see the caller).
+   */
   private remoteForRoot(root: string): NormalizedRemote | null {
+    let parsed: NormalizedRemote | null = null;
     try {
       const res = spawnSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8", timeout: AZ_TIMEOUT_MS });
-      if (res.status !== 0) return null;
-      return parseRemote((res.stdout ?? "").trim());
+      if (res.status === 0) parsed = parseRemote((res.stdout ?? "").trim());
     } catch {
-      return null;
+      /* no remote — fall back to config-only coordinates */
     }
+    return resolveAzureCoordinates(this.config, parsed);
   }
 }

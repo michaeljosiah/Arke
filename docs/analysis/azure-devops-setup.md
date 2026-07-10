@@ -18,17 +18,20 @@ host, or you simply want to pin it — add a `forge` key to the project's `.arke
 
 ```jsonc
 { "forge": "azure-repos" }            // short toggle: "github" | "azure-repos"
-// or the object form:
-{ "forge": { "id": "azure-repos" } }  // same, plus optional "host" to force detection by host
+// or the object form — supply the Azure coordinates when the remote can't (a masked/mirror remote):
+{ "forge": { "id": "azure-repos", "host": "dev.azure.com", "owner": "acme", "project": "Platform", "repo": "svc" } }
 ```
 
 An explicit `forge.id` wins over the remote and skips the `git remote` probe entirely. This governs the
 **board PR-status read and the auto-PR delivery instruction** (which CLI + flags the implementer is told to
 run). It does **not** change webhook verification — inbound hooks are still selected by their endpoint
 (`/webhooks/github` vs `/webhooks/azure`), because a hook is verified before the coordinator knows the project.
-*(Note: pinning `azure-repos` for a true on-prem Azure DevOps **Server** at a custom domain is not fully
-supported yet — the `az` board read still derives the org/project from a cloud-shaped remote; that fuller
-on-prem override is a follow-up.)*
+
+When you pin `azure-repos` but the `origin` remote is **not** an Azure URL (a mirror/proxy), give the
+`host`/`owner`/`project`/`repo` coordinates in the object form so the `az` board read targets the right org —
+otherwise the board PR field reports a clear "no Azure org/project resolvable" error rather than silently
+querying the wrong host. *(A true on-prem Azure DevOps **Server** with a collection-style URL is still a
+follow-up — its `--organization` URL shape differs from `https://dev.azure.com/{org}`.)*
 
 ## 1. Point the project at its Azure remote
 

@@ -8,14 +8,15 @@ import type { ForgeAdapter } from "./types.js";
 export * from "./types.js";
 export { parseRemote } from "./remote.js";
 export { GitHubForge } from "./github.js";
-export { AzureReposForge, parseAzReposPrList } from "./azure.js";
+export { AzureReposForge, parseAzReposPrList, resolveAzureCoordinates } from "./azure.js";
 
 export type ForgeId = "github" | "azure-repos";
 
 /**
  * Optional `.arke/config.json` `forge` block — an explicit override of the remote-based detection (SPEC-038).
- * `id` is the direct toggle ("use this forge, period"); `host` forces detection by host (for a masked/mirror
- * remote). Owner/project/repo are reserved for a fuller remote override (not yet consumed by the leaves).
+ * `id` is the direct toggle ("use this forge, period"); `host` forces detection by host. `owner`/`project`/
+ * `repo` supply the Azure org/project/repo for the `az` board read when the git remote can't (a masked/mirror
+ * remote a pinned `forge: azure-repos` points at) — see `resolveAzureCoordinates`.
  */
 export interface ForgeConfig {
   id?: ForgeId;
@@ -48,10 +49,11 @@ export function webhookForgeId(path: string | undefined): ForgeId | null {
   return null;
 }
 
-/** Construct a forge adapter for an id. */
-export function makeForge(id: ForgeId): ForgeAdapter {
+/** Construct a forge adapter for an id. The Azure leaf takes the `forge` config so an explicit override can
+ *  supply the org/project/repo its `az` board read needs when the git remote can't (a masked/mirror remote). */
+export function makeForge(id: ForgeId, config?: ForgeConfig): ForgeAdapter {
   if (id === "github") return new GitHubForge();
-  if (id === "azure-repos") return new AzureReposForge();
+  if (id === "azure-repos") return new AzureReposForge(config);
   throw new Error(`forge '${id}' is not available yet`);
 }
 
@@ -63,7 +65,7 @@ export function makeForge(id: ForgeId): ForgeAdapter {
  * needs no git at all. An absent/unreadable remote resolves GitHub (today's behaviour — no project regresses).
  */
 export function resolveForge(root: string, config?: ForgeConfig): ForgeAdapter {
-  if (config?.id === "github" || config?.id === "azure-repos") return makeForge(config.id); // explicit → no git
+  if (config?.id === "github" || config?.id === "azure-repos") return makeForge(config.id, config); // explicit → no git
   let remoteUrl: string | undefined;
   if (!config?.host) {
     try {
@@ -73,7 +75,7 @@ export function resolveForge(root: string, config?: ForgeConfig): ForgeAdapter {
       /* no remote → GitHub default */
     }
   }
-  return makeForge(forgeIdForRemote(remoteUrl, config));
+  return makeForge(forgeIdForRemote(remoteUrl, config), config);
 }
 
 /**

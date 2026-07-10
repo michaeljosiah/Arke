@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { AzureReposForge, parseAzReposPrList, makeForge } from "../src/forge/index.js";
+import { AzureReposForge, parseAzReposPrList, makeForge, resolveAzureCoordinates } from "../src/forge/index.js";
 
 /** SPEC-038 Increment 2: the AzureReposForge leaf — Service-Hook mapping, Basic-auth verify, az PR parsing. */
 
@@ -117,4 +117,34 @@ test("autoOpenPrInstruction emits az repos pr create with --target-branch", () =
 
 test("makeForge('azure-repos') builds an AzureReposForge", () => {
   assert.ok(makeForge("azure-repos") instanceof AzureReposForge);
+});
+
+// ---- resolveAzureCoordinates: the config override → az board-read coordinates ----
+test("resolveAzureCoordinates uses the parsed Azure remote when there's no config override", () => {
+  const parsed = { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "svc" };
+  assert.deepEqual(resolveAzureCoordinates(undefined, parsed), parsed, "the normal auto-detected Azure remote is unchanged");
+});
+
+test("resolveAzureCoordinates lets a config override supply Azure coordinates for a masked/mirror remote", () => {
+  // Remote is a non-Azure mirror (or absent); the pinned forge config carries the real Azure org/project/repo.
+  const parsedMirror = { host: "git.mirror.internal", owner: "x", repo: "y" };
+  assert.deepEqual(
+    resolveAzureCoordinates({ host: "dev.azure.com", owner: "acme", project: "Platform", repo: "svc" }, parsedMirror),
+    { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "svc" },
+    "config coordinates win per-field over the mirror remote",
+  );
+  assert.deepEqual(
+    resolveAzureCoordinates({ host: "acme.visualstudio.com", owner: "acme", repo: "svc" }, null),
+    { host: "acme.visualstudio.com", owner: "acme", repo: "svc" },
+    "config-only coordinates work with no remote at all",
+  );
+});
+
+test("resolveAzureCoordinates fails LOUD (null) when the forge is pinned Azure but no Azure host is resolvable", () => {
+  // Pinned azure-repos over a GitHub remote WITHOUT explicit coordinates → null, so the caller returns a clear
+  // error instead of aiming `az repos` at github.com (the P2 the review flagged).
+  assert.equal(resolveAzureCoordinates(undefined, { host: "github.com", owner: "acme", repo: "svc" }), null);
+  assert.equal(resolveAzureCoordinates({ owner: "acme", repo: "svc" }, null), null, "no host at all → null");
+  assert.equal(resolveAzureCoordinates({ host: "dev.azure.com", repo: "svc" }, null), null, "missing owner → null");
+  assert.equal(resolveAzureCoordinates({ host: "dev.azure.com", owner: "acme" }, null), null, "missing repo → null");
 });
