@@ -14,7 +14,7 @@ import {
   type SessionRef,
 } from "@arke/contracts";
 import { OMNIGENT_CAPABILITIES } from "./capabilities.js";
-import { type OmnigentConfig } from "./config.js";
+import { type OmnigentConfig, OMNIGENT_TARGET_VERSION, isCompatibleOmnigentVersion } from "./config.js";
 import { OmnigentHttp } from "./http.js";
 import { parseOmnigentSse } from "./sse.js";
 import { SessionGraph } from "./session-graph.js";
@@ -188,7 +188,7 @@ export class TurnWaiters {
 export class OmnigentAdapter implements HarnessAdapter {
   readonly id = "Omnigent";
   private readonly http: OmnigentHttp;
-  private readonly graph = new SessionGraph();
+  private readonly graph: SessionGraph;
   private readonly normState: NormalizeState = createNormalizeState();
   private readonly channel = new EventChannel();
   private readonly streams = new Map<string, AbortController>();
@@ -200,21 +200,32 @@ export class OmnigentAdapter implements HarnessAdapter {
   /** sessionId → the current turn's correlationId (the server-echoed item_id), for stamping/diagnostics. */
   private readonly turnCorrelation = new Map<string, string>();
   private ready = false;
+  private versionReason: string | undefined;
 
   constructor(private readonly config: OmnigentConfig, onDeadLetter?: (d: DeadLetter) => void) {
     this.http = new OmnigentHttp(config);
     this.deadLetters = new DeadLetterSink(onDeadLetter);
+    this.graph = new SessionGraph(config.sessionStorePath); // durable when a store path is configured
   }
 
   capabilities(): ReadonlySet<Capability> {
     return OMNIGENT_CAPABILITIES;
   }
 
-  /** Probe the server (a cheap authenticated list) to confirm reachability + auth. */
+  /** Probe the server (reachability + auth) AND validate its version against the pinned target (SPEC-037):
+   *  an incompatible alpha is surfaced as NOT ready (fail loud) rather than driven into an obscure failure. */
   async init(): Promise<void> {
     try {
       await this.http.req("GET", "/v1/sessions?limit=1");
-      this.ready = true;
+      try {
+        const v = await this.http.req<{ version?: string }>("GET", "/api/version");
+        this.versionReason = isCompatibleOmnigentVersion(v?.version)
+          ? undefined
+          : `Omnigent server version ${v?.version ?? "unknown"} is incompatible with the adapter's target ${OMNIGENT_TARGET_VERSION}`;
+      } catch {
+        this.versionReason = `could not read the Omnigent server version (/api/version); expected ${OMNIGENT_TARGET_VERSION}`;
+      }
+      this.ready = !this.versionReason;
     } catch (err) {
       this.ready = false;
       throw err;
@@ -222,6 +233,7 @@ export class OmnigentAdapter implements HarnessAdapter {
   }
 
   readiness(): Readiness {
+    if (this.versionReason) return { ready: false, reason: this.versionReason };
     return this.ready ? { ready: true } : { ready: false, reason: "Omnigent server not reachable" };
   }
 
