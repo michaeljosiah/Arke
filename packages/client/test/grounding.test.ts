@@ -75,6 +75,28 @@ test("summary skips headings, HTML comments, and blockquote callouts", () => {
   assert.equal(firstMeaningfulParagraph(body), "The real first paragraph.");
 });
 
+test("an HTML grounding doc contributes a clean title + tag-stripped summary, never raw markup (SPEC-036)", () => {
+  // An arke-authored HTML convention doc: leading <!--arke --> frontmatter carries the type; body is HTML.
+  const html =
+    `<!--arke\n---\ntype: convention\n---\n-->\n` +
+    `<style>.x{color:red}</style>\n` +
+    `<h1>House Rules</h1>\n` +
+    `<p>The first &amp; most important rule of the house.</p>\n` +
+    `<script>const WHEN = 1;</script>\n`;
+  const doc = groundingDocFromFile("docs/house-rules.html", html)!;
+  assert.equal(doc.type, "convention");
+  assert.equal(doc.title, "House Rules", "title from <h1>, tag-stripped");
+  assert.equal(doc.summary, "The first & most important rule of the house.", "summary is tag-stripped first <p>, entity-decoded");
+  assert.doesNotMatch(doc.summary, /<|color:red|const WHEN/, "no tags, CSS, or script content leak into the digest");
+});
+
+test("an HTML grounding doc prefers frontmatter title, else <title>, over the <h1> (SPEC-036)", () => {
+  const withTitleTag = `<!--arke\n---\ntype: architecture\n---\n-->\n<title>Arke &amp; Co</title>\n<h1>Ignored H1</h1>\n<p>Body.</p>\n`;
+  assert.equal(groundingDocFromFile("docs/arch.html", withTitleTag)!.title, "Arke & Co", "<title> wins over <h1> when no frontmatter title");
+  const withFrontmatter = `<!--arke\n---\ntype: architecture\ntitle: The Canonical Title\n---\n-->\n<title>Tab Title</title>\n<h1>H1</h1>\n<p>Body.</p>\n`;
+  assert.equal(groundingDocFromFile("docs/arch.html", withFrontmatter)!.title, "The Canonical Title", "frontmatter title wins over everything");
+});
+
 test("summary is truncated to the per-document budget with an ellipsis", () => {
   const long = "word ".repeat(400).trim(); // ~1999 chars
   const doc = groundingDocFromFile("docs/x.md", `---\ntype: business-context\ntitle: X\n---\n\n${long}\n`);

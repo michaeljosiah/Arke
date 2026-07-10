@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { parseFrontmatter, parseSpecDoc, appendChangeHistory } from "@arke/contracts";
+import { parseFrontmatter, parseSpecDoc, appendChangeHistory, detectSpecFormat, stripTags } from "@arke/contracts";
 
 /**
  * Pure spec-lifecycle helpers (SPEC-008). Status is governed by pull-request state via webhooks; this
@@ -65,6 +65,10 @@ function stripDeltaToken(line: string): string {
  * no duplicate tombstone — so re-running on an already-flattened file is a no-op.
  */
 export function flattenDeltaTags(md: string, branch: string, date: string): FlattenResult {
+  // SPEC-036: an HTML spec's requirement blocks are `<h3>Requirement:` / `<h2>` delimited, not `###`/`##`,
+  // so flatten dispatches on the (content-detected) format. Reachable for HTML via the webhook `merged`
+  // transition even though `spec.deliver` is refused for HTML — so it must flatten correctly, not mangle.
+  if (detectSpecFormat(md) === "html") return flattenDeltaTagsHtml(md, branch, date);
   const summary = { added: 0, modified: 0, removed: 0, renamed: 0 };
   if (!/\bdelta:/i.test(md)) return { text: md, changed: false, summary };
 
@@ -148,6 +152,94 @@ export function flattenDeltaTags(md: string, branch: string, date: string): Flat
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Strip the `· delta: …` token from an HTML requirement's metadata, preserving the surrounding tags.
+ *  Handles the template's `<p class="meta">capability: x · delta: ADDED (b)</p>` form (token runs to the
+ *  next `<`), plus a `<code>delta: …</code>` form (drop the whole element). Idempotent. */
+function stripHtmlDeltaToken(block: string): string {
+  return block
+    // `<code>delta: …</code>` (with an optional leading ` · `) → gone, element and all.
+    .replace(/\s*(?:·|&middot;|&#183;)?\s*<code\b[^>]*>\s*delta:\s*[^<]*<\/code>/gi, "")
+    // inline text form: ` · delta: ADDED (b)` up to the next tag/newline (keeps `capability: x` and `</p>`).
+    .replace(/\s*(?:·|&middot;|&#183;)?\s*`?delta:\s*[^<\n`]*`?/gi, "");
+}
+
+/**
+ * The HTML analogue of {@link flattenDeltaTags} (SPEC-036). Requirement blocks are delimited by
+ * `<h3>Requirement: …</h3>` up to the next `<h3>`/`<h2>`; the delta kind is read from the block's
+ * tag-stripped text (so `<code>`/`<p>` metadata both parse). ADDED/MODIFIED/RENAMED keep the block with
+ * the delta token stripped; REMOVED cuts the block and appends an `<li>` tombstone under `<h2>Removed</h2>`
+ * (created if absent, deduped); a net-delta change-history `<li>` is appended via the format-dispatched
+ * {@link appendChangeHistory}. A file with no delta tokens is returned unchanged (`changed: false`).
+ */
+function flattenDeltaTagsHtml(md: string, branch: string, date: string): FlattenResult {
+  const summary = { added: 0, modified: 0, removed: 0, renamed: 0 };
+  if (!/\bdelta:/i.test(md)) return { text: md, changed: false, summary };
+
+  // Heading index: every <h2>/<h3> with its span, in document order, so a requirement block runs from its
+  // <h3> to the next heading (of either level) or EOF.
+  const headRe = /<h([23])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
+  const heads: Array<{ level: string; title: string; start: number }> = [];
+  let hm: RegExpExecArray | null;
+  while ((hm = headRe.exec(md))) heads.push({ level: hm[1]!, title: stripTags(hm[2]!).trim(), start: hm.index });
+
+  const tombstones: string[] = [];
+  const renameNotes: string[] = [];
+  let out = "";
+  let cursor = 0;
+  for (let k = 0; k < heads.length; k++) {
+    const h = heads[k]!;
+    if (!(h.level === "3" && /^Requirement:/i.test(h.title))) continue;
+    const blockEnd = k + 1 < heads.length ? heads[k + 1]!.start : md.length;
+    out += md.slice(cursor, h.start); // verbatim: everything before this requirement block
+    const block = md.slice(h.start, blockEnd);
+    const name = h.title.replace(/^Requirement:\s*/i, "").trim();
+    const stripped = stripTags(block);
+    const delta = /delta:\s*([A-Za-z]+[^\n]*)/i.exec(stripped)?.[1]?.trim() ?? "";
+
+    if (/^REMOVED\b/i.test(delta)) {
+      summary.removed++;
+      const capability = /capability:\s*([a-z0-9-]+)/i.exec(stripped)?.[1] ?? "unknown";
+      const reason = /Reason:\s*([^·\n]+)/i.exec(delta)?.[1]?.trim() ?? "see Change history";
+      if (!new RegExp(`REMOVED\\s+${escapeRe(capability)}/${escapeRe(name)}\\b`).test(md)) {
+        tombstones.push(`  <li>REMOVED ${capability}/${name} — Reason: ${reason} · Migration: see Change history</li>`);
+      }
+      cursor = blockEnd; // drop the whole block
+      continue;
+    }
+    if (/^RENAMED\b/i.test(delta)) {
+      summary.renamed++;
+      const from = /from:\s*([^)\n]+?)\s*\)?\s*$/i.exec(delta)?.[1]?.trim() ?? "?";
+      renameNotes.push(`RENAMED ${from} → ${name}`);
+    } else if (/^ADDED\b/i.test(delta)) summary.added++;
+    else if (/^MODIFIED\b/i.test(delta)) summary.modified++;
+    out += stripHtmlDeltaToken(block);
+    cursor = blockEnd;
+  }
+  out += md.slice(cursor);
+
+  let result = out;
+  if (tombstones.length) {
+    if (!/<h2\b[^>]*>\s*Removed\s*<\/h2>/i.test(result)) result = result.replace(/\s*$/, "") + "\n\n<h2>Removed</h2>\n<ul>\n</ul>\n";
+    // Insert the tombstone <li>s just before the closing </ul> of the Removed section.
+    const sec = /(<h2\b[^>]*>\s*Removed\s*<\/h2>\s*<ul\b[^>]*>)([\s\S]*?)(<\/ul>)/i.exec(result);
+    if (sec) {
+      const insertAt = sec.index + sec[1]!.length + sec[2]!.length;
+      result = result.slice(0, insertAt) + tombstones.join("\n") + "\n" + result.slice(insertAt);
+    }
+  }
+
+  const parts: string[] = [];
+  if (summary.added) parts.push(`ADDED: ${summary.added}`);
+  if (summary.modified) parts.push(`MODIFIED: ${summary.modified}`);
+  if (summary.removed) parts.push(`REMOVED: ${summary.removed}`);
+  if (summary.renamed) parts.push(`RENAMED: ${summary.renamed}`);
+  const summaryText = parts.length ? parts.join("; ") : "flattened delta tags";
+  result = appendChangeHistory(result, `${date} · ${branch} · approved — ${summaryText}`);
+  for (const note of renameNotes) result = appendChangeHistory(result, `${date} · ${branch} · approved — ${note}`);
+
+  return { text: result, changed: true, summary };
 }
 
 // ---- webhook signature + event mapping -----------------------------------------------------------

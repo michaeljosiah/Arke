@@ -113,6 +113,65 @@ test("flatten does not duplicate a tombstone on re-run", () => {
   assert.equal((twice.text.match(/> REMOVED alpha\/A thing/g) ?? []).length, 1, "single tombstone");
 });
 
+// ---- flatten (HTML, SPEC-036) ----
+// An HTML spec's delta tokens live in `<p class="meta">` and its requirements are `<h3>`-delimited; the
+// format-dispatched flatten must strip/tombstone them exactly as the markdown path does. Reachable via the
+// webhook `merged` transition (not just spec.deliver, which is refused for HTML).
+function htmlDoc(reqDelta?: string): string {
+  return `<!--arke
+---
+spec_id: SPEC-X
+title: X
+status: approved
+branch: ${BRANCH}
+owner: dana
+capabilities: [alpha, beta]
+---
+-->
+<h1>X</h1>
+<h2>Requirements</h2>
+<h3>Requirement: A thing</h3>
+<p class="meta">capability: alpha${reqDelta ? ` · delta: ${reqDelta}` : ""}</p>
+<p>The system SHALL do a thing.</p>
+<h2>Design</h2>
+<p>The design is simple.</p>
+<h2>Change history</h2>
+<ul>
+  <li>2026-06-01 · ${BRANCH} · draft — ADDED x</li>
+</ul>
+`;
+}
+
+test("flatten(HTML) drops an ADDED delta token, keeps the body + tags, appends an <li> history entry", () => {
+  const r = flattenDeltaTags(htmlDoc("ADDED (feat/x)"), BRANCH, "2026-07-01");
+  assert.equal(r.changed, true);
+  assert.equal(r.summary.added, 1);
+  assert.ok(!/delta:/i.test(r.text), "no delta token remains");
+  assert.ok(/capability: alpha<\/p>/.test(r.text), "capability + closing tag preserved, token excised");
+  assert.ok(/<h3>Requirement: A thing<\/h3>/.test(r.text), "requirement heading kept");
+  assert.ok(/The system SHALL do a thing/.test(r.text), "body retained");
+  assert.ok(/<li>2026-07-01 · feat\/x · approved — ADDED: 1<\/li>/.test(r.text), "history <li> appended");
+});
+
+test("flatten(HTML) cuts a REMOVED requirement and tombstones it under <h2>Removed</h2>", () => {
+  const r = flattenDeltaTags(htmlDoc("REMOVED (Reason: obsolete)"), BRANCH, "2026-07-01");
+  assert.equal(r.summary.removed, 1);
+  assert.ok(!/<h3>Requirement: A thing<\/h3>/.test(r.text), "requirement block cut");
+  assert.ok(/<h2>Removed<\/h2>/.test(r.text), "Removed section created");
+  assert.ok(/<li>REMOVED alpha\/A thing — Reason: obsolete/.test(r.text), "tombstone li");
+});
+
+test("flatten(HTML) is a no-op when there are no delta tokens, and does not double-tombstone", () => {
+  const clean = htmlDoc();
+  const noop = flattenDeltaTags(clean, BRANCH, "2026-07-01");
+  assert.equal(noop.changed, false);
+  assert.equal(noop.text, clean, "unchanged input returned verbatim");
+  const once = flattenDeltaTags(htmlDoc("REMOVED (Reason: obsolete)"), BRANCH, "2026-07-01").text;
+  const twice = flattenDeltaTags(once, BRANCH, "2026-07-02");
+  assert.equal(twice.changed, false, "already-flattened HTML is a no-op");
+  assert.equal((twice.text.match(/REMOVED alpha\/A thing/g) ?? []).length, 1, "single tombstone");
+});
+
 // ---- signature ----
 test("verifyGithubSignature accepts a correct HMAC and rejects tampering", () => {
   const secret = "s3cr3t";
