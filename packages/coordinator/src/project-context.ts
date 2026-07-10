@@ -45,7 +45,7 @@ import {
   normativeHash,
   parseCapabilities,
 } from "./spec-lifecycle.js";
-import { makeForge, resolveForge } from "./forge/index.js";
+import { makeForge, resolveForge, loadForgeConfig } from "./forge/index.js";
 import type { ForgeAdapter } from "./forge/types.js";
 import { buildDeliveryPrompt, deliveryWorktreeBranch, parseTasks } from "./delivery.js";
 import { loadAutoOpenPr, setAutoOpenPr } from "./delivery-config.js";
@@ -654,9 +654,10 @@ export class ProjectContext {
     }
     const ghEnabled = this.hostConfigured();
     const defaultBranch = id.default || "main";
-    // Resolve the forge ONCE (it shells `git remote`), not per spec row (SPEC-038). The arrow keeps the
-    // forge's `this` bound (AzureReposForge.pullRequestStatus reads the remote off the instance).
-    const forge = resolveForge(this.root);
+    // Resolve the forge ONCE (it shells `git remote`), not per spec row (SPEC-038) — honouring an explicit
+    // `.arke/config.json` `forge` override over remote auto-detection. The arrow keeps the forge's `this`
+    // bound (AzureReposForge.pullRequestStatus reads the remote off the instance).
+    const forge = resolveForge(this.root, loadForgeConfig(this.deliveryConfigPath()));
     const pullRequestStatus = (r: string, b: string) => forge.pullRequestStatus(r, b);
     for (const rec of records) {
       const status = computeRepoStatus({
@@ -1779,7 +1780,7 @@ export class ProjectContext {
       const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
       this.deliverySessions.set(cid, ref.sessionId);
       this.deliverySessionOwner.set(ref.sessionId, cid);
-      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, forge: resolveForge(this.root), ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
+      await this.adapter.dispatchAsync({ sessionId: ref.sessionId, agent: "implementer", ...this.modelArg("implementer"), parts: [{ type: "text", text: buildDeliveryPrompt(found.relPath, tasks, autoOpenPr ? { autoOpenPr: true, forge: resolveForge(this.root, loadForgeConfig(this.deliveryConfigPath())), ...(featureBranch ? { baseBranch: featureBranch } : {}) } : {}) }] });
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "session.status", sessionId: ref.sessionId, specId: cid, kind: "task", status: "running" } as DomainEvent);
       await this.trace.write({ kind: "dispatch.complete", projectId: this.projectId, specId: cid, branch: deliveryBranch, sessionId: ref.sessionId });
       return { ok: true, sessionId: ref.sessionId };

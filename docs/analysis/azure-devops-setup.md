@@ -11,8 +11,27 @@ Pipelines CI-gate status are separate follow-ups.
 
 The forge is chosen automatically: a project whose `origin` remote is `dev.azure.com/{org}/{project}/_git/{repo}`
 (or the legacy `{org}.visualstudio.com/{project}/_git/{repo}`) resolves the **Azure Repos forge**; a
-`github.com` / unrecognised / absent remote stays on GitHub. No config is required for detection, though an
-`.arke/config.json` `forge` block can force it.
+`github.com` / unrecognised / absent remote stays on GitHub. No config is required for detection.
+
+**Forcing the forge (override auto-detection).** When the remote can't be auto-classified — a mirror/proxy
+host, or you simply want to pin it — add a `forge` key to the project's `.arke/config.json`:
+
+```jsonc
+{ "forge": "azure-repos" }            // short toggle: "github" | "azure-repos"
+// or the object form — supply the Azure coordinates when the remote can't (a masked/mirror remote):
+{ "forge": { "id": "azure-repos", "host": "dev.azure.com", "owner": "acme", "project": "Platform", "repo": "svc" } }
+```
+
+An explicit `forge.id` wins over the remote and skips the `git remote` probe entirely. This governs the
+**board PR-status read and the auto-PR delivery instruction** (which CLI + flags the implementer is told to
+run). It does **not** change webhook verification — inbound hooks are still selected by their endpoint
+(`/webhooks/github` vs `/webhooks/azure`), because a hook is verified before the coordinator knows the project.
+
+When you pin `azure-repos` but the `origin` remote is **not** an Azure URL (a mirror/proxy), give the
+`host`/`owner`/`project`/`repo` coordinates in the object form so the `az` board read targets the right org —
+otherwise the board PR field reports a clear "no Azure org/project resolvable" error rather than silently
+querying the wrong host. *(A true on-prem Azure DevOps **Server** with a collection-style URL is still a
+follow-up — its `--organization` URL shape differs from `https://dev.azure.com/{org}`.)*
 
 ## 1. Point the project at its Azure remote
 
