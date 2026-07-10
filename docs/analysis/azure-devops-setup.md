@@ -58,18 +58,23 @@ For each subscription, set:
 - **Resource details / messages to send**: *All* (the default detailed payload).
 - **HTTP headers / Basic authentication**: set a **username and password** (Azure sends them as an
   `Authorization: Basic …` header). This is the credential Arke verifies — Azure does **not** HMAC-sign the
-  body the way GitHub does, so verification is Basic-auth, not a signature.
+  body the way GitHub does, so verification is Basic-auth, not a signature. **Choose a high-entropy password**:
+  on the Azure route this string is compared as a bearer credential, so treat it like one.
 
-Set the **same** credential on the coordinator as **`ARKE_WEBHOOK_SECRET`**, in the form `user:pass`:
+Set the **same** credential on the coordinator as **`ARKE_AZURE_WEBHOOK_CREDENTIAL`** (its own variable,
+**distinct** from GitHub's `ARKE_WEBHOOK_SECRET` — an HMAC key must never double as a comparable password),
+in the form `user:pass`:
 
 ```bash
-export ARKE_WEBHOOK_SECRET='arke:<the-basic-auth-password-you-configured>'
+export ARKE_AZURE_WEBHOOK_CREDENTIAL='arke:<the-basic-auth-password-you-configured>'
 ```
 
 The coordinator compares the decoded Basic-auth credential constant-time and **fails closed**: a missing or
 wrong credential is rejected `401`. (For local/dev only, `ARKE_WEBHOOK_ALLOW_UNSIGNED=1` skips the check — never
-in production.) For v1 this is a single coordinator-level credential shared by all projects on the host; a
-per-project forge secret is a deferred follow-up (it also feeds the second-human approval gate).
+in production.) For v1 this is a single coordinator-level credential per forge, shared by all projects on the
+host; a per-project forge secret is a deferred follow-up (it also feeds the second-human approval gate). Note
+that Azure's Basic auth authenticates the *connection*, not the body (there is no body signature), so the
+approver identity in a hook payload is only as trustworthy as this credential — keep it secret.
 
 ## 4. (Optional) auto-open the PR on delivery
 

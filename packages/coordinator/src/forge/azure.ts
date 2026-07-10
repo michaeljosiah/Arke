@@ -44,13 +44,16 @@ export function parseAzReposPrList(stdout: string): PrStatusResult {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
   const list = Array.isArray(parsed) ? parsed : [];
-  // Only PRs still open ("active") count; drafts are flagged by isDraft. Azure filters by branch itself.
-  const open = list.find((p) => String((p as { status?: unknown })?.status ?? "active").toLowerCase() === "active");
+  // The first USABLE active PR (drafts flagged by isDraft; Azure already filters by branch). Requiring a
+  // finite pullRequestId in the predicate means a malformed leading entry can't null-out a valid PR later
+  // in the list.
+  const open = list.find((p) => {
+    const item = p as { status?: unknown; pullRequestId?: unknown };
+    return String(item?.status ?? "active").toLowerCase() === "active" && Number.isFinite(Number(item?.pullRequestId));
+  });
   if (!open) return { ok: true, pr: null };
   const item = open as { pullRequestId?: unknown; isDraft?: unknown };
-  const number = Number(item?.pullRequestId);
-  if (!Number.isFinite(number)) return { ok: true, pr: null };
-  return { ok: true, pr: { number, status: item?.isDraft === true ? "draft" : "open" } };
+  return { ok: true, pr: { number: Number(item.pullRequestId), status: item?.isDraft === true ? "draft" : "open" } };
 }
 
 /**

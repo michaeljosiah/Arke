@@ -226,7 +226,11 @@ export class Coordinator {
       const forge = makeForge(forgeId);
       let body = "";
       for await (const chunk of req) body += chunk;
-      const secret = process.env.ARKE_WEBHOOK_SECRET;
+      // Each forge has its OWN credential (SPEC-038): GitHub's `ARKE_WEBHOOK_SECRET` is an HMAC key; Azure's
+      // `ARKE_AZURE_WEBHOOK_CREDENTIAL` is the Service-Hook Basic-auth `user:pass`. They are deliberately
+      // separate — an HMAC key must never double as a directly-comparable bearer password (and vice versa).
+      const secret = forgeId === "azure-repos" ? process.env.ARKE_AZURE_WEBHOOK_CREDENTIAL : process.env.ARKE_WEBHOOK_SECRET;
+      const secretVar = forgeId === "azure-repos" ? "ARKE_AZURE_WEBHOOK_CREDENTIAL" : "ARKE_WEBHOOK_SECRET";
       const allowUnsigned = process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "1" || process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED === "true";
       if (secret) {
         // Each forge verifies its own way — GitHub's X-Hub-Signature-256 HMAC, Azure's HTTP Basic auth.
@@ -236,11 +240,11 @@ export class Coordinator {
           return;
         }
       } else if (!allowUnsigned) {
-        // Fail CLOSED: an unconfigured webhook secret must not let unauthenticated POSTs drive lifecycle
-        // mutations (status transitions, merge-time file writes). Set ARKE_WEBHOOK_SECRET in production,
+        // Fail CLOSED: an unconfigured webhook credential must not let unauthenticated POSTs drive lifecycle
+        // mutations (status transitions, merge-time file writes). Set the forge's credential in production,
         // or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 to explicitly opt in for local/dev.
         res.writeHead(401, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "webhook secret not configured (set ARKE_WEBHOOK_SECRET, or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 for local/dev)" }));
+        res.end(JSON.stringify({ ok: false, error: `webhook credential not configured (set ${secretVar}, or ARKE_WEBHOOK_ALLOW_UNSIGNED=1 for local/dev)` }));
         return;
       }
       let payload: unknown;

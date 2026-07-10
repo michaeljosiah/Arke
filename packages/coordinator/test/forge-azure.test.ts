@@ -99,6 +99,11 @@ test("parseAzReposPrList parses an open PR, a draft, and the empty (no-PR) case"
   assert.deepEqual(parseAzReposPrList(""), { ok: true, pr: null }, "empty stdout is treated as no PR, not a crash");
 });
 
+test("parseAzReposPrList skips a malformed leading entry and finds the valid active PR behind it", () => {
+  const json = JSON.stringify([{ status: "active" }, { pullRequestId: 8, status: "active", isDraft: false }]);
+  assert.deepEqual(parseAzReposPrList(json), { ok: true, pr: { number: 8, status: "open" } }, "a leading entry with no pullRequestId must not null-out a valid PR");
+});
+
 test("parseAzReposPrList reports a genuine parse failure as ok:false (not a false 'no PR')", () => {
   const r = parseAzReposPrList("not json");
   assert.equal(r.ok, false);

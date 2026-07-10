@@ -326,20 +326,47 @@ test("SPEC-038: a container/team vote does not approve; an Azure Basic-auth webh
   assert.notEqual(r.routed[0]?.applied, "approved", "a team/container vote does not approve");
   assert.equal((await libraryVia(port))[0].status, "in-review");
 
-  // With a secret set, Azure verifies HTTP Basic auth (NOT a GitHub HMAC): a wrong credential → 401.
+  // Azure verifies HTTP Basic auth from its OWN credential var (NOT GitHub's ARKE_WEBHOOK_SECRET, NOT an HMAC).
   delete process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED;
-  process.env.ARKE_WEBHOOK_SECRET = "arke:s3cr3t";
+  process.env.ARKE_AZURE_WEBHOOK_CREDENTIAL = "arke:s3cr3t";
+  process.env.ARKE_WEBHOOK_SECRET = "github-hmac-key"; // the GitHub key must NOT authenticate the Azure route
   try {
     const wrong = "Basic " + Buffer.from("arke:nope", "utf8").toString("base64");
     const bad = await azHook(port, azUpdated({ status: "completed" }), { authorization: wrong });
     assert.equal(bad.status, 401, "wrong Basic-auth credential → 401 (fail closed)");
+    const asGithubKey = "Basic " + Buffer.from("github-hmac-key", "utf8").toString("base64");
+    const notCrossUsable = await azHook(port, azUpdated({ status: "completed" }), { authorization: asGithubKey });
+    assert.equal(notCrossUsable.status, 401, "the GitHub HMAC secret does NOT double as the Azure Basic-auth password");
     const ok = "Basic " + Buffer.from("arke:s3cr3t", "utf8").toString("base64");
     const good = await azHook(port, azUpdated({ status: "completed" }), { authorization: ok });
-    assert.equal(good.status, 200, "the configured Basic-auth credential is accepted");
+    assert.equal(good.status, 200, "the configured Azure Basic-auth credential is accepted");
   } finally {
+    delete process.env.ARKE_AZURE_WEBHOOK_CREDENTIAL;
     delete process.env.ARKE_WEBHOOK_SECRET;
     process.env.ARKE_WEBHOOK_ALLOW_UNSIGNED = "1";
   }
+});
+
+test("SPEC-038: a reactivated PR carrying a STALE approval vote does NOT skip review — it reopens to in-review", async () => {
+  // The governance-bypass guard (correctness review P1): Azure retains reviewer votes across abandon→reactivate
+  // and re-sends the whole reviewers array, so a reactivation arrives as an `approved` transition with the old
+  // vote. Honouring it would jump draft→approved, skipping in-review + the review panel. It must reopen instead.
+  const dir = repo();
+  const { c, port } = await start(dir);
+  after(() => c.stop());
+
+  await azJson(port, { eventType: "git.pullrequest.created", resource: { pullRequestId: 3, status: "active", sourceRefName: AZ_REF } });
+  await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, uniqueName: "rae@fabrikam.com", isContainer: false }] }));
+  assert.equal((await libraryVia(port))[0].status, "approved", "first, a genuine approval on the open PR advances");
+
+  // Abandon → draft (closed).
+  await azJson(port, azUpdated({ status: "abandoned" }));
+  assert.equal((await libraryVia(port))[0].status, "draft");
+
+  // Reactivate: status active, but the reviewers array STILL carries the stale vote===10.
+  const r = await azJson(port, azUpdated({ status: "active", reviewers: [{ vote: 10, uniqueName: "rae@fabrikam.com", isContainer: false }] }));
+  assert.equal(r.routed[0].applied, "in-review", "a stale vote on reactivation reopens to in-review, it does NOT re-approve");
+  assert.equal((await libraryVia(port))[0].status, "in-review", "governance preserved: the spec must be reviewed again, not silently re-approved");
 });
 
 test("SPEC-038: reopen advances only from a closed state — a plain Azure active edit is a no-op, GitHub reopen still works", async () => {

@@ -26,6 +26,23 @@ test("parseRemote returns null for junk", () => {
   assert.equal(parseRemote("not a url"), null);
 });
 
+test("parseRemote tolerates a :port, userinfo, a trailing slash, and a query string on Azure URLs", () => {
+  assert.deepEqual(parseRemote("https://dev.azure.com:443/acme/Platform/_git/arke"), { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "arke" });
+  assert.deepEqual(parseRemote("https://dev.azure.com/acme/Platform/_git/arke/"), { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "arke" });
+  assert.deepEqual(parseRemote("https://dev.azure.com/acme/Platform/_git/arke?path=/x"), { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "arke" });
+});
+
+test("parseRemote handles an Azure/VSTS collection segment (DefaultCollection)", () => {
+  assert.deepEqual(parseRemote("https://acme.visualstudio.com/DefaultCollection/Platform/_git/arke"), { host: "acme.visualstudio.com", owner: "acme", project: "Platform", repo: "arke" });
+  assert.deepEqual(parseRemote("https://dev.azure.com/acme/DefaultCollection/Platform/_git/arke"), { host: "dev.azure.com", owner: "acme", project: "Platform", repo: "arke" });
+});
+
+test("parseRemote fails LOUD (null) on a malformed Azure URL rather than mangling it into junk", () => {
+  // No `_git` anchor — the old generic fallback returned {owner:'Platform', repo:'arke'}; now it's null.
+  assert.equal(parseRemote("https://dev.azure.com/acme/Platform/arke"), null);
+  assert.equal(parseRemote("git@ssh.dev.azure.com:acme/Platform/arke"), null, "an Azure SSH host without the v3 form is refused, not mis-parsed");
+});
+
 // ---- forgeIdForRemote: the board/delivery path (remote-based), GitHub default ----
 test("forgeIdForRemote maps dev.azure.com/visualstudio.com to azure-repos, else github (default)", () => {
   assert.equal(forgeIdForRemote("https://dev.azure.com/acme/P/_git/r"), "azure-repos");

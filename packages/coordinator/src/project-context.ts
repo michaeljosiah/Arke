@@ -1393,18 +1393,24 @@ export class ProjectContext {
     const setStatus = (status: SpecStatus, reason: string, extra?: Partial<SpecRecordState>) =>
       this.commitStatus(specId, status, reason, { prNumber: "prNumber" in t ? (t as any).prNumber : undefined, extra });
 
+    // The coordinator's LAST-KNOWN status (SPEC-038). `specRecords` is an in-memory cache that is NOT
+    // hydrated from disk on load, so fall back to the persisted frontmatter status exactly as every other
+    // lifecycle read does — otherwise a reopen/reactivation arriving after a restart would read `undefined`
+    // and be silently dropped. A "closed" prior state is `draft` (after a close) or `delivered`.
+    const priorStatus = this.specRecords.get(specId)?.status ?? found.frontmatter.status ?? "draft";
+    const wasClosed = priorStatus === "draft" || priorStatus === "delivered";
+
     switch (t.kind) {
       case "opened":
         await setStatus("in-review", "pr-opened");
         return { applied: "in-review", specId };
       case "reopened": {
-        // Apply a reopen ONLY when the spec was in a closed state (SPEC-038). GitHub emits `reopened` solely
-        // on an explicit reopen (the prior state IS closed → draft), so this is a no-op for GitHub. Azure has
-        // no explicit reopen event — it emits `reopened` as a CANDIDATE for any active `git.pullrequest.updated`
-        // (a title edit re-fires it), so gating on a prior closed status is what makes it correct AND idempotent:
-        // a plain edit to an open/in-review/approved PR must NOT demote it back to in-review.
-        const prior = this.specRecords.get(specId)?.status;
-        if (prior === "draft" || prior === "delivered") {
+        // Apply a reopen ONLY from a closed state (SPEC-038). GitHub emits `reopened` solely on an explicit
+        // reopen (the prior state IS closed → draft), so this is unchanged for GitHub. Azure has no explicit
+        // reopen event — it emits `reopened` as a CANDIDATE for any active `git.pullrequest.updated` (a title
+        // edit re-fires it), so gating on a prior closed status is what makes it correct AND idempotent: a
+        // plain edit to an open/in-review/approved PR must NOT demote it back to in-review.
+        if (wasClosed) {
           await setStatus("in-review", "pr-reopened");
           return { applied: "in-review", specId };
         }
@@ -1424,6 +1430,16 @@ export class ProjectContext {
         return { applied: "no-op", specId };
       }
       case "approved": {
+        // A spec in a CLOSED state cannot be freshly approved (SPEC-038). Azure retains reviewer votes across
+        // abandon→reactivate and re-sends the WHOLE reviewers array on every `git.pullrequest.updated`, so an
+        // "approved" signal arriving on a closed spec is a STALE vote riding a reactivation. Honouring it would
+        // jump draft→approved, skipping in-review and the review panel entirely — a governance bypass. Treat it
+        // as a reopen to in-review instead, so the spec is reviewed afresh. (GitHub approvals only fire on an
+        // open PR whose spec is already in-review, so this never triggers on the normal GitHub path.)
+        if (wasClosed) {
+          await setStatus("in-review", "pr-reopened");
+          return { applied: "in-review", specId };
+        }
         // Second-human gate, fail CLOSED (SPEC-024: shared `approveGate` with the manual path). An
         // approval from the owner, OR a spec with no `owner` to verify against, must NOT advance to
         // approved via a webhook — the governance invariant can't be verified.
