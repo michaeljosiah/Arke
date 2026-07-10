@@ -1,4 +1,5 @@
 import { SPEC_ANATOMY } from "./spec.js";
+import type { CanonicalLink, RippleLink } from "./spec.js";
 
 /**
  * Pure parsing/editing of a specification markdown file (SPEC-006). Shared by the coordinator
@@ -94,6 +95,79 @@ function normalizeScalar(value: string): string {
   }
   // Unquoted: a `#` only starts a YAML comment when preceded by whitespace.
   return v.replace(/\s+#.*$/, "").trim();
+}
+
+export interface ParsedLinkage {
+  /** Ripples declared on a canonical spec, in document order (SPEC-030). */
+  ripples: RippleLink[];
+  /** The back-reference to the canonical, when this is a ripple spec. */
+  canonical?: CanonicalLink;
+  /** Human-readable problems with the linkage blocks — surfaced, never fatal. */
+  warnings: string[];
+}
+
+/** The raw inner text of a spec's `---`-fenced frontmatter block (between the fences), or "". */
+function frontmatterInner(md: string): string {
+  const text = md.replace(/^﻿/, "");
+  if (!text.startsWith("---")) return "";
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) return "";
+  return text.slice(text.indexOf("\n") + 1, end);
+}
+
+/**
+ * Parse the SPEC-030 cross-repo linkage blocks — a nested `ripples:` list and a `canonical:` map — from a
+ * spec's frontmatter. The flat {@link parseFrontmatter} cannot read these nested structures, so this walks
+ * the frontmatter's inner lines by indentation. Side-effect-free: a malformed entry yields a warning (never
+ * a throw) and is dropped, so a bad ripple cannot break library loading. A spec with neither block yields
+ * `{ ripples: [], warnings: [] }` — a plain single-repo spec.
+ */
+export function parseLinkage(md: string): ParsedLinkage {
+  const warnings: string[] = [];
+  const ripples: RippleLink[] = [];
+  const canonKV: Record<string, string> = {};
+  let mode: "none" | "ripples" | "canonical" = "none";
+  let current: Record<string, string> | null = null;
+
+  const flushRipple = () => {
+    if (!current) return;
+    const { repo, spec, kind } = current;
+    if (!repo || !spec || !kind) warnings.push(`ripple entry is missing repo/spec/kind: ${JSON.stringify(current)}`);
+    else if (kind !== "delta" && kind !== "pointer") warnings.push(`ripple '${repo}' has unknown kind '${kind}' (expected delta|pointer)`);
+    else ripples.push({ repo, spec, kind });
+    current = null;
+  };
+
+  for (const raw of frontmatterInner(md).split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim()) continue;
+    // A top-level key (no indentation) opens or closes a block.
+    const top = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (top && !/^\s/.test(line)) {
+      flushRipple();
+      mode = top[1] === "ripples" ? "ripples" : top[1] === "canonical" ? "canonical" : "none";
+      continue;
+    }
+    if (mode === "ripples") {
+      const item = /^\s*-\s*([A-Za-z0-9_]+):\s*(.*)$/.exec(line); // "  - repo: x" starts a new item
+      if (item) { flushRipple(); current = { [item[1]!]: normalizeScalar(item[2]!) }; continue; }
+      if (/^\s*-\s*$/.test(line)) { flushRipple(); current = {}; continue; } // bare "-" then fields below
+      const field = /^\s+([A-Za-z0-9_]+):\s*(.*)$/.exec(line); // "    spec: y" continues the item
+      if (field && current) { current[field[1]!] = normalizeScalar(field[2]!); continue; }
+      warnings.push(`unrecognised ripples line: ${line.trim()}`);
+    } else if (mode === "canonical") {
+      const field = /^\s+([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+      if (field) { canonKV[field[1]!] = normalizeScalar(field[2]!); continue; }
+      warnings.push(`unrecognised canonical line: ${line.trim()}`);
+    }
+  }
+  flushRipple();
+
+  let canonical: CanonicalLink | undefined;
+  if (canonKV.repo && canonKV.spec) canonical = { repo: canonKV.repo, spec: canonKV.spec };
+  else if (canonKV.repo || canonKV.spec) warnings.push("canonical is missing repo or spec");
+
+  return canonical ? { ripples, canonical, warnings } : { ripples, warnings };
 }
 
 /** Parse a spec markdown doc into frontmatter, requirements (with delta), and anatomy sections. */

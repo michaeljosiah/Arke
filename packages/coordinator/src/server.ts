@@ -25,6 +25,7 @@ import { HarnessReachabilityProbe } from "./reachability.js";
 import { AgentRegistry, loadAgentRegistry, type ProviderProfile } from "./agent-registry.js";
 import { ProjectRegistry, projectIdForRoot } from "./project-registry.js";
 import { ProjectContext, buildDecision, type ProjectContextInit } from "./project-context.js";
+import { CrossRepoLinker } from "./cross-repo-linker.js";
 import {
   globalConfigPath,
   loadGlobalConfig,
@@ -84,6 +85,9 @@ export class Coordinator {
   private readonly abort = new AbortController();
 
   private readonly contexts = new Map<string, ProjectContext>();
+  /** SPEC-030: supervisor cross-repo linker — resolves a ripple's org/repo slug to a peer context and
+   *  brokers ripple work to it. Reads the live `contexts` map lazily so late-opened peers still resolve. */
+  private readonly linker = new CrossRepoLinker(() => this.contexts.values());
   /** Each connection's active project id. */
   private readonly activeByConn = new Map<ClientConnection, string>();
   private defaultProjectId = "";
@@ -275,6 +279,7 @@ export class Coordinator {
       registry: this.registry,
       probe: this.probe,
       publish: (event) => this.fanOut(projectId, event),
+      linker: this.linker,
     };
     const ctx = new ProjectContext(init);
     this.contexts.set(projectId, ctx);

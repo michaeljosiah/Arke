@@ -7,6 +7,7 @@ import {
   SpecStatus,
   appendChangeHistory,
   parseFrontmatter,
+  parseLinkage,
   parseSpecDoc,
   setFrontmatterStatus,
   validateWellFormed,
@@ -29,6 +30,8 @@ import {
   type HarnessAdapter,
   type PermissionAck,
   type PermissionDecision,
+  type ResolvedCanonical,
+  type ResolvedRipple,
   type ScaffoldStep,
 } from "@arke/contracts";
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
@@ -84,6 +87,7 @@ import { FolderInspector, type FolderState } from "./folder-inspector.js";
 import { HarnessReachabilityProbe } from "./reachability.js";
 import { ScaffoldRunner, type ScaffoldTiers } from "./scaffold.js";
 import type { ProjectRegistry } from "./project-registry.js";
+import type { CrossRepoLinker } from "./cross-repo-linker.js";
 
 /**
  * One project, fully isolated (SPEC-018). Owns everything the coordinator used to hold as a
@@ -105,6 +109,8 @@ export interface ProjectContextInit {
   /** Fan a stamped event out to this context's active client connections (supervisor-supplied). */
   publish: (event: DomainEvent) => void;
   probe?: HarnessReachabilityProbe;
+  /** SPEC-030: the supervisor's cross-repo linker, for resolving + brokering ripple work to peer contexts. */
+  linker?: CrossRepoLinker;
 }
 
 /** In-memory state for one review panel (SPEC-007); adjudications are also written to the trace. */
@@ -175,6 +181,14 @@ export interface SpecLibraryRecord {
   updatedAt: string;
   prNumber?: number;
   hasDivergence?: boolean;
+  /** SPEC-030: cross-repo ripples declared on this (canonical) spec, resolved against registered projects. */
+  ripples?: ResolvedRipple[];
+  /** SPEC-030: the canonical this (ripple) spec points back to, resolved. */
+  canonical?: ResolvedCanonical;
+  /** SPEC-030: linkage-parse warnings (malformed ripple/canonical), surfaced, never fatal. */
+  linkageWarnings?: string[];
+  /** SPEC-030: true when this spec is a ripple whose canonical changed and hasn't been reconciled here. */
+  rippleStale?: boolean;
 }
 
 /** Coordinator-side lifecycle state for a spec, driven by PR webhooks (SPEC-008). */
@@ -195,6 +209,11 @@ export class ProjectContext {
   private readonly registry: ProjectRegistry;
   private readonly probe: HarnessReachabilityProbe;
   private readonly publish: (event: DomainEvent) => void;
+  /** SPEC-030: the supervisor's cross-repo linker (resolve peer contexts + broker ripple work). */
+  private readonly linker?: CrossRepoLinker;
+  /** SPEC-030: canonical spec ids in THIS project whose ripple is currently stale (a canonical materially
+   *  changed and this repo hasn't reconciled). Keyed by the LOCAL ripple/pointer spec id. Trace-durable. */
+  private readonly staleRipples = new Set<string>();
   /** The project's agents (declared model + provider) and provider/auth profiles (SPEC-016 revised).
    *  Reassigned when an agent's model is edited (`agent.configure`) so the roster stays live. */
   private agents: AgentRegistry;
@@ -273,6 +292,7 @@ export class ProjectContext {
     this.endpoints = init.endpoints;
     this.registry = init.registry;
     this.publish = init.publish;
+    this.linker = init.linker;
     this.probe = init.probe ?? new HarnessReachabilityProbe();
     // Agents declare their own model+provider (SPEC-016 revised). Load them from the project's own
     // `agents/<name>/config.yaml` when the supervisor did not inject a registry (e.g. tests).
@@ -1031,6 +1051,7 @@ export class ProjectContext {
       const specId = data.spec_id ?? data.specId ?? f.replace(/\.md$/, "");
       const frontStatus = (data.status ?? "draft") as SpecStatus;
       const known = this.specRecords.get(specId);
+      const linkage = this.resolveLinkage(text); // SPEC-030 cross-repo ripples/canonical, resolved
       records.push({
         specId,
         title: data.title ?? specId,
@@ -1040,9 +1061,48 @@ export class ProjectContext {
         updatedAt: data.updated ?? "",
         ...(known?.prNumber !== undefined ? { prNumber: known.prNumber } : {}),
         hasDivergence: known ? known.status !== frontStatus : false,
+        ...(linkage.ripples.length ? { ripples: linkage.ripples } : {}),
+        ...(linkage.canonical ? { canonical: linkage.canonical } : {}),
+        ...(linkage.warnings.length ? { linkageWarnings: linkage.warnings } : {}),
+        ...(this.staleRipples.has(specId) ? { rippleStale: true } : {}),
       });
     }
     return records;
+  }
+
+  /**
+   * Parse + resolve a spec's cross-repo linkage (SPEC-030): each declared `repo` slug is resolved against
+   * the registered projects via the supervisor linker (`resolved` + `projectId`, else `unresolved` inert).
+   * Pure read — never reaches into a peer's files. Returns empty linkage for a plain single-repo spec.
+   */
+  private resolveLinkage(text: string): { ripples: ResolvedRipple[]; canonical?: ResolvedCanonical; warnings: string[] } {
+    const parsed = parseLinkage(text);
+    const resolveOne = (repo: string): { projectId?: string; status: "resolved" | "unresolved" } => {
+      const projectId = this.linker?.resolveId(repo) ?? null;
+      return projectId ? { projectId, status: "resolved" } : { status: "unresolved" };
+    };
+    const ripples: ResolvedRipple[] = parsed.ripples.map((r) => ({ ...r, ...resolveOne(r.repo) }));
+    const canonical: ResolvedCanonical | undefined = parsed.canonical ? { ...parsed.canonical, ...resolveOne(parsed.canonical.repo) } : undefined;
+    return canonical ? { ripples, canonical, warnings: parsed.warnings } : { ripples, warnings: parsed.warnings };
+  }
+
+  /**
+   * `spec.links` (SPEC-030) — resolved cross-repo linkage for one spec in this project: its ripples (with
+   * per-ripple resolution + staleness) and/or its canonical back-reference. A reference-only query — no
+   * cross-context side effects. Unknown spec → a named error.
+   */
+  private specLinks(specId: string): { specId: string; ripples: ResolvedRipple[]; canonical?: ResolvedCanonical; warnings: string[]; stale: boolean } {
+    const found = this.findSpecFile(specId);
+    if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    const linkage = this.resolveLinkage(found.text);
+    const ripples = linkage.ripples.map((r) => ({ ...r, stale: this.staleRipples.has(r.spec) || r.stale }));
+    return {
+      specId: found.canonicalId,
+      ripples,
+      ...(linkage.canonical ? { canonical: linkage.canonical } : {}),
+      warnings: linkage.warnings,
+      stale: this.staleRipples.has(found.canonicalId),
+    };
   }
 
   /**
@@ -2833,6 +2893,8 @@ export class ProjectContext {
         return this.groundingList();
       case "spec.library":
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
+      case "spec.links": // SPEC-030: resolved cross-repo linkage (ripples/canonical) for one spec
+        return this.specLinks(String(a.specId ?? ""));
       case "spec.deliver": // SPEC-024: explicit delivery (decoupled from approval) — single-session implementation + generate
         return this.deliver(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "spec.transition": { // SPEC-024: a human manual board move — one op, two triggers, one gate
