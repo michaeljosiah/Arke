@@ -1,5 +1,5 @@
 import { SPEC_ANATOMY } from "./spec.js";
-import type { CanonicalLink, RippleLink } from "./spec.js";
+import type { CanonicalLink, RippleLink, SpecFormat } from "./spec.js";
 
 /**
  * Pure parsing/editing of a specification markdown file (SPEC-006). Shared by the coordinator
@@ -58,16 +58,8 @@ interface SplitFrontmatter {
   body: string;
 }
 
-/** Split a `---`-fenced YAML frontmatter block off the head of the document (flat key: value). */
-export function parseFrontmatter(md: string): SplitFrontmatter {
-  const text = md.replace(/^﻿/, "");
-  if (!text.startsWith("---")) return { data: {}, raw: "", body: text };
-  const end = text.indexOf("\n---", 3);
-  if (end === -1) return { data: {}, raw: "", body: text };
-  const afterFence = text.indexOf("\n", end + 1);
-  const raw = text.slice(0, afterFence === -1 ? text.length : afterFence + 1);
-  const inner = text.slice(text.indexOf("\n") + 1, end);
-  const body = afterFence === -1 ? "" : text.slice(afterFence + 1);
+/** Parse the flat `key: value` scalars out of a `---`-fenced YAML inner block (shared by both formats). */
+function parseYamlScalars(inner: string): Record<string, string> {
   const data: Record<string, string> = {};
   for (const rawLine of inner.split("\n")) {
     // Strip a trailing CR so CRLF frontmatter (git `autocrlf` checkout on Windows) parses: `.` in the
@@ -76,7 +68,90 @@ export function parseFrontmatter(md: string): SplitFrontmatter {
     const m = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
     if (m) data[m[1]!] = normalizeScalar(m[2]!.trim());
   }
-  return { data, raw, body };
+  return data;
+}
+
+/**
+ * Split a `---`-fenced YAML frontmatter block off the head of the document (flat key: value). Handles both
+ * serialisations (SPEC-036), **content-detected** so callers that pass only text can't mis-parse: a markdown
+ * spec leads with a bare `---` fence; an HTML spec carries the same fenced YAML inside a leading
+ * `<!--arke … -->` comment (keeping the file valid, browser-renderable HTML). `raw` is the exact leading
+ * region a writer rewrites; `raw + body === text`, for both formats.
+ */
+export function parseFrontmatter(md: string): SplitFrontmatter {
+  const text = md.replace(/^﻿/, "");
+  // HTML spec: frontmatter is the `---`-fenced YAML inside a leading `<!--arke … -->` comment.
+  if (/^<!--\s*arke\b/i.test(text)) {
+    const close = text.indexOf("-->");
+    if (close === -1) return { data: {}, raw: "", body: text };
+    const nl = text.indexOf("\n", close);
+    const rawEnd = nl === -1 ? text.length : nl + 1; // include the newline after `-->`
+    const raw = text.slice(0, rawEnd);
+    const body = text.slice(rawEnd);
+    const comment = text.slice(0, close);
+    const fenceStart = comment.indexOf("---");
+    const fenceEnd = fenceStart === -1 ? -1 : comment.indexOf("\n---", fenceStart + 3);
+    if (fenceStart === -1 || fenceEnd === -1) return { data: {}, raw, body };
+    const inner = comment.slice(comment.indexOf("\n", fenceStart) + 1, fenceEnd);
+    return { data: parseYamlScalars(inner), raw, body };
+  }
+  if (!text.startsWith("---")) return { data: {}, raw: "", body: text };
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) return { data: {}, raw: "", body: text };
+  const afterFence = text.indexOf("\n", end + 1);
+  const raw = text.slice(0, afterFence === -1 ? text.length : afterFence + 1);
+  const inner = text.slice(text.indexOf("\n") + 1, end);
+  const body = afterFence === -1 ? "" : text.slice(afterFence + 1);
+  return { data: parseYamlScalars(inner), raw, body };
+}
+
+/** A specification's serialisation format from its filename (SPEC-036): `.html`/`.htm` → html, else markdown. */
+export function specFormatOf(pathOrName: string): SpecFormat {
+  return /\.html?$/i.test((pathOrName ?? "").trim()) ? "html" : "markdown";
+}
+
+// ---- SPEC-036 HTML parsing helpers (tag-based, browser-safe — no DOM library) --------------------
+
+/** Blank out the CONTENT of `<pre>/<code>/<script>/<style>` spans and HTML comments (with same-length
+ *  spaces so indices still map back to the original), so a heading-like string inside them is never a
+ *  false section boundary. */
+function maskNonContent(html: string): string {
+  return html.replace(/<pre\b[\s\S]*?<\/pre>|<code\b[\s\S]*?<\/code>|<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, (m) => " ".repeat(m.length));
+}
+
+/** Strip HTML to plain text for the token + normative checks (SPEC-036): drops `<script>/<style>/comment`
+ *  CONTENT first (so a hidden token can't reach the governance gate), then tags, then decodes a minimal
+ *  entity set. Collapses whitespace. */
+export function stripTags(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&") // decode &amp; LAST so `&amp;lt;` → `&lt;`, not `<`
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Yield each `<hN>` heading's stripped title + the body span beneath it (up to the next `<hN>`). Heading
+ *  POSITIONS are found on a masked copy (so a heading inside pre/code/comments is ignored), but the title
+ *  text and content are sliced from the ORIGINAL body (so inline tags in a title, e.g. `<code>`, survive). */
+function htmlSections(body: string, tag: "h2" | "h3" | "h4"): Array<{ title: string; content: string; start: number }> {
+  const masked = maskNonContent(body);
+  const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, "gi");
+  const closeLen = tag.length + 3; // "</hN>" = "</" + tag + ">"
+  const heads: Array<{ title: string; contentStart: number; start: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(masked))) {
+    const openEnd = m.index + m[0].indexOf(">") + 1; // just past the opening `<hN …>`
+    const title = stripTags(body.slice(openEnd, re.lastIndex - closeLen)).trim(); // from the ORIGINAL body
+    heads.push({ title, start: m.index, contentStart: re.lastIndex });
+  }
+  return heads.map((h, i) => ({ title: h.title, start: h.start, content: body.slice(h.contentStart, i + 1 < heads.length ? heads[i + 1]!.start : body.length).trim() }));
 }
 
 /**
@@ -106,9 +181,19 @@ export interface ParsedLinkage {
   warnings: string[];
 }
 
-/** The raw inner text of a spec's `---`-fenced frontmatter block (between the fences), or "". */
+/** The raw inner text of a spec's `---`-fenced frontmatter block, or "". Content-detects the HTML
+ *  leading-comment form (SPEC-036) so `parseLinkage` reads `ripples:`/`canonical:` from either format. */
 function frontmatterInner(md: string): string {
-  const text = md.replace(/^﻿/, "");
+  let text = md.replace(/^﻿/, "");
+  if (/^<!--\s*arke\b/i.test(text)) {
+    const close = text.indexOf("-->");
+    if (close === -1) return "";
+    text = text.slice(0, close); // the YAML fence lives inside the comment
+    const start = text.indexOf("---");
+    if (start === -1) return "";
+    const end = text.indexOf("\n---", start + 3);
+    return end === -1 ? "" : text.slice(text.indexOf("\n", start) + 1, end);
+  }
   if (!text.startsWith("---")) return "";
   const end = text.indexOf("\n---", 3);
   if (end === -1) return "";
@@ -170,16 +255,47 @@ export function parseLinkage(md: string): ParsedLinkage {
   return canonical ? { ripples, canonical, warnings } : { ripples, warnings };
 }
 
-/** Parse a spec markdown doc into frontmatter, requirements (with delta), and anatomy sections. */
-export function parseSpecDoc(md: string): ParsedSpecDoc {
+/** Parse a spec doc into frontmatter, requirements (with delta), and anatomy sections. Format-dispatched
+ *  (SPEC-036): markdown splits on `##`/`### Requirement:`; HTML on `<h2>`/`<h3>Requirement:`. Both return the
+ *  same shape, so every downstream consumer is unchanged. `format` defaults to markdown. */
+export function parseSpecDoc(md: string, format: SpecFormat = "markdown"): ParsedSpecDoc {
   const { data, body } = parseFrontmatter(md);
-  const sectionText = splitSections(body); // lowercased H2 title → markdown under it
+  const sectionText = format === "html" ? splitSectionsHtml(body) : splitSections(body); // lowercased title → body
   const sections: ParsedSection[] = SPEC_ANATOMY.map((a) => {
     const markdown = sectionText.get(a.title.toLowerCase()) ?? "";
     return { key: a.key, title: a.title, present: sectionText.has(a.title.toLowerCase()), markdown };
   });
-  const requirementsMd = sectionText.get("requirements") ?? "";
-  return { frontmatter: data, requirements: parseRequirements(requirementsMd), sections };
+  const requirementsBody = sectionText.get("requirements") ?? "";
+  const requirements = format === "html" ? parseRequirementsHtml(requirementsBody) : parseRequirements(requirementsBody);
+  return { frontmatter: data, requirements, sections };
+}
+
+/** HTML analogue of {@link splitSections}: lowercased `<h2>` title → the HTML beneath it. */
+function splitSectionsHtml(body: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const s of htmlSections(body, "h2")) out.set(s.title.toLowerCase(), s.content);
+  return out;
+}
+
+/** HTML analogue of {@link parseRequirements}: `<h3>Requirement: …</h3>` blocks. Metadata (`capability:`,
+ *  `delta:`) is read from the tag-stripped block text; the requirement `body` keeps the raw HTML for rendering. */
+function parseRequirementsHtml(html: string): ParsedRequirement[] {
+  const out: ParsedRequirement[] = [];
+  for (const s of htmlSections(html, "h3")) {
+    if (!/^Requirement:/i.test(s.title)) continue;
+    const title = s.title.replace(/^Requirement:\s*/i, "");
+    const text = stripTags(s.content);
+    const capability = /capability:\s*([a-z0-9-]+)/i.exec(text)?.[1];
+    const delta = /delta:\s*([^\n]+?)(?:\s{2,}|$)/i.exec(text)?.[1]?.trim();
+    out.push({
+      title,
+      ...(capability ? { capability } : {}),
+      ...(delta ? { delta } : {}),
+      ...(deltaKindOf(delta) ? { deltaKind: deltaKindOf(delta) } : {}),
+      body: s.content.trim(),
+    });
+  }
+  return out;
 }
 
 /** Split a document body into a map of lowercased `## <title>` → the markdown beneath it. */
@@ -245,24 +361,25 @@ function parseRequirements(md: string): ParsedRequirement[] {
  * both a WHEN and a THEN. `missing` names each absent element — `"requirements section"` |
  * `"normative statements"` | `"scenarios"` — so the cockpit can tell the author exactly what to add.
  */
-export function validateWellFormed(md: string): { ok: boolean; missing: string[] } {
+export function validateWellFormed(md: string, format: SpecFormat = "markdown"): { ok: boolean; missing: string[] } {
   const missing: string[] = [];
   const { body } = parseFrontmatter(md);
-  const requirements = parseSpecDoc(md).sections.find((s) => s.key === "requirements");
-  const reqMd = requirements?.markdown ?? "";
+  const requirements = parseSpecDoc(md, format).sections.find((s) => s.key === "requirements");
+  const reqBody = requirements?.markdown ?? "";
+  // For HTML the normative word-checks run on tag-stripped text (SPEC-036) so inline markup is transparent
+  // AND a token hidden in <script>/<style>/comment content cannot reach the governance gate.
+  const reqText = format === "html" ? stripTags(reqBody) : reqBody;
   // (a) the Requirements section — the one SPEC_ANATOMY section that carries the normative content —
   // must be present and non-empty; a draft with no requirements has nothing to review.
-  if (!requirements?.present || reqMd.trim() === "") missing.push("requirements section");
+  if (!requirements?.present || reqBody.trim() === "") missing.push("requirements section");
   // (b) at least one normative statement (SHALL or MUST) in the requirements prose.
-  if (!/\b(?:SHALL|MUST)\b/.test(reqMd)) missing.push("normative statements");
-  // (c) at least one acceptance scenario with both a trigger and an outcome. Scan each
-  // `#### Scenario:` block (up to the next heading) for a WHEN and a THEN, case-insensitively and
-  // tolerant of markdown emphasis (`- **WHEN**`).
-  const scenarios = body.split(/^####\s+Scenario:/im).slice(1);
-  const hasWhenThen = scenarios.some((block) => {
-    const upToNextHeading = block.split(/^#{2,4}\s+/m)[0] ?? block;
-    return /\bWHEN\b/i.test(upToNextHeading) && /\bTHEN\b/i.test(upToNextHeading);
-  });
+  if (!/\b(?:SHALL|MUST)\b/.test(reqText)) missing.push("normative statements");
+  // (c) at least one acceptance scenario with both a trigger and an outcome. Markdown scans each
+  // `#### Scenario:` block; HTML scans each `<h4>Scenario:` block's tag-stripped text.
+  const scenarioTexts = format === "html"
+    ? htmlSections(body, "h4").filter((s) => /^Scenario:/i.test(s.title)).map((s) => stripTags(s.content))
+    : body.split(/^####\s+Scenario:/im).slice(1).map((block) => block.split(/^#{2,4}\s+/m)[0] ?? block);
+  const hasWhenThen = scenarioTexts.some((t) => /\bWHEN\b/i.test(t) && /\bTHEN\b/i.test(t));
   if (!hasWhenThen) missing.push("scenarios");
   return { ok: missing.length === 0, missing };
 }
