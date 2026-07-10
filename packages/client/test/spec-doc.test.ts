@@ -373,6 +373,18 @@ test("parseSpecDoc(html) ignores a heading-like string inside <pre>", () => {
   assert.equal(doc.requirements.length, 1, "still exactly one real requirement");
 });
 
+test("parseSpecDoc(html) ignores heading-like tags inside an HTML comment (Requirement 3)", () => {
+  // A guidance comment that names the anatomy in literal tags must NOT become a section boundary — and the
+  // real <h2>Why> heading right after it must still be found (regression for the worked-example comment).
+  const withComment = HTML_SPEC.replace(
+    "<p>Some motivation.</p>",
+    "<!-- sections are <h2>, e.g. <h2>Requirements</h2>, and <h3>Requirement: x</h3> -->\n<p>Some motivation.</p>",
+  );
+  const doc = parseSpecDoc(withComment, "html");
+  assert.ok(doc.sections.find((s) => s.key === "why").present, "the real Why section is still found");
+  assert.equal(doc.requirements.length, 1, "the commented <h3>Requirement: x> is not a real requirement");
+});
+
 test("a markdown spec still parses unchanged when no format is passed", () => {
   const doc = parseSpecDoc(DOC); // no format arg → markdown default
   assert.equal(doc.requirements.length, 3);
