@@ -91,6 +91,19 @@ test("session.status running/idle map to running and idle+turn.quiescent", () =>
   if (idle[1]?.type === "turn.quiescent") assert.equal(idle[1].turnId, "resp_1");
 });
 
+test("a terminal non-error status (cancelled/aborted) maps to interrupted, not running or error", () => {
+  for (const status of ["cancelled", "aborted", "interrupted", "stopped"]) {
+    const out = normalize({ sequence_number: 1, type: "session.status", conversation_id: SID, status }, SID, ID, HARNESS, createNormalizeState());
+    assert.equal(out[0]?.type, "session.status");
+    if (out[0]?.type === "session.status") assert.equal(out[0].status, "interrupted", `${status} → interrupted`);
+  }
+});
+
+test("an UNKNOWN status value yields NO event (never fabricated as running) — the pump dead-letters it", () => {
+  const out = normalize({ sequence_number: 1, type: "session.status", conversation_id: SID, status: "quantum-flux" }, SID, ID, HARNESS, createNormalizeState());
+  assert.deepEqual(out, [], "an unknown status is not asserted as running/idle/error");
+});
+
 test("an elicitation request maps to permission.asked", () => {
   const out = normalize({ sequence_number: 3, type: "response.elicitation_request", data: { elicitation_id: "el_1", title: "Write file?" } }, SID, ID, HARNESS, createNormalizeState());
   assert.equal(out[0]?.type, "permission.asked");

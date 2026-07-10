@@ -91,16 +91,24 @@ export function normalize(
   switch (type) {
     // ---- control plane (LIVE-CONFIRMED against Omnigent 0.3.0) ----
     case "session.status": {
-      // `{ type:"session.status", conversation_id, status: "running"|"idle"|"failed"|…, response_id, error }`
-      const status = str(f.status) ?? str(d.status);
+      // `{ type:"session.status", conversation_id, status: "running"|"idle"|"failed"|…, response_id, error }`.
+      // Map ONLY known status values; an UNKNOWN value returns [] (it must NOT be asserted as `running` —
+      // a stopped/`cancelled` session would then show as live work; SPEC-037 review P3).
+      const status = (str(f.status) ?? str(d.status) ?? "").toLowerCase();
       const model = str(f.model) ?? str(d.model);
       if (status === "running" || status === "in_progress") {
         return [{ ...base, type: "session.status", status: "running", ...(model ? { model } : {}) }];
       }
+      if (status === "waiting" || status === "pending" || status === "blocked") {
+        return [{ ...base, type: "session.status", status: "waiting" }];
+      }
       if (status === "failed" || status === "errored" || status === "error") {
         return [{ ...base, type: "session.status", status: "error" }];
       }
-      if (status === "idle" || status === "completed" || status === "done") {
+      if (status === "cancelled" || status === "canceled" || status === "aborted" || status === "interrupted" || status === "stopped" || status === "terminated") {
+        return [{ ...base, type: "session.status", status: "interrupted" }]; // terminal, but NOT an error
+      }
+      if (status === "idle" || status === "completed" || status === "done" || status === "complete") {
         // Turn quiescence: consumers (and the completion-aware send) detect a finished turn here.
         const turnId = str(f.response_id) ?? str(d.response_id) ?? sessionId;
         return [
@@ -108,8 +116,7 @@ export function normalize(
           { ...e, correlationId: turnId, type: "turn.quiescent", sessionId, turnId },
         ];
       }
-      // waiting / other → surface as running so the board shows live work (never silently drop a status)
-      return [{ ...base, type: "session.status", status: status === "waiting" ? "waiting" : "running" }];
+      return []; // unknown status value — do not fabricate a state (the pump dead-letters it, below)
     }
 
     case "response.error": {

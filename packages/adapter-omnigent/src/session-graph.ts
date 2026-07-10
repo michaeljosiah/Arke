@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { SessionKind } from "@arke/contracts";
 
@@ -46,11 +46,13 @@ export class SessionGraph {
 
   private load(): void {
     if (!this.persistPath || !existsSync(this.persistPath)) return;
+    let lines = 0;
     try {
       const text = readFileSync(this.persistPath, "utf8");
       for (const line of text.split("\n")) {
         const t = line.trim();
         if (!t) continue;
+        lines++;
         try {
           const row = JSON.parse(t) as StoredRow;
           if (row && typeof row.sessionId === "string") {
@@ -61,7 +63,20 @@ export class SessionGraph {
         }
       }
     } catch {
-      /* unreadable store — start empty rather than crash the adapter */
+      return; // unreadable store — start empty rather than crash the adapter
+    }
+    // Compact on load (SPEC-037 review P3): the append-only log grows with every re-record; once it holds
+    // more lines than unique sessions, rewrite it to one line each so it stays bounded over the store's life.
+    if (lines > this.byId.size) this.compact();
+  }
+
+  private compact(): void {
+    if (!this.persistPath) return;
+    try {
+      const rows = [...this.byId.entries()].map(([sessionId, id]) => JSON.stringify({ sessionId, ...id } satisfies StoredRow));
+      writeFileSync(this.persistPath, rows.length ? rows.join("\n") + "\n" : "", "utf8");
+    } catch {
+      /* best-effort compaction — the append log still works uncompacted */
     }
   }
 

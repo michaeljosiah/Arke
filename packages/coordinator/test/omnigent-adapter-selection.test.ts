@@ -38,3 +38,13 @@ test("the project's own omnigent instance is not suppressed by global config", (
   const inst = omnigentInstanceFor(projectConfig([{ id: "omnigent-local", driver: "omnigent" }]));
   assert.equal(inst?.driver, "omnigent");
 });
+
+test("a project that configures an OpenCode PROVIDER is not overridden by a global omnigent (short-circuit)", () => {
+  // Mirrors the codex short-circuit: a provider-pinned OpenCode project has no local instances, but it must
+  // NOT inherit a machine-level omnigent — `readProviders` non-empty returns undefined without consulting global.
+  const dir = mkdtempSync(join(tmpdir(), "arke-omni-sel-"));
+  mkdirSync(resolve(dir, ".arke"), { recursive: true });
+  const cfg = resolve(dir, ".arke", "config.json");
+  writeFileSync(cfg, JSON.stringify({ providers: { "opencode-gateway": { kind: "opencode" } } }), "utf8");
+  assert.equal(omnigentInstanceFor(cfg), undefined, "an OpenCode-provider project does not fall through to a global omnigent");
+});

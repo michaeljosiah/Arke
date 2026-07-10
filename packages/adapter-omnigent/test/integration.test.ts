@@ -30,14 +30,30 @@ class FakeTransport implements OmnigentTransport {
   openCount = 0;
   /** When true, every openStream closes immediately (drives reconnect). */
   closeImmediately = false;
+  /** When true, each openStream emits one frame then drops (a FLAP). */
+  flapWithFrame = false;
+  /** When true, the elicitation-resolve POST rejects. */
+  failResolve = false;
+  /** When true, the /events POST triggers a fast `session.status: idle` on the stream. */
+  quiesceOnPost = false;
 
   async req<T>(method: string, path: string): Promise<T> {
     if (path === "/v1/sessions?limit=1") return {} as T;
     if (path === "/api/version") return { version: "0.3.0" } as T;
     if (path === "/v1/sessions") return { id: "conv_1" } as T;
-    if (path.endsWith("/events")) return { queued: true, item_id: this.itemId } as T;
+    if (/\/elicitations\/[^/]+\/resolve$/.test(path)) {
+      if (this.failResolve) throw new Error("resolve POST failed (503)");
+      return {} as T;
+    }
+    if (path.endsWith("/events")) {
+      if (this.quiesceOnPost) {
+        // The turn completes during the POST round-trip: push idle right after we return the receipt.
+        queueMicrotask(() => this.current?.push({ sequence_number: 9, type: "session.status", conversation_id: "conv_1", status: "idle", response_id: "r1" }));
+      }
+      return { queued: true, item_id: this.itemId } as T;
+    }
     if (method === "GET" && /\/v1\/sessions\/[^/]+$/.test(path)) return { status: this.sessionStatus } as T;
-    return {} as T; // elicitation resolve, etc.
+    return {} as T;
   }
 
   async openStream(): Promise<ReadableStream<Uint8Array>> {
@@ -45,6 +61,7 @@ class FakeTransport implements OmnigentTransport {
     const c = new Controllable();
     this.current = c;
     if (this.closeImmediately) queueMicrotask(() => c.close());
+    else if (this.flapWithFrame) queueMicrotask(() => { c.push({ sequence_number: 1, type: "session.heartbeat", server_time: 1 }); c.close(); });
     return c.stream;
   }
 }
@@ -121,14 +138,67 @@ test("reconnect is bounded — on exhaustion the adapter emits a terminal degrad
   const fake = new FakeTransport();
   fake.closeImmediately = true; // every stream drops at once → drives reconnect
   const a = new OmnigentAdapter(
-    { baseUrl: "http://x", agentId: "ag_1", reconnect: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 } },
+    { baseUrl: "http://x", agentId: "ag_1", reconnect: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2, minHealthyMs: 5 } },
     undefined,
     fake,
   );
   await a.createSession({ specId: "SPEC-1" });
   const events = await collect(a, 150);
   const terminal = events.filter((e) => e.type === "session.status" && (e as any).status === "error");
-  assert.ok(terminal.length >= 1, "a terminal degraded status is emitted after reconnect exhaustion");
+  assert.equal(terminal.length, 1, "exactly one terminal degraded status after reconnect exhaustion");
   assert.ok(fake.openCount >= 3, "the stream was retried (initial + 2 reconnects) before giving up");
+  await a.stopServer();
+});
+
+test("reconnect stays bounded under a FLAP — open, deliver one frame, drop, repeat (SPEC-037 review P1)", async () => {
+  // The dangerous case the earlier test missed: a stream that makes ≥1 frame of 'progress' each cycle. With
+  // a high minHealthyMs the flap never resets the counter, so it still exhausts to a terminal degrade.
+  const fake = new FakeTransport();
+  fake.flapWithFrame = true; // each open emits one frame then drops (< minHealthyMs)
+  const a = new OmnigentAdapter(
+    { baseUrl: "http://x", agentId: "ag_1", reconnect: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2, minHealthyMs: 10_000 } },
+    undefined,
+    fake,
+  );
+  await a.createSession({ specId: "SPEC-1" });
+  const events = await collect(a, 200);
+  const terminal = events.filter((e) => e.type === "session.status" && (e as any).status === "error");
+  assert.equal(terminal.length, 1, "the flap is bounded — one terminal degrade, not an infinite reconnect");
+  assert.ok(fake.openCount <= 6, `bounded open count (was ${fake.openCount}); an unbounded flap would climb into the dozens`);
+  await a.stopServer();
+});
+
+test("respondToPermission does not leave a leaked waiter when the resolve POST fails — a retry is not 'duplicate'", async () => {
+  const fake = new FakeTransport();
+  fake.failResolve = true; // the elicitation-resolve POST rejects
+  const a = new OmnigentAdapter({ baseUrl: "http://x", agentId: "ag_1" }, undefined, fake);
+  await a.createSession({ specId: "SPEC-1" });
+  await new Promise((r) => setTimeout(r, 10));
+  fake.current!.push({ sequence_number: 1, type: "response.elicitation_request", data: { elicitation_id: "el_1", title: "Write?" } });
+  await new Promise((r) => setTimeout(r, 10));
+
+  await assert.rejects(a.respondToPermission({ permissionId: "el_1", decision: "once" }), "the POST failure propagates");
+  fake.failResolve = false; // the retry's POST succeeds
+  const retryP = a.respondToPermission({ permissionId: "el_1", decision: "once" });
+  await new Promise((r) => setTimeout(r, 10));
+  fake.current!.push({ sequence_number: 2, type: "elicitation.resolved", data: { elicitation_id: "el_1" } });
+  const ack = await retryP;
+  assert.notEqual(ack.status, "duplicate", "the retry is NOT rejected as duplicate (the failed waiter was cancelled)");
+  assert.equal(ack.status, "confirmed");
+  await a.stopServer();
+});
+
+test("completion-aware sendMessage resolves promptly when the turn quiesces during the /events POST (no lost wakeup)", async () => {
+  // The /events POST triggers a fast `session.status: idle` on the stream. Because sendMessage registers the
+  // turn waiter BEFORE the POST, the quiesce is caught — sendMessage resolves fast, not after the 30s timeout.
+  const fake = new FakeTransport();
+  fake.quiesceOnPost = true;
+  const a = new OmnigentAdapter({ baseUrl: "http://x", agentId: "ag_1" }, undefined, fake);
+  await a.createSession({ specId: "SPEC-1" });
+  await new Promise((r) => setTimeout(r, 10));
+  const t0 = Date.now();
+  await a.sendMessage({ sessionId: "conv_1", agent: "x", parts: [{ text: "ping" }] });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 1000, `sendMessage resolved promptly (${elapsed}ms), not via the 30s timeout`);
   await a.stopServer();
 });

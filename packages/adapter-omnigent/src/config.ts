@@ -39,9 +39,16 @@ export interface ReconnectOptions {
   baseDelayMs?: number;
   /** Backoff ceiling (ms). */
   maxDelayMs?: number;
+  /**
+   * A stream must stay connected at least this long (ms), having delivered ≥1 frame, before its reconnect
+   * counter resets — so an open-then-immediately-drop FLAP keeps accumulating toward the bound instead of
+   * resetting on every cycle (a subtle unbounded-reconnect bug). A healthy long-lived stream that drops
+   * after this window resets and reconnects fresh.
+   */
+  minHealthyMs?: number;
 }
 
-export const DEFAULT_RECONNECT: Required<ReconnectOptions> = { maxAttempts: 5, baseDelayMs: 250, maxDelayMs: 5000 };
+export const DEFAULT_RECONNECT: Required<ReconnectOptions> = { maxAttempts: 5, baseDelayMs: 250, maxDelayMs: 5000, minHealthyMs: 2000 };
 
 export const DEFAULT_OMNIGENT_BASE_URL = "http://localhost:6767";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;

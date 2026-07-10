@@ -138,6 +138,16 @@ export class PermissionCoordinator {
     w.resolve("confirmed");
   }
 
+  /** Abandon a waiter without confirming — e.g. the resolve POST failed, so a retry must NOT be a
+   *  `duplicate` (SPEC-037 review P1). Settles the promise with `disposition` and clears the timer/entry. */
+  cancel(permissionId: string, disposition: PermissionAckStatus = "unconfirmed"): void {
+    const w = this.waiters.get(permissionId);
+    if (!w) return;
+    clearTimeout(w.timer);
+    this.waiters.delete(permissionId);
+    w.resolve(disposition);
+  }
+
   /** True while a decision for this id is in flight (used to answer `duplicate`). */
   pending(permissionId: string): boolean {
     return this.waiters.has(permissionId);
@@ -268,10 +278,14 @@ export class OmnigentAdapter implements HarnessAdapter {
     return { sessionId };
   }
 
-  /** Synchronous turn: post, then AWAIT the turn's quiescence (SPEC-037 completion-aware send). */
+  /** Synchronous turn: post, then AWAIT the turn's quiescence (SPEC-037 completion-aware send). The waiter
+   *  is registered BEFORE the POST so a fast turn that quiesces during the `/events` round-trip is not a
+   *  lost wakeup (SPEC-037 review P2). Resolves on `session.status: idle` or a bounded timeout (never hangs). */
   async sendMessage(input: SendMessageInput): Promise<SendReceipt> {
+    if (!this.streams.has(input.sessionId)) this.openStream(input.sessionId); // pump must exist to quiesce
+    const waited = this.turns.wait(input.sessionId);
     const receipt = await this.postMessage(input);
-    await this.turns.wait(receipt.sessionId); // resolves on session.status: idle, or a bounded timeout
+    await waited;
     return receipt;
   }
 
@@ -315,11 +329,18 @@ export class OmnigentAdapter implements HarnessAdapter {
     if (this.perms.pending(decision.permissionId)) return { permissionId: decision.permissionId, status: "duplicate" };
     const confirm = this.perms.decide(decision.permissionId); // register the waiter BEFORE posting
     const action = decision.decision === "reject" ? "decline" : "accept"; // once/always → accept
-    await this.http.req(
-      "POST",
-      `/v1/sessions/${sessionId}/elicitations/${decision.permissionId}/resolve`,
-      { action, ...(decision.message ? { content: { message: decision.message } } : {}) },
-    );
+    try {
+      await this.http.req(
+        "POST",
+        `/v1/sessions/${sessionId}/elicitations/${decision.permissionId}/resolve`,
+        { action, ...(decision.message ? { content: { message: decision.message } } : {}) },
+      );
+    } catch (err) {
+      // The resolve POST failed — DON'T leave a live 30s waiter behind (a retry would wrongly be a
+      // `duplicate`, blocking re-approval). Cancel it and surface the failure (SPEC-037 review P1).
+      this.perms.cancel(decision.permissionId, "unconfirmed");
+      throw err;
+    }
     const status = await confirm; // confirmed (event) | unconfirmed (timeout) — never a bare 202 "confirmed"
     return { permissionId: decision.permissionId, status };
   }
@@ -352,6 +373,7 @@ export class OmnigentAdapter implements HarnessAdapter {
     try {
       while (!signal.aborted) {
         let receivedAny = false;
+        const connectedAt = Date.now();
         try {
           const body = await this.http.openStream(`/v1/sessions/${sessionId}/stream`, signal);
           for await (const frame of parseOmnigentSse(body, signal)) {
@@ -362,9 +384,10 @@ export class OmnigentAdapter implements HarnessAdapter {
           /* connection error — fall through to reconnect */
         }
         if (signal.aborted) break;
-        // Reset the backoff only after REAL progress (≥1 frame). A stream that merely opens then drops at
-        // once is a flap — the attempt counter must keep climbing so reconnect stays bounded.
-        if (receivedAny) attempt = 0;
+        // Reset the backoff ONLY after a HEALTHY connection — one that delivered ≥1 frame AND stayed up at
+        // least `minHealthyMs`. A stream that opens, delivers a frame, then drops at once is a FLAP; resetting
+        // on mere "≥1 frame" would defeat the bound and reconnect forever (SPEC-037 review P1).
+        if (receivedAny && Date.now() - connectedAt >= cfg.minHealthyMs) attempt = 0;
         attempt++;
         if (attempt > cfg.maxAttempts) {
           this.channel.push({ seq: 0, ts: 0, harness: this.id, sessionId, specId: identity.specId, kind: identity.kind, type: "session.status", status: "error" });
@@ -378,13 +401,17 @@ export class OmnigentAdapter implements HarnessAdapter {
     }
   }
 
-  /** Best-effort REST re-sync after a disconnect: read the session's current status and re-emit it, so a
-   *  terminal transition that happened during the gap is not lost (the stream itself has no replay). */
+  /** Best-effort REST re-sync after a disconnect: surface ONLY a terminal ERROR/failed transition that
+   *  happened during the gap (the stream is live-tail, no replay). It must NOT re-drive `idle`/quiescence —
+   *  the REST status is the last SETTLED state, which for an in-flight new turn is a STALE `idle` that would
+   *  fabricate a completion and prematurely resolve `sendMessage` (SPEC-037 review P1). A real completion is
+   *  observed on the reconnected live stream, not synthesised here. */
   private async resync(sessionId: string, identity: { specId: string; kind: "spec" | "task" }): Promise<void> {
     try {
       const s = await this.http.req<{ status?: string }>("GET", `/v1/sessions/${sessionId}`);
-      if (typeof s?.status === "string" && s.status) {
-        this.handleFrame(sessionId, identity, { type: "session.status", conversation_id: sessionId, status: s.status });
+      const status = typeof s?.status === "string" ? s.status.toLowerCase() : "";
+      if (status === "failed" || status === "errored" || status === "error") {
+        this.handleFrame(sessionId, identity, { type: "session.status", conversation_id: sessionId, status });
       }
     } catch {
       /* resync is best-effort; a failure just means we reconnect the stream and carry on */
@@ -414,8 +441,10 @@ export class OmnigentAdapter implements HarnessAdapter {
     }
 
     const events = normalize(frame, sessionId, identity, this.id, this.normState);
-    if (events.length === 0 && !isRecognizedFrameType(type)) {
-      this.deadLetters.record(sessionId, frame, "unmapped-frame");
+    if (events.length === 0) {
+      // An unmapped frame TYPE, or a `session.status` with an UNKNOWN status value (normalize returns []
+      // rather than fabricate a state), is dead-lettered — not silently dropped (SPEC-037 review P3).
+      if (!isRecognizedFrameType(type) || type === "session.status") this.deadLetters.record(sessionId, frame, type === "session.status" ? "unknown-session-status" : "unmapped-frame");
       return;
     }
     for (const ev of events) {

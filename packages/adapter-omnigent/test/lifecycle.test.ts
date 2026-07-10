@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,6 +39,16 @@ test("a re-record is last-write-wins after reload", () => {
   a.record("conv_1", { specId: "SPEC-NEW", kind: "spec" }); // e.g. an untitled→titled rename
   const b = new SessionGraph(path);
   assert.deepEqual(b.get("conv_1"), { specId: "SPEC-NEW", kind: "spec" });
+});
+
+test("the append-only store is compacted on load once it holds more lines than unique sessions", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "arke-omni-")), "sessions.ndjson");
+  const a = new SessionGraph(path);
+  for (let i = 0; i < 20; i++) a.record("conv_1", { specId: `SPEC-${i}`, kind: "spec" }); // 20 appends, 1 session
+  assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 20, "20 append lines before compaction");
+  const b = new SessionGraph(path); // reload triggers compaction (20 lines > 1 unique)
+  assert.deepEqual(b.get("conv_1"), { specId: "SPEC-19", kind: "spec" }, "last write wins");
+  assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 1, "compacted to one line per unique session");
 });
 
 test("an in-memory graph (no path) works and persists nothing", () => {
