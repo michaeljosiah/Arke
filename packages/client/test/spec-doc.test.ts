@@ -378,3 +378,31 @@ test("a markdown spec still parses unchanged when no format is passed", () => {
   assert.equal(doc.requirements.length, 3);
   assert.equal(validateWellFormed(WELL_FORMED).ok, true);
 });
+
+test("setFrontmatterStatus rewrites the status inside an HTML leading-comment (body untouched)", () => {
+  const out = setFrontmatterStatus(HTML_SPEC, "in-review");
+  const { data, body } = parseFrontmatter(out);
+  assert.equal(data.status, "in-review");
+  assert.equal(data.branch, "feat/x"); // untouched
+  assert.ok(body.includes("<h2>Requirements</h2>"), "HTML body preserved");
+  assert.ok(out.startsWith("<!--arke"), "still a valid HTML leading comment");
+});
+
+test("appendChangeHistory(html) appends an <li> under <h2>Change history</h2>", () => {
+  const out = appendChangeHistory(HTML_SPEC, "2026-07-10 · in-review — approved", "html");
+  const tail = out.slice(out.indexOf("Change history"));
+  assert.match(tail, /<li>2026-07-10 · in-review — approved<\/li>/);
+  assert.ok(tail.indexOf("ADDED") < tail.indexOf("in-review — approved"), "appended after the existing entry");
+});
+
+test("appendChangeHistory(html) creates the section + list when absent", () => {
+  const noHistory = HTML_SPEC.replace(/<h2>Change history<\/h2>[\s\S]*$/, "");
+  const out = appendChangeHistory(noHistory, "first entry", "html");
+  assert.match(out, /<h2>Change history<\/h2>/);
+  assert.match(out, /<li>first entry<\/li>/);
+});
+
+test("appendChangeHistory(html) escapes angle brackets in the entry", () => {
+  const out = appendChangeHistory(HTML_SPEC, "fixed <foo> & bar", "html");
+  assert.match(out, /<li>fixed &lt;foo&gt; &amp; bar<\/li>/);
+});

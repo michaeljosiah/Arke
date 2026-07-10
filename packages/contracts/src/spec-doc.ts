@@ -409,10 +409,12 @@ export function setFrontmatterStatus(md: string, status: string): string {
 }
 
 /**
- * Append a line under the `## Change history` section (creating the section if absent). The line is
- * prefixed with `- ` if it is not already a list item.
+ * Append a line under the Change history section (creating it if absent), format-dispatched (SPEC-036). For
+ * markdown the entry is a `- ` list item under `## Change history`; for HTML it is an `<li>` inside the list
+ * under `<h2>Change history</h2>` (creating the section + `<ul>` if absent). Defaults to markdown.
  */
-export function appendChangeHistory(md: string, line: string): string {
+export function appendChangeHistory(md: string, line: string, format: SpecFormat = "markdown"): string {
+  if (format === "html") return appendChangeHistoryHtml(md, line);
   const item = line.trimStart().startsWith("- ") ? line.trimEnd() : `- ${line.trim()}`;
   const re = /^##\s+Change history\s*$/im;
   const match = re.exec(md);
@@ -428,4 +430,32 @@ export function appendChangeHistory(md: string, line: string): string {
   const before = md.slice(0, insertAt).replace(/\s*$/, "");
   const after = md.slice(insertAt);
   return `${before}\n${item}\n${after.startsWith("\n") ? after.slice(1) : after}`;
+}
+
+/** Escape a text run for safe insertion into an HTML change-history `<li>`. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** HTML branch of {@link appendChangeHistory}: append an `<li>` under `<h2>Change history</h2>`'s list. */
+function appendChangeHistoryHtml(html: string, line: string): string {
+  const li = `<li>${escapeHtml(line.replace(/^\s*-\s*/, "").trim())}</li>`;
+  const head = /<h2\b[^>]*>\s*Change history\s*<\/h2>/i.exec(html);
+  if (!head) {
+    const sep = html.endsWith("\n") ? "" : "\n";
+    return `${html}${sep}<h2>Change history</h2>\n<ul>\n  ${li}\n</ul>\n`;
+  }
+  const start = head.index + head[0].length;
+  const rest = html.slice(start);
+  // Prefer to insert as the last item of the section's first <ul>/<ol> before the next <h2>.
+  const nextH2 = /<h2\b/i.exec(rest);
+  const sectionEnd = nextH2 ? start + nextH2.index : html.length;
+  const section = html.slice(start, sectionEnd);
+  const listClose = /<\/(ul|ol)>/i.exec(section);
+  if (listClose) {
+    const at = start + listClose.index;
+    return `${html.slice(0, at).replace(/\s*$/, "")}\n  ${li}\n${html.slice(at)}`;
+  }
+  // No list yet in the section — create one right after the heading.
+  return `${html.slice(0, start)}\n<ul>\n  ${li}\n</ul>${html.slice(start)}`;
 }
