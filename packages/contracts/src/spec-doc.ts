@@ -121,19 +121,22 @@ export function detectSpecFormat(md: string): SpecFormat {
 
 /** Blank out the CONTENT of `<pre>/<code>/<script>/<style>` spans and HTML comments (with same-length
  *  spaces so indices still map back to the original), so a heading-like string inside them is never a
- *  false section boundary. */
+ *  false section boundary. An UNCLOSED such region is masked to end-of-input (`(?:</tag>|$)`) — a browser
+ *  treats the rest of the document as inside it, so we must too (and it keeps the governance gate honest). */
 function maskNonContent(html: string): string {
-  return html.replace(/<pre\b[\s\S]*?<\/pre>|<code\b[\s\S]*?<\/code>|<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, (m) => " ".repeat(m.length));
+  return html.replace(/<pre\b[\s\S]*?(?:<\/pre>|$)|<code\b[\s\S]*?(?:<\/code>|$)|<script\b[\s\S]*?(?:<\/script>|$)|<style\b[\s\S]*?(?:<\/style>|$)|<!--[\s\S]*?(?:-->|$)/gi, (m) => " ".repeat(m.length));
 }
 
 /** Strip HTML to plain text for the token + normative checks (SPEC-036): drops `<script>/<style>/comment`
  *  CONTENT first (so a hidden token can't reach the governance gate), then tags, then decodes a minimal
- *  entity set. Collapses whitespace. */
+ *  entity set. Collapses whitespace. The script/style/comment strips match an UNCLOSED region to end-of-input
+ *  (`(?:</tag>|$)`) too — otherwise `<style>The system SHALL … WHEN … THEN` (no close) would smuggle passing
+ *  tokens past `validateWellFormed`. */
 export function stripTags(html: string): string {
   return html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, " ")
+    .replace(/<script\b[\s\S]*?(?:<\/script>|$)/gi, " ")
+    .replace(/<style\b[\s\S]*?(?:<\/style>|$)/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -285,8 +288,10 @@ function splitSectionsHtml(body: string): Map<string, string> {
   return out;
 }
 
-/** HTML analogue of {@link parseRequirements}: `<h3>Requirement: …</h3>` blocks. Metadata (`capability:`,
- *  `delta:`) is read from the tag-stripped block text; the requirement `body` keeps the raw HTML for rendering. */
+/** HTML analogue of {@link parseRequirements}: `<h3>Requirement: …</h3>` blocks. `capability:` is read from
+ *  the tag-stripped block text (it is a bounded slug); `delta:` is read from the RAW block bounded by the next
+ *  tag/newline (`[^<\n]`), NOT the whitespace-collapsed text — the metadata is its own element, so bounding at
+ *  `<` keeps the delta value from running into the requirement prose. The `body` keeps the raw HTML. */
 function parseRequirementsHtml(html: string): ParsedRequirement[] {
   const out: ParsedRequirement[] = [];
   for (const s of htmlSections(html, "h3")) {
@@ -294,7 +299,7 @@ function parseRequirementsHtml(html: string): ParsedRequirement[] {
     const title = s.title.replace(/^Requirement:\s*/i, "");
     const text = stripTags(s.content);
     const capability = /capability:\s*([a-z0-9-]+)/i.exec(text)?.[1];
-    const delta = /delta:\s*([^\n]+?)(?:\s{2,}|$)/i.exec(text)?.[1]?.trim();
+    const delta = /delta:\s*([^<\n]+)/i.exec(s.content)?.[1]?.trim();
     out.push({
       title,
       ...(capability ? { capability } : {}),
@@ -441,8 +446,9 @@ export function appendChangeHistory(md: string, line: string, format?: SpecForma
   return `${before}\n${item}\n${after.startsWith("\n") ? after.slice(1) : after}`;
 }
 
-/** Escape a text run for safe insertion into an HTML change-history `<li>`. */
-function escapeHtml(s: string): string {
+/** Escape a text run for safe insertion into HTML text content (e.g. a change-history `<li>` or a
+ *  generated `<h1>`), so an author-supplied value can't inject tags or break out of its element. */
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 

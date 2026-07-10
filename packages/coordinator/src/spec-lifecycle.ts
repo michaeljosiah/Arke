@@ -154,15 +154,42 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Strip the `· delta: …` token from an HTML requirement's metadata, preserving the surrounding tags.
- *  Handles the template's `<p class="meta">capability: x · delta: ADDED (b)</p>` form (token runs to the
- *  next `<`), plus a `<code>delta: …</code>` form (drop the whole element). Idempotent. */
+/** Strip the `· delta: <KIND> …` token from an HTML requirement's metadata, preserving the surrounding
+ *  tags. Handles the template's `<p class="meta">capability: x · delta: ADDED (b)</p>` form (token runs to
+ *  the next `<`), plus a `<code>delta: …</code>` form (drop the whole element). The `delta:` must be
+ *  immediately followed by a known delta KIND, so prose that legitimately reads "…the delta: old minus new"
+ *  is left untouched. Idempotent. */
+const DELTA_KIND = "ADDED|MODIFIED|REMOVED|RENAMED";
 function stripHtmlDeltaToken(block: string): string {
   return block
-    // `<code>delta: …</code>` (with an optional leading ` · `) → gone, element and all.
-    .replace(/\s*(?:·|&middot;|&#183;)?\s*<code\b[^>]*>\s*delta:\s*[^<]*<\/code>/gi, "")
+    // `<code>delta: KIND …</code>` (with an optional leading ` · `) → gone, element and all.
+    .replace(new RegExp(`\\s*(?:·|&middot;|&#183;)?\\s*<code\\b[^>]*>\\s*delta:\\s*(?:${DELTA_KIND})\\b[^<]*<\\/code>`, "gi"), "")
     // inline text form: ` · delta: ADDED (b)` up to the next tag/newline (keeps `capability: x` and `</p>`).
-    .replace(/\s*(?:·|&middot;|&#183;)?\s*`?delta:\s*[^<\n`]*`?/gi, "");
+    .replace(new RegExp(`\\s*(?:·|&middot;|&#183;)?\\s*\`?delta:\\s*(?:${DELTA_KIND})\\b[^<\\n\`]*\`?`, "gi"), "");
+}
+
+/**
+ * Insert REMOVED `<li>` tombstones into (or create) the `<h2>Removed</h2>` section (SPEC-036). Robust to a
+ * pre-existing Removed section that has intervening content (a `<p>` intro) before its `<ul>`, or no list at
+ * all — earlier code required a `<ul>` immediately after the heading and would SILENTLY DROP the tombstones
+ * (data loss) when that shape didn't hold.
+ */
+function insertTombstonesHtml(html: string, tombstones: string[]): string {
+  const head = /<h2\b[^>]*>\s*Removed\s*<\/h2>/i.exec(html);
+  if (!head) {
+    return html.replace(/\s*$/, "") + `\n\n<h2>Removed</h2>\n<ul>\n${tombstones.join("\n")}\n</ul>\n`;
+  }
+  // The section spans from the heading to the next <h2> (or EOF). Insert before the last </ul> INSIDE it;
+  // if the section has no list, append a fresh <ul> at the end of the section.
+  const secStart = head.index + head[0].length;
+  const nextH2 = /<h2\b/i.exec(html.slice(secStart));
+  const secEnd = nextH2 ? secStart + nextH2.index : html.length;
+  const ulClose = html.slice(secStart, secEnd).lastIndexOf("</ul>");
+  if (ulClose !== -1) {
+    const at = secStart + ulClose;
+    return html.slice(0, at) + tombstones.join("\n") + "\n" + html.slice(at);
+  }
+  return html.slice(0, secEnd).replace(/\s*$/, "") + `\n<ul>\n${tombstones.join("\n")}\n</ul>\n` + html.slice(secEnd);
 }
 
 /**
@@ -195,13 +222,15 @@ function flattenDeltaTagsHtml(md: string, branch: string, date: string): Flatten
     out += md.slice(cursor, h.start); // verbatim: everything before this requirement block
     const block = md.slice(h.start, blockEnd);
     const name = h.title.replace(/^Requirement:\s*/i, "").trim();
-    const stripped = stripTags(block);
-    const delta = /delta:\s*([A-Za-z]+[^\n]*)/i.exec(stripped)?.[1]?.trim() ?? "";
+    // Read the delta VALUE from the RAW block bounded by the next tag/newline (`[^<\n]`), NOT from the
+    // whitespace-collapsed stripTags output — the metadata lives in its own element (`<p class="meta">…`),
+    // so bounding at `<` keeps `Reason:`/`from:` from over-running into the requirement prose that follows.
+    const delta = /delta:\s*([^<\n]+)/i.exec(block)?.[1]?.trim() ?? "";
 
     if (/^REMOVED\b/i.test(delta)) {
       summary.removed++;
-      const capability = /capability:\s*([a-z0-9-]+)/i.exec(stripped)?.[1] ?? "unknown";
-      const reason = /Reason:\s*([^·\n]+)/i.exec(delta)?.[1]?.trim() ?? "see Change history";
+      const capability = /capability:\s*([a-z0-9-]+)/i.exec(block)?.[1] ?? "unknown";
+      const reason = /Reason:\s*([^·)<\n]+)/i.exec(delta)?.[1]?.trim() ?? "see Change history";
       if (!new RegExp(`REMOVED\\s+${escapeRe(capability)}/${escapeRe(name)}\\b`).test(md)) {
         tombstones.push(`  <li>REMOVED ${capability}/${name} — Reason: ${reason} · Migration: see Change history</li>`);
       }
@@ -210,7 +239,7 @@ function flattenDeltaTagsHtml(md: string, branch: string, date: string): Flatten
     }
     if (/^RENAMED\b/i.test(delta)) {
       summary.renamed++;
-      const from = /from:\s*([^)\n]+?)\s*\)?\s*$/i.exec(delta)?.[1]?.trim() ?? "?";
+      const from = /from:\s*([^)<\n]+)/i.exec(delta)?.[1]?.trim() ?? "?";
       renameNotes.push(`RENAMED ${from} → ${name}`);
     } else if (/^ADDED\b/i.test(delta)) summary.added++;
     else if (/^MODIFIED\b/i.test(delta)) summary.modified++;
@@ -220,15 +249,7 @@ function flattenDeltaTagsHtml(md: string, branch: string, date: string): Flatten
   out += md.slice(cursor);
 
   let result = out;
-  if (tombstones.length) {
-    if (!/<h2\b[^>]*>\s*Removed\s*<\/h2>/i.test(result)) result = result.replace(/\s*$/, "") + "\n\n<h2>Removed</h2>\n<ul>\n</ul>\n";
-    // Insert the tombstone <li>s just before the closing </ul> of the Removed section.
-    const sec = /(<h2\b[^>]*>\s*Removed\s*<\/h2>\s*<ul\b[^>]*>)([\s\S]*?)(<\/ul>)/i.exec(result);
-    if (sec) {
-      const insertAt = sec.index + sec[1]!.length + sec[2]!.length;
-      result = result.slice(0, insertAt) + tombstones.join("\n") + "\n" + result.slice(insertAt);
-    }
-  }
+  if (tombstones.length) result = insertTombstonesHtml(result, tombstones);
 
   const parts: string[] = [];
   if (summary.added) parts.push(`ADDED: ${summary.added}`);

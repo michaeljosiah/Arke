@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { ProjectContext } from "../src/project-context.js";
+import { ProjectContext, renderBlankSpecHtml } from "../src/project-context.js";
+import { parseFrontmatter } from "@arke/contracts";
 import { MockAdapter } from "../src/mock-adapter.js";
 import { Trace } from "../src/trace.js";
 import { GrantStore } from "../src/grant-store.js";
@@ -88,6 +89,29 @@ test("the numbering scan spans .html so a new spec never lands on an existing HT
   after(() => ctx.stop());
   const res = (await ctx.dispatch("spec.create", { title: "Clash" })) as any;
   assert.match(res.path, /002\.clash\.md$/, "numbering scan spans .html so the next number skips past it");
+});
+
+test("renderBlankSpecHtml neutralises a hostile title: escaped <h1>, intact frontmatter comment", () => {
+  // Author-supplied title must not break out of its HTML contexts (security review Finding 2): the `<h1>` is
+  // HTML-escaped so `<h2>`/`<script>` can't inject; the frontmatter comment survives a literal `-->`.
+  const html = renderBlankSpecHtml({
+    specId: "SPEC-X",
+    title: `Evil --> <h2>Injected</h2> <script>x()</script>`,
+    branch: "spec/evil",
+    date: "2026-07-10",
+  });
+  // The <h1> shows escaped text, not real tags (escapeHtml escapes `>` only, so `-->` → `--&gt;`).
+  assert.match(html, /<h1>Evil --&gt; &lt;h2&gt;Injected&lt;\/h2&gt; &lt;script&gt;x\(\)&lt;\/script&gt;<\/h1>/);
+  // The frontmatter comment is not closed early by the title's `-->` — parseFrontmatter reads the full block,
+  // so any `<h2>`/`<script>` text in the title stays INSIDE the (inert) comment as YAML string data.
+  const { data, body } = parseFrontmatter(html);
+  assert.equal(data.spec_id, "SPEC-X");
+  assert.equal(data.status, "draft");
+  assert.doesNotMatch(data.title ?? "", /-->/, "the frontmatter title's `-->` is neutralised");
+  // The BODY (what actually renders) carries no injected real tags — only the escaped <h1>.
+  assert.ok(body.trimStart().startsWith("<h1>"), "body begins at the <h1>, i.e. the comment closed correctly");
+  assert.doesNotMatch(body, /<h2>Injected<\/h2>/, "no real <h2> injected into the body via the title");
+  assert.doesNotMatch(body, /<script>x\(\)/, "no real <script> injected into the body via the title");
 });
 
 test("spec.deliver on an HTML spec is refused with a typed error (v1)", async () => {

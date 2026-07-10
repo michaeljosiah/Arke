@@ -6,6 +6,7 @@ import {
   DomainEvent,
   SpecStatus,
   appendChangeHistory,
+  escapeHtml,
   parseFrontmatter,
   parseLinkage,
   parseSpecDoc,
@@ -3750,10 +3751,15 @@ updated: ${date}
  *  in a leading `<!--arke -->` comment, with the same anatomy (`<h2>`/`<h3>`) the markdown template uses. */
 export function renderBlankSpecHtml(seed: { specId: string; title: string; branch: string; date: string }): string {
   const { specId, title, branch, date } = seed;
+  // SPEC-036: the title is author-supplied, so it must not break out of its HTML contexts. For the
+  // frontmatter comment it is neutralised (a literal `-->` would close the `<!--arke -->` block early, and
+  // newlines would break the YAML scalar); for the <h1> it is HTML-escaped (a `<h2>` would inject fake
+  // anatomy). Not a script/XSS vector (the body is re-sanitised before render), but a content-integrity one.
+  const commentTitle = title.replace(/--+>/g, "->").replace(/[\r\n]+/g, " ").trim();
   return `<!--arke
 ---
 spec_id: ${specId}
-title: ${title}
+title: ${commentTitle}
 status: draft
 branch: ${branch}
 owner: core-maintainers
@@ -3763,7 +3769,7 @@ created: ${date}
 updated: ${date}
 ---
 -->
-<h1>${title}</h1>
+<h1>${escapeHtml(title)}</h1>
 
 <h2>Why</h2>
 

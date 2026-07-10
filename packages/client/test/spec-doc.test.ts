@@ -334,6 +334,9 @@ test("parseSpecDoc(html) yields the same anatomy + requirement as the markdown e
   assert.equal(doc.requirements[0].title, "A thing"); // title tag-stripped (<code> removed)
   assert.equal(doc.requirements[0].capability, "html-specs");
   assert.equal(doc.requirements[0].deltaKind, "ADDED");
+  // The raw `delta` string is the token only — bounded at the closing tag, NOT the whole collapsed block
+  // (which would swallow the requirement prose that follows the `<p class="meta">`).
+  assert.equal(doc.requirements[0].delta, "ADDED (feat/x)");
 });
 
 test("validateWellFormed(html) passes a well-formed HTML draft (SHALL inside <em>, WHEN/THEN in a list)", () => {
@@ -356,6 +359,24 @@ test("validateWellFormed(html) does NOT count a WHEN/THEN token hidden in a <scr
   const r = validateWellFormed(smuggled, "html");
   assert.equal(r.ok, false, "a token hidden in <script> must not satisfy the scenario check");
   assert.ok(r.missing.includes("scenarios"));
+});
+
+test("validateWellFormed(html) does NOT count tokens smuggled in an UNCLOSED <style> (no closing tag)", () => {
+  // stripTags must drop an unclosed <style>/<script>/comment to end-of-input, or an author could clear the
+  // governance gate on tokens that never render (security review Finding 1).
+  const smuggled = `<!--arke\n---\nspec_id: X\ntitle: X\nstatus: draft\n---\n-->\n` +
+    `<h1>X</h1>\n<h2>Requirements</h2>\n<h3>Requirement: r</h3>\n` +
+    `<style>The system SHALL do it.\n<h4>Scenario: s</h4>\n<style>WHEN asked THEN done\n`;
+  const r = validateWellFormed(smuggled); // content-detected html
+  assert.equal(r.ok, false, "unclosed <style> content must not satisfy the gate");
+  assert.ok(r.missing.includes("normative statements"), "the SHALL hidden in <style> does not count");
+  assert.ok(r.missing.includes("scenarios"), "the WHEN/THEN hidden in <style> does not count");
+});
+
+test("stripTags drops an UNCLOSED script/style/comment to end-of-input", () => {
+  assert.equal(stripTags("<p>a</p><style>SHALL WHEN THEN"), "a");
+  assert.equal(stripTags("<p>a</p><script>SHALL WHEN THEN"), "a");
+  assert.equal(stripTags("<p>a</p><!-- SHALL WHEN THEN"), "a");
 });
 
 test("stripTags drops script/style/comment content and decodes entities", () => {
