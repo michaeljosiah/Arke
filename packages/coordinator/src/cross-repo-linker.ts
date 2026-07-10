@@ -1,4 +1,3 @@
-import { gitRepoIdentity } from "./git-status.js";
 import type { ProjectContext } from "./project-context.js";
 
 /**
@@ -8,18 +7,22 @@ import type { ProjectContext } from "./project-context.js";
  * against a project whose `origin` remote is any URL form ending in `acme/widgets(.git)`.
  */
 export function normalizeRepoSlug(ref: string): string {
-  const m = ref.trim().replace(/\.git$/i, "").match(/([^/:]+\/[^/]+?)$/);
-  return (m?.[1] ?? ref.trim()).toLowerCase();
+  const trimmed = ref.trim().replace(/\/+$/, "").replace(/\.git$/i, ""); // drop a trailing slash then a .git suffix
+  const m = trimmed.match(/([^/:]+\/[^/]+?)$/);
+  return (m?.[1] ?? trimmed).toLowerCase();
 }
 
 /** The narrow, whitelisted surface the linker invokes on a TARGET project context — each executed by that
  *  context on its OWN files/trace (SPEC-018 isolation; a context never reaches into a peer's filesystem). */
 export interface RippleTarget {
   readonly projectId: string;
-  /** (Re)generate the read-only pointer stub for a canonical spec into this project; idempotent + traced. */
-  writePointerStub(ref: CanonicalRef): { ok: boolean; path?: string; changed?: boolean; reason?: string };
-  /** Mark this project's ripples of `ref` stale (a canonical change happened); returns how many were marked. */
-  markRipplesStaleFor(ref: CanonicalRef, trigger: string): Promise<number>;
+  /** (Re)generate the read-only pointer stub for a canonical spec into this project; idempotent, root-confined,
+   *  refuses to clobber a non-generated file, fail-closed audit, traced. */
+  writePointerStub(ref: CanonicalRef): Promise<{ ok: boolean; path?: string; changed?: boolean; reason?: string }>;
+  /** Mark this project's ONE ripple `targetSpecId` of `ref` stale (a canonical change happened); true if marked. */
+  markRippleStale(ref: CanonicalRef, targetSpecId: string, kind: "delta" | "pointer", trigger: string): Promise<boolean>;
+  /** True when `specId` is a currently-stale ripple in this project (a cross-context state read, no file IO). */
+  hasStaleRipple(specId: string): boolean;
 }
 
 /** A reference to a canonical spec, carried across contexts by value (never a live object). */
@@ -91,17 +94,23 @@ copy. See the canonical specification in \`${ref.repo}\` for the full requiremen
 export class CrossRepoLinker {
   constructor(private readonly contexts: () => Iterable<ProjectContext>) {}
 
-  /** The registered context whose `origin` remote resolves to `repo`, or null (unresolved → inert). */
+  /**
+   * The registered context whose `origin` remote resolves to `repo`, or null (unresolved → inert). If more
+   * than one open project normalizes to the same `org/repo` slug (the same repo cloned twice, or a genuine
+   * cross-host collision), resolution is AMBIGUOUS and returns null — refusing to write the stub / cascade to
+   * an arbitrarily-picked wrong target. Uses each context's cached slug (no git spawn on the hot path).
+   */
   resolve(repo: string): ProjectContext | null {
     const want = normalizeRepoSlug(repo);
+    const matches: ProjectContext[] = [];
     for (const ctx of this.contexts()) {
       try {
-        if (normalizeRepoSlug(gitRepoIdentity(ctx.root).name) === want) return ctx;
+        if (ctx.cachedRepoSlug() === want) matches.push(ctx);
       } catch {
         /* a context whose git identity can't be read is skipped, not fatal */
       }
     }
-    return null;
+    return matches.length === 1 ? matches[0]! : null; // 0 = unresolved, >1 = ambiguous → both inert
   }
 
   /** The registered `projectId` for `repo`, or null when unresolved. */

@@ -173,3 +173,43 @@ test("spec.ripple.ack refuses a spec that is not a currently-stale ripple", asyn
   const { B } = world();
   await assert.rejects(() => Promise.resolve(B.dispatch("spec.ripple.ack", { specId: "SPEC-200", reason: "x" })), /not a currently-stale ripple/);
 });
+
+test("spec.ripple.project refuses to overwrite a NON-generated file at the stub path (P1: no clobber)", async () => {
+  const holder: { list: ProjectContext[] } = { list: [] };
+  const linker = new CrossRepoLinker(() => holder.list);
+  const A = ctx(repo("acme/contracts", { "100.retry.md": canonicalSpec() }), "A", linker);
+  // gizmos already has a HAND-AUTHORED spec sitting at the deterministic stub path — it must not be destroyed.
+  const authored = `---\nspec_id: ripple-SPEC-100\ntitle: Hand authored\nstatus: draft\n---\n\n# Local contract\nThe system SHALL keep this.\n`;
+  const cDir = repo("acme/gizmos", { "ripple-SPEC-100.md": authored });
+  const C = ctx(cDir, "C", linker);
+  holder.list = [A, C];
+  after(() => { void A.stop(); void C.stop(); });
+  const res = (await A.dispatch("spec.ripple.project", { specId: "SPEC-100" })) as any;
+  const gizmo = (res.results as any[]).find((r) => r.repo === "acme/gizmos");
+  assert.equal(gizmo.status, "error");
+  assert.match(gizmo.reason, /not a generated pointer stub/);
+  assert.equal(readFileSync(resolve(cDir, "docs", "specifications", "ripple-SPEC-100.md"), "utf8"), authored, "the authored file is untouched");
+});
+
+test("a FORWARD transition does not cascade staleness; only a regression does", async () => {
+  const bEvents: DomainEvent[] = [];
+  const holder: { list: ProjectContext[] } = { list: [] };
+  const linker = new CrossRepoLinker(() => holder.list);
+  const A = ctx(repo("acme/contracts", { "100.retry.md": canonicalSpec("in-review") }), "A", linker);
+  const B = ctx(repo("acme/widgets", { "200.widget.md": rippleSpec }), "B", linker, bEvents);
+  holder.list = [A, B];
+  after(() => { void A.stop(); void B.stop(); });
+  await A.dispatch("spec.transition", { specId: "SPEC-100", to: "approved", actor: "carol" }); // in-review → approved (forward)
+  assert.equal(bEvents.some((e) => e.type === "spec.ripple-stale"), false, "a routine forward move must not mark ripples stale");
+});
+
+test("spec.ripple.ack refuses a generated pointer — it clears only by regeneration", async () => {
+  const holder: { list: ProjectContext[] } = { list: [] };
+  const linker = new CrossRepoLinker(() => holder.list);
+  const A = ctx(repo("acme/contracts", { "100.retry.md": canonicalSpec() }), "A", linker);
+  const C = ctx(repo("acme/gizmos", {}), "C", linker);
+  holder.list = [A, C];
+  after(() => { void A.stop(); void C.stop(); });
+  await A.dispatch("spec.ripple.project", { specId: "SPEC-100" }); // writes ripple-SPEC-100.md into C
+  await assert.rejects(() => Promise.resolve(C.dispatch("spec.ripple.ack", { specId: "ripple-SPEC-100", reason: "x" })), /generated pointer/);
+});
