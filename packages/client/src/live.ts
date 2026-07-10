@@ -154,6 +154,18 @@ function applyEvent(ev: any) {
       if (ev.reason) rail('spec.status', `spec.status · ${ev.specId} · ${ev.status}${ev.reason ? ' (' + ev.reason + ')' : ''}`, ts);
       break;
     }
+    case 'spec.ripple-stale': {
+      // SPEC-030: a cross-repo ripple in THIS project went stale (its canonical materially changed).
+      store.set((s: any) => ({ specs: (s.specs || []).map((sp: any) => sp.specId === ev.specId ? { ...sp, rippleStale: true } : sp) }));
+      rail('spec.ripple-stale', `spec.ripple-stale · ${ev.specId} ← ${ev.canonicalRepo}/${ev.canonicalSpec} · ${ev.trigger}`, ts);
+      break;
+    }
+    case 'spec.ripple-acked': {
+      // SPEC-030: a stale ripple was acknowledged (or its pointer regenerated) — clear it.
+      store.set((s: any) => ({ specs: (s.specs || []).map((sp: any) => sp.specId === ev.specId ? { ...sp, rippleStale: false } : sp) }));
+      rail('spec.ripple-acked', `spec.ripple-acked · ${ev.specId}${ev.reason ? ' · ' + ev.reason : ''}`, ts);
+      break;
+    }
     case 'spec.renamed': {
       // SPEC-020: a blank-slate spec was renamed once titled. Re-key the board card + status, update
       // the library entry, and rebind the active spec so the open cockpit keeps working.
@@ -1021,6 +1033,23 @@ export function sendBackReviewLive(specId: string, actor?: string): Promise<any>
     return Promise.resolve({ ok: false, error: 'offline — reconnect to send back' });
   }
   return liveRequest('sendBackReview', { specId, actor }, 30000);
+}
+
+/** SPEC-030: resolved cross-repo linkage (ripples/canonical + per-ripple resolution/staleness) for one spec. */
+export function specLinksLive(specId: string): Promise<any> {
+  return liveRequest('spec.links', { specId });
+}
+
+/** SPEC-030 (canonical side): (re)generate the pointer stubs this canonical declares into resolved targets. */
+export function projectRipplesLive(specId: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: 'offline — reconnect to sync ripples' });
+  return liveRequest('spec.ripple.project', { specId }, 30000);
+}
+
+/** SPEC-030 (affected side): acknowledge a stale ripple in this project (recorded). */
+export function ackRippleLive(specId: string, reason: string, actor?: string): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: 'offline — reconnect to acknowledge' });
+  return liveRequest('spec.ripple.ack', { specId, reason, actor }, 30000);
 }
 
 export function stopLive(): void {

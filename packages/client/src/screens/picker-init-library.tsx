@@ -4,7 +4,7 @@ import { Button, Input, Card, SpecCard, StatusDot, Tabs, Badge } from '../ds';
 import { Wordmark } from '../shell';
 import { Page, SectionHead } from '../utils';
 import { store, useStore } from '../store';
-import { liveSend, liveRequest, openProjectLive, createSpecLive, refreshHostAgents } from '../live';
+import { liveSend, liveRequest, openProjectLive, createSpecLive, refreshHostAgents, projectRipplesLive, ackRippleLive, refreshSpecs } from '../live';
 import { routeOpenedProject } from '../nav';
 import { HarnessLogo } from '../harness-logos';
 
@@ -491,6 +491,18 @@ export function Library() {
   // Clear activeCard: the cockpit's spec resolution prefers a selected board card over activeSpec, so
   // a stale card from a prior board interaction would otherwise shadow the spec the user just clicked.
   const open = (s) => store.set({ activeSpec: s.specId, activeCard: null, view: s.status === 'draft' || s.status === 'in-review' ? 'cockpit' : 'board' });
+  // SPEC-030: (re)generate this canonical's pointer stubs into resolved targets, then refresh the library.
+  const syncRipples = async (specId: string) => {
+    const res = await projectRipplesLive(specId);
+    const written = res?.result?.results?.filter((r: any) => r.status === 'written').length ?? 0;
+    store.set((st: any) => ({ cockpit: { ...st.cockpit, notice: res?.ok === false ? `sync failed — ${res.error}` : `synced ${written} pointer stub${written === 1 ? '' : 's'}` } }));
+  };
+  // SPEC-030: acknowledge a stale ripple in this project (records a "no local impact"/reviewed decision).
+  const ackRipple = async (specId: string) => {
+    const res = await ackRippleLive(specId, 'reviewed — no local contract impact');
+    if (res?.ok === false) store.set((st: any) => ({ cockpit: { ...st.cockpit, notice: `acknowledge failed — ${res.error || res.result?.error}` } }));
+    else void refreshSpecs();
+  };
 
   if (specs.length === 0) {
     return e('div', { style: { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 } },
@@ -521,6 +533,9 @@ export function Library() {
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 500, color: 'var(--foreground)' } }, 'No specifications match'),
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 4 } }, q ? 'Try a different search.' : 'No specifications in this state.'))
       : e('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))', gap: 14 } },
-          filtered.map((s) => e(SpecCard, { key: s.specId, specId: s.specId, title: s.title, status: s.status, warn: s.hasDivergence, meta: ((s.capabilities && s.capabilities.length ? s.capabilities.join(', ') + ' · ' : '') + (s.updatedAt || s.updated || '')) || s.branch, onClick: () => open(s) }))),
+          filtered.map((s) => e(SpecCard, { key: s.specId, specId: s.specId, title: s.title, status: s.status, warn: s.hasDivergence, meta: ((s.capabilities && s.capabilities.length ? s.capabilities.join(', ') + ' · ' : '') + (s.updatedAt || s.updated || '')) || s.branch, onClick: () => open(s),
+            // SPEC-030: cross-repo linkage + staleness + affordances (regenerate pointer stubs / acknowledge).
+            ripples: s.ripples, canonical: s.canonical, rippleStale: s.rippleStale,
+            onSyncRipples: () => syncRipples(s.specId), onAckRipple: () => ackRipple(s.specId) }))),
   );
 }
