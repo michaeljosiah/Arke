@@ -126,3 +126,51 @@ test("isBundleDoc excludes index/README/templates but includes ordinary docs", (
   assert.equal(isBundleDoc("thing.template.md"), false);
   assert.equal(isBundleDoc("logo.png"), false);
 });
+
+test("isBundleDoc includes .html/.htm docs (SPEC-036)", () => {
+  assert.equal(isBundleDoc("PRD-Arke.html"), true);
+  assert.equal(isBundleDoc("report.htm"), true);
+  assert.equal(isBundleDoc("notes.markdown"), true);
+});
+
+test("bundleEntryFromFile takes an HTML doc's title from <title>, never mining the raw body (SPEC-036)", () => {
+  // A Claude.ai artifact export: no arke frontmatter, a <title>, inline CSS, and an EXTERNAL <script>.
+  const artifact =
+    `<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n` +
+    `<title>Arke · Foundation &amp; Delivery</title>\n` +
+    `<style>:root{--bg:#fff} body{margin:0}</style>\n` +
+    `<script src="https://claude.ai/some/external/bundle.js"></script>\n</head>\n` +
+    `<body><h1>Delivery</h1><p>Prose.</p></body></html>\n`;
+  const e = bundleEntryFromFile("delivery-report.html", artifact);
+  assert.equal(e.parseState, "ok");
+  if (e.parseState !== "ok") return;
+  assert.equal(e.type, "convention"); // no spec_id
+  assert.equal(e.title, "Arke · Foundation & Delivery"); // entities decoded, tags stripped
+  assert.equal(e.description, undefined); // no lede-mining → nothing dumped
+  // The row this produces must not leak CSS, tags, or the external script URL.
+  const md = renderBundleIndex("reports", [e]);
+  assert.doesNotMatch(md, /claude\.ai/, "no external script URL leaks into the index");
+  assert.doesNotMatch(md, /<style|<script|DOCTYPE|--bg/, "no raw markup leaks into the index");
+});
+
+test("bundleEntryFromFile falls back to <h1> then filename for an HTML doc with no <title> (SPEC-036)", () => {
+  const noTitle = `<!DOCTYPE html>\n<html><body><h1>The <em>Governance</em> Contract</h1><p>x</p></body></html>\n`;
+  const e = bundleEntryFromFile("governance.html", noTitle);
+  if (e.parseState === "ok") assert.equal(e.title, "The Governance Contract");
+  const bare = `<!DOCTYPE html>\n<html><body><p>no headings at all</p></body></html>\n`;
+  const e2 = bundleEntryFromFile("bare-doc.html", bare);
+  if (e2.parseState === "ok") assert.equal(e2.title, "bare-doc");
+});
+
+test("bundleEntryFromFile honours arke frontmatter on an HTML doc (title + description) (SPEC-036)", () => {
+  // An arke-authored HTML convention doc: leading <!--arke --> comment carries real frontmatter.
+  const arkeHtml =
+    `<!--arke\n---\ntype: convention\ntitle: Lifecycle Contract\ndescription: The governance model.\n---\n-->\n` +
+    `<h1>Lifecycle</h1>\n<p>body</p>\n`;
+  const e = bundleEntryFromFile("lifecycle.html", arkeHtml);
+  assert.equal(e.parseState, "ok");
+  if (e.parseState !== "ok") return;
+  assert.equal(e.type, "convention");
+  assert.equal(e.title, "Lifecycle Contract"); // frontmatter wins over any <title>/<h1>
+  assert.equal(e.description, "The governance model.");
+});

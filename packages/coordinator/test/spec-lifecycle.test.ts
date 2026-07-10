@@ -113,6 +113,107 @@ test("flatten does not duplicate a tombstone on re-run", () => {
   assert.equal((twice.text.match(/> REMOVED alpha\/A thing/g) ?? []).length, 1, "single tombstone");
 });
 
+// ---- flatten (HTML, SPEC-036) ----
+// An HTML spec's delta tokens live in `<p class="meta">` and its requirements are `<h3>`-delimited; the
+// format-dispatched flatten must strip/tombstone them exactly as the markdown path does. Reachable via the
+// webhook `merged` transition (not just spec.deliver, which is refused for HTML).
+function htmlDoc(reqDelta?: string): string {
+  return `<!--arke
+---
+spec_id: SPEC-X
+title: X
+status: approved
+branch: ${BRANCH}
+owner: dana
+capabilities: [alpha, beta]
+---
+-->
+<h1>X</h1>
+<h2>Requirements</h2>
+<h3>Requirement: A thing</h3>
+<p class="meta">capability: alpha${reqDelta ? ` · delta: ${reqDelta}` : ""}</p>
+<p>The system SHALL do a thing.</p>
+<h2>Design</h2>
+<p>The design is simple.</p>
+<h2>Change history</h2>
+<ul>
+  <li>2026-06-01 · ${BRANCH} · draft — ADDED x</li>
+</ul>
+`;
+}
+
+test("flatten(HTML) drops an ADDED delta token, keeps the body + tags, appends an <li> history entry", () => {
+  const r = flattenDeltaTags(htmlDoc("ADDED (feat/x)"), BRANCH, "2026-07-01");
+  assert.equal(r.changed, true);
+  assert.equal(r.summary.added, 1);
+  assert.ok(!/delta:/i.test(r.text), "no delta token remains");
+  assert.ok(/capability: alpha<\/p>/.test(r.text), "capability + closing tag preserved, token excised");
+  assert.ok(/<h3>Requirement: A thing<\/h3>/.test(r.text), "requirement heading kept");
+  assert.ok(/The system SHALL do a thing/.test(r.text), "body retained");
+  assert.ok(/<li>2026-07-01 · feat\/x · approved — ADDED: 1<\/li>/.test(r.text), "history <li> appended");
+});
+
+test("flatten(HTML) cuts a REMOVED requirement and tombstones it under <h2>Removed</h2>", () => {
+  const r = flattenDeltaTags(htmlDoc("REMOVED (Reason: obsolete)"), BRANCH, "2026-07-01");
+  assert.equal(r.summary.removed, 1);
+  assert.ok(!/<h3>Requirement: A thing<\/h3>/.test(r.text), "requirement block cut");
+  assert.ok(/<h2>Removed<\/h2>/.test(r.text), "Removed section created");
+  // The Reason must be exactly "obsolete" — NOT polluted with the requirement's trailing prose (the reason
+  // regex must stop at the `)`, not run to the tombstone's own ` · Migration` separator).
+  assert.ok(
+    /<li>REMOVED alpha\/A thing — Reason: obsolete · Migration: see Change history<\/li>/.test(r.text),
+    "tombstone Reason is clean, not polluted by prose",
+  );
+  assert.ok(!/Reason: obsolete\) The system SHALL/.test(r.text), "requirement prose did NOT leak into the reason");
+});
+
+test("flatten(HTML) preserves the from-name of a RENAMED requirement", () => {
+  const r = flattenDeltaTags(htmlDoc("RENAMED (from: Old name)"), BRANCH, "2026-07-01");
+  assert.equal(r.summary.renamed, 1);
+  assert.ok(/<h3>Requirement: A thing<\/h3>/.test(r.text), "heading kept (the new name)");
+  assert.ok(!/delta:/i.test(r.text), "delta token stripped");
+  assert.ok(/RENAMED Old name → A thing/.test(r.text), "the old name is preserved in the change history");
+  assert.ok(!/RENAMED \? →/.test(r.text), "the from-name was NOT lost");
+});
+
+test("flatten(HTML) appends a tombstone into a pre-existing Removed section that has an intro before its <ul>", () => {
+  // The <h2>Removed> section already exists with a <p> intro BEFORE its <ul> — the insert must still land the
+  // tombstone (earlier code required a <ul> immediately after the heading and silently dropped it → data loss).
+  const withRemoved = htmlDoc("REMOVED (Reason: gone)").replace(
+    "<h2>Change history</h2>",
+    "<h2>Removed</h2>\n<p>Requirements removed in this release:</p>\n<ul>\n  <li>REMOVED oldcap/Prior — Reason: x · Migration: see Change history</li>\n</ul>\n<h2>Change history</h2>",
+  );
+  const r = flattenDeltaTags(withRemoved, BRANCH, "2026-07-01");
+  assert.equal(r.summary.removed, 1);
+  assert.ok(/<li>REMOVED alpha\/A thing — Reason: gone/.test(r.text), "the new tombstone is NOT dropped");
+  assert.ok(/<li>REMOVED oldcap\/Prior/.test(r.text), "the pre-existing tombstone is kept");
+  assert.equal((r.text.match(/<h2>Removed<\/h2>/g) ?? []).length, 1, "no duplicate Removed section");
+});
+
+test("flatten(HTML) does not strip prose that merely contains the word 'delta:'", () => {
+  // A requirement whose PROSE says "delta:" (not a real token) must be left intact — no truncation, no
+  // spurious removal — because the token strip requires a known delta KIND after `delta:`.
+  const doc = htmlDoc("ADDED (feat/x)").replace(
+    "<p>The system SHALL do a thing.</p>",
+    "<p>The system SHALL compute the delta: old minus new, then persist it.</p>",
+  );
+  const r = flattenDeltaTags(doc, BRANCH, "2026-07-01");
+  assert.equal(r.summary.added, 1);
+  assert.ok(/compute the delta: old minus new, then persist it\./.test(r.text), "prose 'delta:' left intact");
+  assert.ok(!/delta: ADDED/.test(r.text), "the real metadata delta token is still flattened");
+});
+
+test("flatten(HTML) is a no-op when there are no delta tokens, and does not double-tombstone", () => {
+  const clean = htmlDoc();
+  const noop = flattenDeltaTags(clean, BRANCH, "2026-07-01");
+  assert.equal(noop.changed, false);
+  assert.equal(noop.text, clean, "unchanged input returned verbatim");
+  const once = flattenDeltaTags(htmlDoc("REMOVED (Reason: obsolete)"), BRANCH, "2026-07-01").text;
+  const twice = flattenDeltaTags(once, BRANCH, "2026-07-02");
+  assert.equal(twice.changed, false, "already-flattened HTML is a no-op");
+  assert.equal((twice.text.match(/REMOVED alpha\/A thing/g) ?? []).length, 1, "single tombstone");
+});
+
 // ---- signature ----
 test("verifyGithubSignature accepts a correct HMAC and rejects tampering", () => {
   const secret = "s3cr3t";

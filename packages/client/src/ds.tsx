@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Icon } from './icons';
 import { highlightCode, normalizeLang } from './markdown-theme';
+import { HTML_REHYPE_PLUGINS } from './html-sanitize';
 import { useStore } from './store';
 
 const e = React.createElement;
@@ -257,16 +258,24 @@ function makeMarkdownComponents(isDark: boolean, streaming?: boolean): any {
 }
 
 /**
- * Render untrusted markdown. `mode` tunes prose density (chat vs preview); `streaming` appends a
- * blinking caret at the tail. The ReactMarkdown element is memoised by (text, theme) so re-renders
- * driven by unrelated store updates don't re-parse an unchanged turn.
+ * Render untrusted markdown — or, with `html`, untrusted **HTML** (SPEC-036): the same renderer, but with
+ * `rehype-raw` (parse the embedded HTML) + `rehype-sanitize` against {@link HTML_SPEC_SCHEMA} (strip all
+ * active content) inserted, so an HTML spec's section body renders as sanitised formatted HTML through the
+ * same theming/link/code-block path. `mode` tunes prose density (chat vs preview); `streaming` appends a
+ * blinking caret. Memoised by (text, components, html) so unrelated store updates don't re-parse.
  */
-export const Markdown = React.memo(function Markdown({ text, mode, streaming }: any) {
+export const Markdown = React.memo(function Markdown({ text, mode, streaming, html }: any) {
   const isDark = useStore((s: any) => s.theme === 'dark');
   const components = React.useMemo(() => makeMarkdownComponents(isDark, streaming), [isDark, streaming]);
   const md = React.useMemo(
-    () => e(ReactMarkdown as any, { remarkPlugins: [remarkGfm], urlTransform: (u: string) => safeHref(u) ?? '', components }, text || ''),
-    [text, components],
+    () => e(ReactMarkdown as any, {
+      remarkPlugins: [remarkGfm],
+      // The sanitise pass is the security boundary; safeHref on `a` + urlTransform are defence-in-depth.
+      ...(html ? { rehypePlugins: HTML_REHYPE_PLUGINS } : {}),
+      urlTransform: (u: string) => safeHref(u) ?? '',
+      components,
+    }, text || ''),
+    [text, components, html],
   );
   const cls = 'arke-md' + (mode === 'preview' ? ' arke-md-preview' : '') + (streaming ? ' arke-streaming' : '');
   return e('div', { className: cls }, md);

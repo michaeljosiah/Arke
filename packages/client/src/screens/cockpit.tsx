@@ -1,5 +1,5 @@
 import React from 'react';
-import { parseSpecDoc, SPEC_ANATOMY } from '@arke/contracts';
+import { parseSpecDoc, specFormatOf, SPEC_ANATOMY } from '@arke/contracts';
 import { Icon } from '../icons';
 import { AgentMessage, Button, Textarea, Badge, StatusDot, SplitPane, Markdown } from '../ds';
 import { store, useStore } from '../store';
@@ -32,21 +32,31 @@ function DeltaBadge({ kind }: any) {
   return e('span', { style: { flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', color: st.color, border: `1px solid ${st.color}`, borderRadius: 999, padding: '1px 6px' } }, st.badge);
 }
 
-function RequirementBlock({ req }: any) {
+function RequirementBlock({ req, html }: any) {
   const st = req.deltaKind ? DELTA_STYLE[req.deltaKind] : null;
+  const prose = requirementProse(req.body, html);
   return e('div', { style: { marginBottom: 12, paddingLeft: st?.border ? 10 : 0, borderLeft: st?.border ? `3px solid ${st.border}` : 'none' } },
     e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 } },
       e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)', textDecoration: st?.strike ? 'line-through' : 'none' } }, req.title),
       req.deltaKind ? e(DeltaBadge, { kind: req.deltaKind }) : null,
       req.capability ? e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted-foreground)' } }, req.capability) : null),
-    // Rendered markdown for the prose (SPEC-032); a REMOVED tombstone stays struck-through plain text.
+    // Rendered prose (SPEC-032; SPEC-036 dispatches markdown vs sanitised HTML). A REMOVED tombstone stays
+    // struck-through plain text — and for HTML the tags are stripped so no markup shows in the strike line.
     st?.strike
-      ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--muted-foreground)', textDecoration: 'line-through', whiteSpace: 'pre-wrap' } }, requirementProse(req.body))
-      : e(Markdown, { text: requirementProse(req.body), mode: 'preview' }));
+      ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, lineHeight: 1.55, color: 'var(--muted-foreground)', textDecoration: 'line-through', whiteSpace: 'pre-wrap' } }, html ? stripHtmlToText(prose) : prose)
+      : e(Markdown, { text: prose, mode: 'preview', html }));
 }
 
-/** The requirement prose minus the `capability:`/`delta:` metadata line (shown as a badge instead). */
-function requirementProse(body: string): string {
+/** The requirement prose minus the `capability:`/`delta:` metadata (shown as a badge instead). Markdown
+ *  drops the metadata *line*; HTML (SPEC-036) drops the `<p class="meta">…</p>` (or any `<p>`/`<div>` whose
+ *  text starts `capability:`) so the badge isn't duplicated in the body. */
+function requirementProse(body: string, html?: boolean): string {
+  if (html) {
+    return body
+      .replace(/<(p|div)\b[^>]*class=["'][^"']*\bmeta\b[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi, '')
+      .replace(/<(p|div)\b[^>]*>\s*capability:[\s\S]*?<\/\1>/gi, '')
+      .trim();
+  }
   return body
     .split('\n')
     .filter((l) => !/^\s*`?capability:/.test(l) && !/delta:\s*`?(ADDED|MODIFIED|REMOVED)/i.test(l))
@@ -54,7 +64,12 @@ function requirementProse(body: string): string {
     .trim();
 }
 
-function PreviewSection({ section, requirements }: any) {
+/** Strip HTML tags to visible text (for the struck-through REMOVED tombstone line, where we can't render). */
+function stripHtmlToText(html: string): string {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function PreviewSection({ section, requirements, html }: any) {
   if (!section.present) {
     return e('div', { style: { marginBottom: 22 } },
       e('h3', { style: { margin: '0 0 6px', fontFamily: 'var(--font-sans)', fontSize: 14.5, fontWeight: 600, color: 'var(--foreground)' } }, section.title),
@@ -63,11 +78,11 @@ function PreviewSection({ section, requirements }: any) {
   return e('div', { style: { marginBottom: 22 } },
     e('h3', { style: { margin: '0 0 8px', fontFamily: 'var(--font-sans)', fontSize: 14.5, fontWeight: 600, color: 'var(--foreground)' } }, section.title),
     section.key === 'requirements'
-      ? (requirements.length ? requirements.map((r, i) => e(RequirementBlock, { key: i, req: r })) : e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--neutral-400)' } }, 'no requirements yet'))
-      : e(Markdown, { text: section.markdown || '', mode: 'preview' }));
+      ? (requirements.length ? requirements.map((r, i) => e(RequirementBlock, { key: i, req: r, html })) : e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--neutral-400)' } }, 'no requirements yet'))
+      : e(Markdown, { text: section.markdown || '', mode: 'preview', html }));
 }
 
-function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving, reviewed }: any) {
+function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving, reviewed, html }: any) {
   const fm = doc?.frontmatter ?? {};
   const chip = (t: string, v?: string) => v ? e('span', { key: t, style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)' } }, `${t}: ${v}`) : null;
   // SPEC-032: render the spec as formatted markdown by default; a persisted toggle switches to a raw,
@@ -99,7 +114,7 @@ function LivePreview({ file, doc, inFlight, refreshed, onApprove, approving, rev
         ? e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--muted-foreground)' } }, 'No working specification file found for this spec on the active project.')
         : mode === 'raw'
           ? e('pre', { style: { margin: 0, padding: '18px 20px', fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.6, color: 'var(--foreground)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', userSelect: 'text' } }, file.text || '')
-          : (doc?.sections ?? []).map((sec, i) => e(PreviewSection, { key: i, section: sec, requirements: doc.requirements }))),
+          : (doc?.sections ?? []).map((sec, i) => e(PreviewSection, { key: i, section: sec, requirements: doc.requirements, html }))),
   );
 }
 
@@ -260,7 +275,10 @@ function LiveCockpit() {
     return () => clearInterval(iv);
   }, [refresh]);
 
-  const doc = React.useMemo(() => (file?.text ? parseSpecDoc(file.text) : null), [file?.text]);
+  // SPEC-036: dispatch the parse (and, below, the preview render) on the spec's format, derived from the
+  // file path. `parseSpecDoc` also content-detects, but passing the explicit format keeps it unambiguous.
+  const fmt = React.useMemo(() => specFormatOf(file?.path ?? ''), [file?.path]);
+  const doc = React.useMemo(() => (file?.text ? parseSpecDoc(file.text, fmt) : null), [file?.text, fmt]);
 
   // Merge live transcript entries into the ordered conversation as they arrive/update — appended
   // after the human turn that prompted them, so the chat stays chronological. Each agent turn keeps
@@ -466,7 +484,7 @@ function LiveCockpit() {
               } },
               sending ? e('span', { style: { width: 13, height: 13, borderRadius: 999, border: '2px solid color-mix(in srgb, currentColor 30%, transparent)', borderTopColor: 'currentColor', display: 'inline-block', animation: 'arkeSpinner 0.7s linear infinite' } }) : e(Icon, { name: 'arrowUp', size: 15 }))))),
     ),
-    right: e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId) }),
+    right: e(LivePreview, { file, doc, inFlight, refreshed, approving, onApprove: approve, reviewed: !!specId && (reviewedSpecs || []).includes(specId), html: fmt === 'html' }),
   });
 }
 

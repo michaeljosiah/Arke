@@ -35,6 +35,11 @@ export type GovernanceLevel = z.infer<typeof GovernanceLevel>;
 export const ModelTier = z.enum(["capable", "mid", "fast"]);
 export type ModelTier = z.infer<typeof ModelTier>;
 
+/** The serialisation format of a specification file (SPEC-036): markdown (`.md`) or HTML (`.html`). A single
+ *  spec is one format; the parse pipeline dispatches on it and returns the same logical shape either way. */
+export const SpecFormat = z.enum(["markdown", "html"]);
+export type SpecFormat = z.infer<typeof SpecFormat>;
+
 /** A cross-repo ripple is either a locally-authored `delta` spec or a generated read-only `pointer` stub
  *  (SPEC-030 / ADR-0005). Never a copy. */
 export const RippleKind = z.enum(["delta", "pointer"]);

@@ -1,0 +1,139 @@
+<!--arke
+---
+spec_id: SPEC-2026-07-10-api-rate-limiting
+title: Per-key API rate limiting
+status: in-review
+branch: feat/api-rate-limiting
+owner: <product engineer>
+capabilities: [rate-limiting, api-gateway]
+type: specification
+created: 2026-07-10
+updated: 2026-07-10
+---
+-->
+<!--
+  Reference example of a completed Arke specification authored as HTML (NOT a real Arke feature).
+  It shows the canonical HTML shape end-to-end (SPEC-036): the YAML frontmatter lives in the leading
+  "arke" comment above so the file stays valid, browser-renderable HTML; the anatomy mirrors the markdown
+  template, mapped onto tags — sections are h2 headings, requirements are h3 headings whose text begins
+  "Requirement:", scenarios are h4 headings whose text begins "Scenario:", and each requirement's metadata
+  is a paragraph (class "meta") carrying the capability and delta tokens (read from tag-stripped text, so
+  backticks are not needed). Compare ./user-data-export.md for the markdown equivalent, and
+  ../specification.template.md for the rules. Note: an HTML comment must not contain the two-character
+  close sequence anywhere in its body.
+-->
+<h1>Per-key API rate limiting</h1>
+
+<h2>Why</h2>
+<p>A single noisy API key can exhaust shared capacity and degrade the service for everyone. There is no
+per-key ceiling today, so one integration's burst becomes an outage for the rest. This adds a fair,
+per-key limit at the gateway.</p>
+
+<h2>What changes</h2>
+<ul>
+  <li>ADDED rate-limiting — each API key gets an independent request budget enforced at the gateway.</li>
+  <li>MODIFIED api-gateway — the gateway rejects over-budget requests with <code>429</code> and a
+    <code>Retry-After</code> header <em>(breaking: no — keys under their budget are unaffected)</em>.</li>
+</ul>
+
+<hr>
+
+<h2>Requirements</h2>
+
+<h3>Requirement: Enforce a per-key request budget</h3>
+<p class="meta">capability: rate-limiting · delta: ADDED (feat/api-rate-limiting)</p>
+<p>The system SHALL enforce an independent request budget per API key, and SHALL count only the requests
+made with that key against its own budget — never against another key's.</p>
+
+<h4>Scenario: A key within its budget is served</h4>
+<ul>
+  <li><strong>WHEN</strong> a key makes requests below its configured limit within the window</li>
+  <li><strong>THEN</strong> every request is served normally</li>
+</ul>
+
+<h4>Scenario: A key over its budget is throttled</h4>
+<ul>
+  <li><strong>WHEN</strong> a key exceeds its configured limit within the window</li>
+  <li><strong>THEN</strong> further requests for that key are rejected until the window resets</li>
+  <li><strong>AND</strong> other keys are unaffected</li>
+</ul>
+
+<h3>Requirement: Signal throttling with a <code>429</code> and <code>Retry-After</code></h3>
+<p class="meta">capability: api-gateway · delta: MODIFIED (feat/api-rate-limiting)</p>
+<p>When a request is throttled, the gateway MUST respond with HTTP <code>429 Too Many Requests</code> and
+MUST include a <code>Retry-After</code> header telling the caller when to try again.</p>
+
+<h4>Scenario: A throttled response is actionable</h4>
+<ul>
+  <li><strong>WHEN</strong> the gateway rejects a request for exceeding the budget</li>
+  <li><strong>THEN</strong> the response status is <code>429</code></li>
+  <li><strong>AND</strong> a <code>Retry-After</code> header gives the seconds until the window resets</li>
+</ul>
+
+<hr>
+
+<h2>Design</h2>
+
+<h3>Architectural decision</h3>
+<p>Enforce the limit at the gateway with a fixed-window counter per key held in a shared cache, so the
+budget is checked once, close to the edge, before any request reaches an upstream service.</p>
+
+<h3>Target architecture</h3>
+<p>The gateway resolves the API key, atomically increments that key's counter for the current window in the
+shared cache, and compares it against the key's configured limit. Under budget, the request proceeds; over
+budget, the gateway short-circuits with a <code>429</code>.</p>
+
+<h3>Interfaces and contracts</h3>
+<ul>
+  <li>Cache key: <code>ratelimit:&lt;api-key-id&gt;:&lt;window-start&gt;</code>; value is the count; TTL is the window length.</li>
+  <li>Response headers on every call: <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, and — when throttled — <code>Retry-After</code>.</li>
+</ul>
+
+<h3>Cross-cutting</h3>
+<ul>
+  <li><strong>Security:</strong> the limit is keyed on the authenticated API key id, never on a client-supplied header.</li>
+  <li><strong>Performance:</strong> a single atomic increment per request; the check adds one cache round-trip at the edge.</li>
+</ul>
+
+<hr>
+
+<h2>Tasks</h2>
+<ul>
+  <li>fixed-window counter with per-window TTL in the shared cache</li>
+  <li>gateway middleware: increment, compare, short-circuit on over-budget</li>
+  <li>429 + Retry-After and the X-RateLimit-* headers</li>
+  <li>per-key limit configuration</li>
+</ul>
+
+<h3>Testing</h3>
+<ul>
+  <li>Unit: a key's counter is isolated from other keys; the window resets on TTL expiry.</li>
+  <li>Integration: under-budget served; over-budget 429 with a correct Retry-After.</li>
+  <li>Manual: drive a key past its limit and confirm the 429 + header, and that a second key is unaffected.</li>
+</ul>
+
+<h3>Definition of done</h3>
+<p>All scenarios above pass, checks are green, and a reviewer has signed off.</p>
+
+<hr>
+
+<h2>Decision log</h2>
+<table>
+  <thead>
+    <tr><th scope="col">#</th><th scope="col">Decision</th><th scope="col">Rationale</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1</td><td>Fixed-window counter (not a token bucket) for v1</td><td>Simplest correct enforcement; one atomic increment; a smoother algorithm can replace it behind the same middleware</td></tr>
+    <tr><td>2</td><td>Enforce at the gateway, not per upstream service</td><td>One choke-point close to the edge; upstreams stay unaware of quota</td></tr>
+  </tbody>
+</table>
+
+<h2>Open questions</h2>
+<ul>
+  <li>Should limits be tiered by plan, or is a single default limit enough for v1?</li>
+</ul>
+
+<h2>Change history</h2>
+<ul>
+  <li>2026-07-10 · feat/api-rate-limiting · in-review — ADDED rate-limiting (per-key budget); MODIFIED api-gateway (429 + Retry-After)</li>
+</ul>

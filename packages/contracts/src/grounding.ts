@@ -1,4 +1,4 @@
-import { parseFrontmatter } from "./spec-doc.js";
+import { parseFrontmatter, detectSpecFormat, specFormatOf, stripTags } from "./spec-doc.js";
 
 /**
  * Pure assembly + rendering of the typed grounding digest (SPEC-027). Grounding is a **read-only
@@ -93,14 +93,23 @@ export interface GroundingDocOptions {
 export function groundingDocFromFile(path: string, text: string, opts: GroundingDocOptions = {}): GroundingDoc | null {
   const { data, body } = parseFrontmatter(text);
   if (!isGroundingType(data.type)) return null;
+  // SPEC-036: an HTML grounding doc (a `type: convention|architecture|…` doc authored as `.html`) draws its
+  // title from `<title>`/`<h1>` and its summary from tag-stripped body text — never from raw markup, which
+  // would leak inline CSS/tags into the injected digest. Detected from the path extension or the leading
+  // `<!--arke -->` comment. Markdown docs use the existing `# H1` / first-paragraph rules unchanged.
+  const isHtml = specFormatOf(path) === "html" || detectSpecFormat(text) === "html";
   // Fall through on an EMPTY frontmatter title (a bare `title:`), not just an absent one — `??` would
   // keep the empty string; `.find(truthy)` picks the first non-blank of title → H1 → filename. Then cap
   // it (the title is one unbounded frontmatter line) so a single row can't exceed the total budget.
+  const headingTitle = isHtml ? htmlTitle(text) ?? firstHtmlH1(body) : firstH1(body);
   const title = truncate(
-    [data.title?.trim(), firstH1(body)?.trim(), baseName(path)].find((s): s is string => !!s)!,
+    [data.title?.trim(), headingTitle?.trim(), baseName(path)].find((s): s is string => !!s)!,
     TITLE_BUDGET,
   );
-  const summary = truncate(firstMeaningfulParagraph(body), opts.summaryBudget ?? DEFAULT_SUMMARY_BUDGET);
+  const summary = truncate(
+    isHtml ? firstMeaningfulHtmlText(body) : firstMeaningfulParagraph(body),
+    opts.summaryBudget ?? DEFAULT_SUMMARY_BUDGET,
+  );
   return { type: data.type, title, path, summary };
 }
 
@@ -114,12 +123,38 @@ export function firstMeaningfulParagraph(body: string): string {
   return "";
 }
 
+/** First meaningful text of an HTML body (SPEC-036): the tag-stripped text of the first `<p>` (or, absent
+ *  any `<p>`, the whole tag-stripped body). `stripTags` drops `<script>`/`<style>`/comment CONTENT, so no
+ *  active markup or CSS reaches the digest. */
+function firstMeaningfulHtmlText(body: string): string {
+  for (const m of body.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)) {
+    const t = stripTags(m[1]!);
+    if (t) return t;
+  }
+  return stripTags(body);
+}
+
 function firstH1(body: string): string | undefined {
   return /^#\s+(.+?)\s*$/m.exec(body)?.[1];
 }
 
+/** The `<title>` element's text (SPEC-036), tag-stripped and entity-decoded. */
+function htmlTitle(html: string): string | undefined {
+  const m = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  const t = m ? stripTags(m[1]!) : "";
+  return t || undefined;
+}
+
+/** First `<h1>` text in an HTML body (SPEC-036) — fallback title when there is no `<title>`. */
+function firstHtmlH1(body: string): string | undefined {
+  const m = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(body);
+  const t = m ? stripTags(m[1]!) : "";
+  return t || undefined;
+}
+
 function baseName(path: string): string {
-  return path.replace(/\\/g, "/").split("/").pop()!.replace(/\.md$/, "");
+  // Strip one-or-more trailing known doc extensions so a compound name (`report.html.md`) → `report`.
+  return path.replace(/\\/g, "/").split("/").pop()!.replace(/(?:\.(?:md|markdown|html?))+$/i, "");
 }
 
 /** Truncate to a character budget, appending an ellipsis when it actually cuts (never mid-nothing). */

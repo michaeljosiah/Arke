@@ -3,10 +3,13 @@ import { test } from "node:test";
 import {
   appendChangeHistory,
   deltaKindOf,
+  detectSpecFormat,
   parseFrontmatter,
   parseLinkage,
   parseSpecDoc,
   setFrontmatterStatus,
+  specFormatOf,
+  stripTags,
   validateWellFormed,
 } from "@arke/contracts";
 
@@ -273,4 +276,179 @@ test("parseLinkage tolerates CRLF frontmatter (Windows autocrlf checkout)", () =
   const l = parseLinkage(CANONICAL_DOC.replace(/\n/g, "\r\n"));
   assert.equal(l.ripples.length, 2);
   assert.equal(l.warnings.length, 0);
+});
+
+// ---- SPEC-036 HTML specifications (format-dispatch) ----
+
+const HTML_SPEC = `<!--arke
+---
+spec_id: SPEC-HTML
+title: HTML spec
+status: draft
+branch: feat/x
+owner: t
+canonical:
+  repo: acme/contracts
+  spec: SPEC-100
+---
+-->
+<h1>HTML spec</h1>
+<h2>Why</h2>
+<p>Some motivation.</p>
+<h2>Requirements</h2>
+<h3 id="r1">Requirement: A <code>thing</code></h3>
+<p class="meta">capability: html-specs · delta: ADDED (feat/x)</p>
+<p>The system <em>SHALL</em> do a thing.</p>
+<h4>Scenario: it works</h4>
+<ul><li><strong>WHEN</strong> asked</li><li><strong>THEN</strong> it does</li></ul>
+<h2>Change history</h2>
+<ul><li>2026-07-10 · draft — ADDED</li></ul>
+`;
+
+test("specFormatOf detects html vs markdown by extension", () => {
+  assert.equal(specFormatOf("docs/specifications/042.thing.html"), "html");
+  assert.equal(specFormatOf("042.thing.htm"), "html");
+  assert.equal(specFormatOf("042.thing.md"), "markdown");
+  assert.equal(specFormatOf("042.thing.markdown"), "markdown");
+  assert.equal(specFormatOf("noext"), "markdown");
+});
+
+test("parseFrontmatter content-detects HTML leading-comment frontmatter (no format arg)", () => {
+  const { data, body } = parseFrontmatter(HTML_SPEC);
+  assert.equal(data.spec_id, "SPEC-HTML");
+  assert.equal(data.status, "draft");
+  assert.equal(data.branch, "feat/x");
+  assert.ok(body.trimStart().startsWith("<h1>"), "body starts after the comment");
+});
+
+test("a markdown doc beginning with a stray `<!--arke…` comment is parsed as markdown, not HTML", () => {
+  // The HTML marker is `<!--arke` followed by (optional ws then) a NEWLINE — the template's `<!--arke\n---`
+  // form. A markdown doc whose first line is `<!--arke NOTE …-->` must NOT be mis-detected as HTML and run
+  // through the <h2> section parser (which would find nothing) instead of the markdown `##` parser
+  // (regression review Finding 1: the old `\barke\b` matched any non-word continuation).
+  const md = `<!--arke NOTE: not an html spec -->\n\n## Requirements\n\n### Requirement: r\n\`capability: x\`\nThe system SHALL do it.\n\n#### Scenario: s\n- WHEN a\n- THEN b\n`;
+  assert.equal(detectSpecFormat(md), "markdown", "`<!--arke ` (no following newline) is not the HTML marker");
+  const doc = parseSpecDoc(md); // content-detected
+  assert.ok(doc.sections.find((s) => s.key === "requirements")?.present, "markdown ## Requirements is found");
+  assert.equal(doc.requirements.length, 1, "markdown ### Requirement parsed (not treated as empty HTML)");
+});
+
+test("parseLinkage reads the canonical back-reference from HTML leading-comment frontmatter", () => {
+  const l = parseLinkage(HTML_SPEC);
+  assert.deepEqual(l.canonical, { repo: "acme/contracts", spec: "SPEC-100" });
+});
+
+test("parseSpecDoc(html) yields the same anatomy + requirement as the markdown equivalent", () => {
+  const doc = parseSpecDoc(HTML_SPEC, "html");
+  const byKey = Object.fromEntries(doc.sections.map((s) => [s.key, s]));
+  assert.equal(byKey.requirements.present, true);
+  assert.equal(byKey.why.present, true);
+  assert.equal(doc.requirements.length, 1);
+  assert.equal(doc.requirements[0].title, "A thing"); // title tag-stripped (<code> removed)
+  assert.equal(doc.requirements[0].capability, "html-specs");
+  assert.equal(doc.requirements[0].deltaKind, "ADDED");
+  // The raw `delta` string is the token only — bounded at the closing tag, NOT the whole collapsed block
+  // (which would swallow the requirement prose that follows the `<p class="meta">`).
+  assert.equal(doc.requirements[0].delta, "ADDED (feat/x)");
+});
+
+test("validateWellFormed(html) passes a well-formed HTML draft (SHALL inside <em>, WHEN/THEN in a list)", () => {
+  const r = validateWellFormed(HTML_SPEC, "html");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.missing, []);
+});
+
+test("validateWellFormed(html) flags a missing scenario", () => {
+  const noScenario = HTML_SPEC.replace(/<h4>Scenario:[\s\S]*?<\/ul>/, "");
+  const r = validateWellFormed(noScenario, "html");
+  assert.equal(r.ok, false);
+  assert.ok(r.missing.includes("scenarios"));
+});
+
+test("validateWellFormed(html) does NOT count a WHEN/THEN token hidden in a <script>", () => {
+  // The only WHEN/THEN appear inside a <script> (non-rendered) — the governance gate must not be satisfied.
+  const smuggled = HTML_SPEC
+    .replace(/<h4>Scenario:[\s\S]*?<\/ul>/, "<script>const WHEN = 1, THEN = 2;</script>");
+  const r = validateWellFormed(smuggled, "html");
+  assert.equal(r.ok, false, "a token hidden in <script> must not satisfy the scenario check");
+  assert.ok(r.missing.includes("scenarios"));
+});
+
+test("validateWellFormed(html) does NOT count tokens smuggled in an UNCLOSED <style> (no closing tag)", () => {
+  // stripTags must drop an unclosed <style>/<script>/comment to end-of-input, or an author could clear the
+  // governance gate on tokens that never render (security review Finding 1).
+  const smuggled = `<!--arke\n---\nspec_id: X\ntitle: X\nstatus: draft\n---\n-->\n` +
+    `<h1>X</h1>\n<h2>Requirements</h2>\n<h3>Requirement: r</h3>\n` +
+    `<style>The system SHALL do it.\n<h4>Scenario: s</h4>\n<style>WHEN asked THEN done\n`;
+  const r = validateWellFormed(smuggled); // content-detected html
+  assert.equal(r.ok, false, "unclosed <style> content must not satisfy the gate");
+  assert.ok(r.missing.includes("normative statements"), "the SHALL hidden in <style> does not count");
+  assert.ok(r.missing.includes("scenarios"), "the WHEN/THEN hidden in <style> does not count");
+});
+
+test("stripTags drops an UNCLOSED script/style/comment to end-of-input", () => {
+  assert.equal(stripTags("<p>a</p><style>SHALL WHEN THEN"), "a");
+  assert.equal(stripTags("<p>a</p><script>SHALL WHEN THEN"), "a");
+  assert.equal(stripTags("<p>a</p><!-- SHALL WHEN THEN"), "a");
+});
+
+test("stripTags drops script/style/comment content and decodes entities", () => {
+  assert.equal(stripTags("<p>a <script>secret()</script> b</p>"), "a b");
+  assert.equal(stripTags("<!-- WHEN THEN --><p>x</p>"), "x");
+  assert.equal(stripTags("a &lt;b&gt; &amp; c"), "a <b> & c");
+});
+
+test("parseSpecDoc(html) ignores a heading-like string inside <pre>", () => {
+  const tricky = HTML_SPEC.replace("<p>Some motivation.</p>", "<pre><h2>Requirements</h2> not a real heading</pre>");
+  const doc = parseSpecDoc(tricky, "html");
+  // The <pre>'d "<h2>Requirements</h2>" must not create a second Requirements boundary / drop the Why body.
+  const why = doc.sections.find((s) => s.key === "why");
+  assert.ok(why.markdown.includes("not a real heading"), "the pre block stays under Why");
+  assert.equal(doc.requirements.length, 1, "still exactly one real requirement");
+});
+
+test("parseSpecDoc(html) ignores heading-like tags inside an HTML comment (Requirement 3)", () => {
+  // A guidance comment that names the anatomy in literal tags must NOT become a section boundary — and the
+  // real <h2>Why> heading right after it must still be found (regression for the worked-example comment).
+  const withComment = HTML_SPEC.replace(
+    "<p>Some motivation.</p>",
+    "<!-- sections are <h2>, e.g. <h2>Requirements</h2>, and <h3>Requirement: x</h3> -->\n<p>Some motivation.</p>",
+  );
+  const doc = parseSpecDoc(withComment, "html");
+  assert.ok(doc.sections.find((s) => s.key === "why").present, "the real Why section is still found");
+  assert.equal(doc.requirements.length, 1, "the commented <h3>Requirement: x> is not a real requirement");
+});
+
+test("a markdown spec still parses unchanged when no format is passed", () => {
+  const doc = parseSpecDoc(DOC); // no format arg → markdown default
+  assert.equal(doc.requirements.length, 3);
+  assert.equal(validateWellFormed(WELL_FORMED).ok, true);
+});
+
+test("setFrontmatterStatus rewrites the status inside an HTML leading-comment (body untouched)", () => {
+  const out = setFrontmatterStatus(HTML_SPEC, "in-review");
+  const { data, body } = parseFrontmatter(out);
+  assert.equal(data.status, "in-review");
+  assert.equal(data.branch, "feat/x"); // untouched
+  assert.ok(body.includes("<h2>Requirements</h2>"), "HTML body preserved");
+  assert.ok(out.startsWith("<!--arke"), "still a valid HTML leading comment");
+});
+
+test("appendChangeHistory(html) appends an <li> under <h2>Change history</h2>", () => {
+  const out = appendChangeHistory(HTML_SPEC, "2026-07-10 · in-review — approved", "html");
+  const tail = out.slice(out.indexOf("Change history"));
+  assert.match(tail, /<li>2026-07-10 · in-review — approved<\/li>/);
+  assert.ok(tail.indexOf("ADDED") < tail.indexOf("in-review — approved"), "appended after the existing entry");
+});
+
+test("appendChangeHistory(html) creates the section + list when absent", () => {
+  const noHistory = HTML_SPEC.replace(/<h2>Change history<\/h2>[\s\S]*$/, "");
+  const out = appendChangeHistory(noHistory, "first entry", "html");
+  assert.match(out, /<h2>Change history<\/h2>/);
+  assert.match(out, /<li>first entry<\/li>/);
+});
+
+test("appendChangeHistory(html) escapes angle brackets in the entry", () => {
+  const out = appendChangeHistory(HTML_SPEC, "fixed <foo> & bar", "html");
+  assert.match(out, /<li>fixed &lt;foo&gt; &amp; bar<\/li>/);
 });
