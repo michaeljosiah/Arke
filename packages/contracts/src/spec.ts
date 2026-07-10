@@ -35,6 +35,52 @@ export type GovernanceLevel = z.infer<typeof GovernanceLevel>;
 export const ModelTier = z.enum(["capable", "mid", "fast"]);
 export type ModelTier = z.infer<typeof ModelTier>;
 
+/** A cross-repo ripple is either a locally-authored `delta` spec or a generated read-only `pointer` stub
+ *  (SPEC-030 / ADR-0005). Never a copy. */
+export const RippleKind = z.enum(["delta", "pointer"]);
+export type RippleKind = z.infer<typeof RippleKind>;
+
+/**
+ * A cross-repo ripple declared on a canonical spec (SPEC-030): the affected repo (a portable `org/repo`
+ * git-remote slug), the ripple spec's id (or the literal `generated` for a pointer stub), and whether it
+ * is a locally-authored `delta` or a generated `pointer`. Parsed from the nested `ripples:` frontmatter
+ * block by `parseLinkage` (the flat `parseFrontmatter` cannot read it).
+ */
+export const RippleLink = z.object({
+  repo: z.string(),
+  spec: z.string(),
+  kind: RippleKind,
+});
+export type RippleLink = z.infer<typeof RippleLink>;
+
+/** A ripple spec's machine-readable back-reference to its canonical (SPEC-030). */
+export const CanonicalLink = z.object({
+  repo: z.string(),
+  spec: z.string(),
+});
+export type CanonicalLink = z.infer<typeof CanonicalLink>;
+
+/**
+ * A ripple resolved against the registered projects (SPEC-030): carries the `projectId` when its `repo`
+ * slug matches an open project (`resolved`, actionable), else `unresolved` (an inert reference). `stale`
+ * marks an unreconciled canonical change; `reason` explains an unresolved/warning state.
+ */
+export const ResolvedRipple = RippleLink.extend({
+  projectId: z.string().optional(),
+  status: z.enum(["resolved", "unresolved"]),
+  stale: z.boolean().optional(),
+  reason: z.string().optional(),
+});
+export type ResolvedRipple = z.infer<typeof ResolvedRipple>;
+
+/** A canonical back-reference resolved against the registered projects (SPEC-030). */
+export const ResolvedCanonical = CanonicalLink.extend({
+  projectId: z.string().optional(),
+  status: z.enum(["resolved", "unresolved"]),
+  stale: z.boolean().optional(),
+});
+export type ResolvedCanonical = z.infer<typeof ResolvedCanonical>;
+
 /** Frontmatter block at the head of every specification file. */
 export const SpecFrontmatter = z.object({
   specId: z.string(), // e.g. "SPEC-016"

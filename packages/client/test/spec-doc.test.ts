@@ -4,6 +4,7 @@ import {
   appendChangeHistory,
   deltaKindOf,
   parseFrontmatter,
+  parseLinkage,
   parseSpecDoc,
   setFrontmatterStatus,
   validateWellFormed,
@@ -187,4 +188,89 @@ test("validateWellFormed flags a missing requirements section", () => {
 test("validateWellFormed accepts MUST as a normative statement too", () => {
   const withMust = WELL_FORMED.replace("The system SHALL do a thing.", "The system MUST do a thing.");
   assert.equal(validateWellFormed(withMust).ok, true);
+});
+
+// ---- SPEC-030 cross-repo linkage (parseLinkage) ----
+
+const CANONICAL_DOC = `---
+spec_id: SPEC-100
+title: Contract change
+status: draft
+branch: feat/x
+owner: t
+ripples:
+  - repo: acme/widgets
+    spec: SPEC-2026-01-01-widget-side
+    kind: delta
+  - repo: acme/gizmos
+    spec: generated
+    kind: pointer
+---
+
+# Contract change
+`;
+
+const RIPPLE_DOC = `---
+spec_id: SPEC-2026-01-01-widget-side
+title: Widget side
+status: draft
+branch: feat/y
+owner: t
+canonical:
+  repo: acme/contracts
+  spec: SPEC-100
+---
+
+# Widget side
+`;
+
+test("parseLinkage reads a canonical spec's nested ripples list", () => {
+  const l = parseLinkage(CANONICAL_DOC);
+  assert.equal(l.warnings.length, 0);
+  assert.equal(l.canonical, undefined);
+  assert.deepEqual(l.ripples, [
+    { repo: "acme/widgets", spec: "SPEC-2026-01-01-widget-side", kind: "delta" },
+    { repo: "acme/gizmos", spec: "generated", kind: "pointer" },
+  ]);
+});
+
+test("parseLinkage reads a ripple spec's canonical back-reference", () => {
+  const l = parseLinkage(RIPPLE_DOC);
+  assert.deepEqual(l.canonical, { repo: "acme/contracts", spec: "SPEC-100" });
+  assert.deepEqual(l.ripples, []);
+  assert.equal(l.warnings.length, 0);
+});
+
+test("parseLinkage warns (never throws) on a malformed ripple and drops only that entry", () => {
+  const bad = CANONICAL_DOC.replace("    kind: pointer", "    kind: mirror"); // unknown kind
+  const l = parseLinkage(bad);
+  assert.equal(l.ripples.length, 1); // the good delta ripple survives
+  assert.equal(l.ripples[0]!.repo, "acme/widgets");
+  assert.match(l.warnings.join(" "), /unknown kind 'mirror'/);
+});
+
+test("parseLinkage warns on a ripple missing a required field", () => {
+  const missing = `---
+ripples:
+  - repo: acme/widgets
+    kind: delta
+---
+# x
+`;
+  const l = parseLinkage(missing);
+  assert.equal(l.ripples.length, 0);
+  assert.match(l.warnings.join(" "), /missing repo\/spec\/kind/);
+});
+
+test("parseLinkage on a plain spec yields empty linkage and no warnings", () => {
+  const l = parseLinkage(DOC);
+  assert.deepEqual(l.ripples, []);
+  assert.equal(l.canonical, undefined);
+  assert.equal(l.warnings.length, 0);
+});
+
+test("parseLinkage tolerates CRLF frontmatter (Windows autocrlf checkout)", () => {
+  const l = parseLinkage(CANONICAL_DOC.replace(/\n/g, "\r\n"));
+  assert.equal(l.ripples.length, 2);
+  assert.equal(l.warnings.length, 0);
 });

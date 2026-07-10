@@ -399,16 +399,43 @@ export function KanbanCard({ taskId, title, status, harness, model, needsHuman }
 }
 
 // ---------- SpecCard ----------
-export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
+export function SpecCard({ specId, title, status, meta, onClick, warn, ripples, canonical, rippleStale, linkageWarnings, onSyncRipples, onAckRipple, onFollow }: any) {
   const [hover, setHover] = React.useState(false);
   const TONE = { draft: 'var(--foreground)', 'in-review': 'var(--warning)', approved: 'var(--success)', delivered: 'var(--neutral-400)' };
   const STATUS_LABEL = { draft: 'Draft', 'in-review': 'In review', approved: 'Approved', delivered: 'Delivered' };
+  const stop = (fn: any) => (ev: any) => { ev.stopPropagation(); fn && fn(); };
+  const isPointer = typeof specId === 'string' && specId.startsWith('ripple-'); // a generated pointer stub
+  // SPEC-030: a compact cross-repo linkage footer. Each RESOLVED ripple/canonical is a navigable chip
+  // (following it opens that spec in its own project context); unresolved repos are inert with the reason.
+  const chip = (label: string, tone: string, opts?: { onFollow?: () => void; title?: string }) => e(opts?.onFollow ? 'button' : 'span', {
+    onClick: opts?.onFollow ? stop(opts.onFollow) : undefined, title: opts?.title,
+    style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: tone, border: '1px solid var(--border)', borderRadius: 999, padding: '1px 7px', cursor: opts?.onFollow ? 'pointer' : 'default', background: 'transparent' },
+  }, label);
+  // A pointer ripple's target spec id in the peer is the deterministic stub id derived from THIS canonical.
+  const follow = (r: any) => onFollow && r.status === 'resolved' && onFollow(r.projectId, r.kind === 'pointer' ? 'ripple-' + specId : r.spec);
+  const hasLinkage = (ripples && ripples.length) || canonical || rippleStale || (linkageWarnings && linkageWarnings.length);
+  const linkage = hasLinkage ? e('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', flexWrap: 'wrap' } },
+    e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 10, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--muted-foreground)' } }, 'Cross-repo'),
+    ...(ripples || []).map((r: any, i: number) => chip(
+      (r.kind === 'pointer' ? '⇢ ' : '⇄ ') + r.repo,
+      r.status === 'unresolved' ? 'var(--neutral-400)' : 'var(--muted-foreground)',
+      { title: r.status === 'unresolved' ? (r.reason || 'not an open project') : `open ${r.repo}`, onFollow: r.status === 'resolved' ? () => follow(r) : undefined },
+    )),
+    canonical ? chip('↖ ' + canonical.repo, canonical.status === 'unresolved' ? 'var(--neutral-400)' : 'var(--muted-foreground)', { title: canonical.status === 'unresolved' ? (canonical.reason || 'not an open project') : `open ${canonical.repo}`, onFollow: canonical.status === 'resolved' && onFollow ? () => onFollow(canonical.projectId, canonical.spec) : undefined }) : null,
+    rippleStale ? chip('stale', 'var(--warning)') : null,
+    linkageWarnings && linkageWarnings.length ? e('span', { title: linkageWarnings.join('\n'), style: { display: 'inline-flex', color: 'var(--warning)' } }, e(Icon, { name: 'alert', size: 12 })) : null,
+    e('span', { style: { flex: 1 } }),
+    ripples && ripples.some((r: any) => r.kind === 'pointer' && r.status === 'resolved') ? e('button', { onClick: stop(onSyncRipples), style: { fontFamily: 'var(--font-sans)', fontSize: 10.5, cursor: 'pointer', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', background: 'var(--card)', color: 'var(--foreground)', padding: '2px 8px' } }, 'Sync stubs') : null,
+    // A generated pointer clears by re-sync from its canonical, never a bare ack — only offer Acknowledge on a stale DELTA ripple.
+    rippleStale && !isPointer ? e('button', { onClick: stop(onAckRipple), style: { fontFamily: 'var(--font-sans)', fontSize: 10.5, cursor: 'pointer', border: '1px solid var(--warning)', borderRadius: 'var(--radius-md)', background: 'var(--card)', color: 'var(--warning)', padding: '2px 8px' } }, 'Acknowledge') : null,
+    rippleStale && isPointer ? e('span', { style: { fontFamily: 'var(--font-sans)', fontSize: 10, color: 'var(--muted-foreground)' } }, 'sync from canonical to refresh') : null,
+  ) : null;
   return e('div', {
     onClick,
     onMouseEnter: () => setHover(true), onMouseLeave: () => setHover(false),
     style: {
       padding: '14px 16px', background: hover ? 'var(--accent)' : 'var(--card)',
-      border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', cursor: 'pointer',
+      border: '1px solid ' + (rippleStale ? 'var(--warning)' : 'var(--border)'), borderRadius: 'var(--radius-xl)', cursor: 'pointer',
       transition: 'var(--transition-control)',
     },
   },
@@ -426,6 +453,7 @@ export function SpecCard({ specId, title, status, meta, onClick, warn }: any) {
       e('span', { style: { flex: 1 } }),
       e('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--neutral-400)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 } }, meta),
     ),
+    linkage,
   );
 }
 

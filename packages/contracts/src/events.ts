@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ModelTier, SpecStatus } from "./spec.js";
+import { ModelTier, RippleKind, SpecStatus } from "./spec.js";
 import { Capability } from "./adapter.js";
 
 /**
@@ -552,6 +552,26 @@ export const ReviewConvergedEvent = base.extend({
   ),
 });
 
+/** SPEC-030: a cross-repo ripple went stale because its canonical spec materially changed — surfaced in the
+ *  AFFECTED project so a cross-repo contract change never goes silently unnoticed. `trigger` names the
+ *  canonical change (normative-hash delta and/or status transition). */
+export const SpecRippleStaleEvent = base.extend({
+  type: z.literal("spec.ripple-stale"),
+  specId: z.string(), // the ripple spec (in the affected project); "generated" pointer stubs use their file id
+  canonicalRepo: z.string(),
+  canonicalSpec: z.string(),
+  kind: RippleKind,
+  trigger: z.string(),
+});
+
+/** SPEC-030: a human acknowledged a stale `delta` ripple in its project (re-review / no-local-impact). */
+export const SpecRippleAckedEvent = base.extend({
+  type: z.literal("spec.ripple-acked"),
+  specId: z.string(),
+  actor: z.string().optional(),
+  reason: z.string(),
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -597,6 +617,8 @@ export const DomainEvent = z.discriminatedUnion("type", [
   PanelRoundCompleteEvent,
   PanelAdjudicatorModelCollisionEvent,
   ReviewConvergedEvent,
+  SpecRippleStaleEvent,
+  SpecRippleAckedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
