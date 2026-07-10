@@ -1,0 +1,13 @@
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.changed_files.invalidated","session_id":"conv_b1c629e3ee4d46018b2a1d440e4a26e0","environment_id":"default"}
+{"sequence_number":null,"type":"session.presence","conversation_id":"conv_b1c629e3ee4d46018b2a1d440e4a26e0","viewers":[]}
+{"sequence_number":null,"type":"session.input.consumed","data":{"item_id":"msg_11e7b5063b3b4097b97f519aa74684d7","type":"message","data":{"role":"user","content":[{"type":"input_text","text":"Reply with exactly the single word PONG and nothing else."}],"agent":null},"created_by":null,"cleared_pending_id":null}}
+{"sequence_number":null,"type":"response.error","source":"execution","tool_name":null,"error":{"code":"runner_failed_to_start","message":"The runner for this session is not available — it may have failed to start. See the host logs.","detail":null}}
+{"sequence_number":null,"type":"session.terminal_pending","conversation_id":"conv_b1c629e3ee4d46018b2a1d440e4a26e0","pending":false}
+{"sequence_number":null,"type":"session.status","conversation_id":"conv_b1c629e3ee4d46018b2a1d440e4a26e0","status":"failed","response_id":null,"error":{"code":"runner_failed_to_start","message":"The runner for this session is not available — it may have failed to start. See the host logs."}}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}
+{"sequence_number":null,"type":"session.heartbeat","server_time":null}

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@arke/adapter-codex": "*",
+    "@arke/adapter-omnigent": "*",
     "@arke/adapter-opencode": "*",
     "@arke/agent-image": "*",
     "@arke/contracts": "*",

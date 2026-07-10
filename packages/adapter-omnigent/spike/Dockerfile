@@ -15,8 +15,9 @@
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git tmux ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
-# Omnigent control plane + host (uv resolves its deps; pip cannot)
-RUN pip install --no-cache-dir uv && uv tool install omnigent
+# Omnigent control plane + host (uv resolves its deps; pip cannot). Pinned to the version the adapter is
+# grounded + validated against (SPEC-037 OMNIGENT_TARGET_VERSION); bump both together on a re-ground.
+RUN pip install --no-cache-dir uv && uv tool install "omnigent==0.3.0"
 # OpenCode harness, symlinked onto the system PATH so the Omnigent host detects it
 RUN curl -fsSL https://opencode.ai/install | bash \
     && ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
