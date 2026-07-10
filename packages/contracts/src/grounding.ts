@@ -153,7 +153,8 @@ function firstHtmlH1(body: string): string | undefined {
 }
 
 function baseName(path: string): string {
-  return path.replace(/\\/g, "/").split("/").pop()!.replace(/\.(?:md|markdown|html?)$/i, "");
+  // Strip one-or-more trailing known doc extensions so a compound name (`report.html.md`) → `report`.
+  return path.replace(/\\/g, "/").split("/").pop()!.replace(/(?:\.(?:md|markdown|html?))+$/i, "");
 }
 
 /** Truncate to a character budget, appending an ellipsis when it actually cuts (never mid-nothing). */

@@ -53,6 +53,8 @@ test("groundingDocFromFile falls back to H1 then filename for the title", () => 
   assert.equal(groundingDocFromFile("docs/architecture/overview.md", noTitle)!.title, "The Architecture");
   const noTitleNoH1 = `---\ntype: convention\n---\n\nJust prose, no heading.\n`;
   assert.equal(groundingDocFromFile("docs/house-rules.md", noTitleNoH1)!.title, "house-rules");
+  // A compound doc extension is fully stripped for the last-resort title (SPEC-036 regression).
+  assert.equal(groundingDocFromFile("docs/report.html.md", noTitleNoH1)!.title, "report");
 });
 
 test("an EMPTY frontmatter title falls through to H1 (not left blank)", () => {

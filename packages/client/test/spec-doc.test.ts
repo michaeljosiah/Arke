@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   appendChangeHistory,
   deltaKindOf,
+  detectSpecFormat,
   parseFrontmatter,
   parseLinkage,
   parseSpecDoc,
@@ -318,6 +319,18 @@ test("parseFrontmatter content-detects HTML leading-comment frontmatter (no form
   assert.equal(data.status, "draft");
   assert.equal(data.branch, "feat/x");
   assert.ok(body.trimStart().startsWith("<h1>"), "body starts after the comment");
+});
+
+test("a markdown doc beginning with a stray `<!--arke…` comment is parsed as markdown, not HTML", () => {
+  // The HTML marker is `<!--arke` followed by (optional ws then) a NEWLINE — the template's `<!--arke\n---`
+  // form. A markdown doc whose first line is `<!--arke NOTE …-->` must NOT be mis-detected as HTML and run
+  // through the <h2> section parser (which would find nothing) instead of the markdown `##` parser
+  // (regression review Finding 1: the old `\barke\b` matched any non-word continuation).
+  const md = `<!--arke NOTE: not an html spec -->\n\n## Requirements\n\n### Requirement: r\n\`capability: x\`\nThe system SHALL do it.\n\n#### Scenario: s\n- WHEN a\n- THEN b\n`;
+  assert.equal(detectSpecFormat(md), "markdown", "`<!--arke ` (no following newline) is not the HTML marker");
+  const doc = parseSpecDoc(md); // content-detected
+  assert.ok(doc.sections.find((s) => s.key === "requirements")?.present, "markdown ## Requirements is found");
+  assert.equal(doc.requirements.length, 1, "markdown ### Requirement parsed (not treated as empty HTML)");
 });
 
 test("parseLinkage reads the canonical back-reference from HTML leading-comment frontmatter", () => {

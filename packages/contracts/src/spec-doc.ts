@@ -78,10 +78,16 @@ function parseYamlScalars(inner: string): Record<string, string> {
  * `<!--arke … -->` comment (keeping the file valid, browser-renderable HTML). `raw` is the exact leading
  * region a writer rewrites; `raw + body === text`, for both formats.
  */
+/** The canonical leading marker of an HTML spec (SPEC-036): a `<!--arke` comment whose token is followed by
+ *  a newline — i.e. the template's `<!--arke\n---` form. Deliberately NOT `\barke\b`: a markdown doc whose
+ *  first line is a stray `<!--arke: TODO -->` (or `<!--arke-ish …`) must stay markdown, not be mis-detected
+ *  as HTML and lose its frontmatter. Used by every content-detection site so they can never drift apart. */
+const HTML_FRONTMATTER_LEAD = /^<!--\s*arke\s*[\r\n]/i;
+
 export function parseFrontmatter(md: string): SplitFrontmatter {
   const text = md.replace(/^﻿/, "");
   // HTML spec: frontmatter is the `---`-fenced YAML inside a leading `<!--arke … -->` comment.
-  if (/^<!--\s*arke\b/i.test(text)) {
+  if (HTML_FRONTMATTER_LEAD.test(text)) {
     const close = text.indexOf("-->");
     if (close === -1) return { data: {}, raw: "", body: text };
     const nl = text.indexOf("\n", close);
@@ -114,7 +120,7 @@ export function specFormatOf(pathOrName: string): SpecFormat {
  *  comment ⇒ html, else markdown. Lets read-side callers that hold only text (normativeHash, grounding, the
  *  client preview) parse correctly without threading a `format` arg — no silent markdown mis-parse. */
 export function detectSpecFormat(md: string): SpecFormat {
-  return /^<!--\s*arke\b/i.test(md.replace(/^﻿/, "")) ? "html" : "markdown";
+  return HTML_FRONTMATTER_LEAD.test(md.replace(/^﻿/, "")) ? "html" : "markdown";
 }
 
 // ---- SPEC-036 HTML parsing helpers (tag-based, browser-safe — no DOM library) --------------------
@@ -195,7 +201,7 @@ export interface ParsedLinkage {
  *  leading-comment form (SPEC-036) so `parseLinkage` reads `ripples:`/`canonical:` from either format. */
 function frontmatterInner(md: string): string {
   let text = md.replace(/^﻿/, "");
-  if (/^<!--\s*arke\b/i.test(text)) {
+  if (HTML_FRONTMATTER_LEAD.test(text)) {
     const close = text.indexOf("-->");
     if (close === -1) return "";
     text = text.slice(0, close); // the YAML fence lives inside the comment
