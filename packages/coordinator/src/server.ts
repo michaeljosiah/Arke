@@ -14,6 +14,7 @@ import {
   type OpenCodeConfig,
 } from "@arke/adapter-opencode";
 import { CodexAdapter, type CodexConfig } from "@arke/adapter-codex";
+import { OmnigentAdapter, type OmnigentConfig } from "@arke/adapter-omnigent";
 import { loadRegistryConfig } from "./registry-config.js";
 import { Trace } from "./trace.js";
 import { NullAdapter } from "./null-adapter.js";
@@ -397,11 +398,19 @@ export class Coordinator {
       // as "not runnable".
       return { ok: false, driver, reason: "Codex runs from a `codex` instance in .arke/config.json (a local app-server, no endpoint) — add one and reopen the project; it is not connected via an endpoint URL." };
     }
+    if (driver === "omnigent") {
+      // SPEC-037: the Omnigent substrate is now runnable, but — like the substrate-exclusivity model
+      // (ADR-0004 Dec 5) — it is selected by adding an `omnigent` instance to .arke/config.json (with the
+      // server baseUrl; the host-side OMNIGENT_AGENT_ID/OMNIGENT_TOKEN come from the environment, never
+      // persisted), NOT via this endpoint-connect flow. The endpoint is validated for feedback only.
+      const v = endpoint ? await this.validateEndpoint(httpBaseFromEndpoint(endpoint)) : { ok: false, reason: "no endpoint" };
+      const state = v.ok ? "reachable" : `unreachable (${v.reason})`;
+      return { ok: false, driver, reason: `Omnigent (${state}) runs from an \`omnigent\` instance in .arke/config.json (baseUrl + host-side OMNIGENT_AGENT_ID/OMNIGENT_TOKEN) — add one and reopen the project. It is not yet in the default composition (gated on the live-acceptance run).` };
+    }
     if (driver !== "opencode") {
-      const label = driver === "omnigent" ? "Omnigent substrate" : driver;
       const v = endpoint ? await this.validateEndpoint(httpBaseFromEndpoint(endpoint)) : { ok: false, reason: "no endpoint" };
       const state = v.ok ? "reachable, but" : `unreachable (${v.reason}); and`;
-      return { ok: false, driver, reason: `${label} is ${state} not runnable in this build yet — only OpenCode can be connected.` };
+      return { ok: false, driver, reason: `${driver} is ${state} not runnable in this build yet — only OpenCode can be connected.` };
     }
 
     // Managed start defaults to the documented local endpoint when the client sends none.
@@ -889,6 +898,51 @@ async function buildCodexDeps(root: string, inst: InstanceConfig, trace: Trace, 
   return { adapter, trace, grants, endpoints: [], agents };
 }
 
+/**
+ * Select the Omnigent meta-harness substrate (SPEC-037) when a project explicitly declares an `omnigent`
+ * instance and NO leaf harness (OpenCode/Codex win a tie — substrate-exclusivity, ADR-0004 Decision 5, means
+ * a project picks EITHER leaves OR Omnigent; the exclusivity ENFORCEMENT + default-composition entry are the
+ * live-gated follow-up). Mirrors {@link codexInstanceFor}'s precedence.
+ */
+export function omnigentInstanceFor(configPath: string): InstanceConfig | undefined {
+  const pick = (insts: InstanceConfig[]): InstanceConfig | undefined =>
+    insts.some((i) => i.driver === "opencode" || i.driver === "codex") ? undefined : insts.find((i) => i.driver === "omnigent");
+  const project = loadRegistryConfig(configPath)?.config.instances ?? [];
+  if (project.length > 0) return pick(project);
+  if (Object.keys(readProviders(configPath)).length > 0) return undefined; // an OpenCode-provider project
+  return pick(loadGlobalConfig(globalConfigPath())?.instances ?? []);
+}
+
+/**
+ * Build an {@link OmnigentConfig} for a project (SPEC-037). The `baseUrl` comes from the instance; the
+ * host-only secrets/ids (`token`, `agentId`) are read from the environment — NEVER persisted to config
+ * (NFR-1, mirroring the token boundary the OpenCode/Codex adapters keep). A per-project durable session
+ * store keeps identity across a restart.
+ */
+function loadOmnigentConfig(root: string, inst: InstanceConfig): OmnigentConfig {
+  return {
+    baseUrl: inst.baseUrl ?? (inst.host ? `http://${inst.host}` : "http://localhost:6767"),
+    token: process.env.OMNIGENT_TOKEN || undefined, // host-side; never written to disk
+    agentId: process.env.OMNIGENT_AGENT_ID || undefined,
+    sessionStorePath: resolve(root, ".arke", "omnigent-sessions.ndjson"),
+  };
+}
+
+/** Construct + init an {@link OmnigentAdapter}, degrading to a {@link NullAdapter} if the server is
+ *  unreachable or its version is incompatible (SPEC-037 fail-loud readiness). */
+async function buildOmnigentDeps(root: string, inst: InstanceConfig, trace: Trace, grants: GrantStore, agents: AgentRegistry): Promise<ContextDeps> {
+  const adapter = new OmnigentAdapter(loadOmnigentConfig(root, inst), (dl) => void trace.write({ ...dl }));
+  try {
+    await adapter.init();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { adapter: new NullAdapter(`Omnigent init failed: ${reason} — is the server reachable at the configured baseUrl?`), trace, grants, endpoints: [], agents };
+  }
+  const r = adapter.readiness?.();
+  if (r && !r.ready) return { adapter: new NullAdapter(`Omnigent not ready: ${r.reason}`), trace, grants, endpoints: [], agents };
+  return { adapter, trace, grants, endpoints: [], agents };
+}
+
 /** Build context dependencies for an arbitrary project root (used to open projects at runtime). */
 async function buildContextDeps(root: string): Promise<ContextDeps> {
   const arke = resolve(root, ".arke");
@@ -900,6 +954,10 @@ async function buildContextDeps(root: string): Promise<ContextDeps> {
   // SPEC-034: a project configured for the Codex leaf adapter runs on it instead of OpenCode.
   const codexInst = codexInstanceFor(configPath);
   if (codexInst) return buildCodexDeps(root, codexInst, trace, grants, agents);
+  // SPEC-037: a project configured for the Omnigent substrate runs on it (a config.json `omnigent` instance;
+  // NOT in the default composition — that entry is gated on the live-acceptance run).
+  const omnigentInst = omnigentInstanceFor(configPath);
+  if (omnigentInst) return buildOmnigentDeps(root, omnigentInst, trace, grants, agents);
   const config = loadOpenCodeConfig({ configPath, baseDir: root, globalConfigPath: globalConfigPath() });
   // SPEC-018 per-project harness runners: a MANAGED context whose root differs from the default
   // project gets its own OpenCode on a per-root port — this build cannot serve a non-primary
