@@ -1,10 +1,12 @@
 import { parseRemote } from "./remote.js";
 import { GitHubForge } from "./github.js";
+import { AzureReposForge } from "./azure.js";
 import type { ForgeAdapter } from "./types.js";
 
 export * from "./types.js";
 export { parseRemote } from "./remote.js";
 export { GitHubForge } from "./github.js";
+export { AzureReposForge, parseAzReposPrList } from "./azure.js";
 
 export type ForgeId = "github" | "azure-repos";
 
@@ -38,8 +40,9 @@ export function webhookForgeId(path: string | undefined): ForgeId | null {
   return null;
 }
 
-/** Construct a forge adapter for an id. (The Azure Repos leaf lands in the next increment.) */
+/** Construct a forge adapter for an id. */
 export function makeForge(id: ForgeId): ForgeAdapter {
   if (id === "github") return new GitHubForge();
+  if (id === "azure-repos") return new AzureReposForge();
   throw new Error(`forge '${id}' is not available yet`);
 }

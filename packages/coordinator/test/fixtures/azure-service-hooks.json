@@ -1,0 +1,102 @@
+{
+  "_note": "Abridged Azure DevOps Service Hook payloads (real shapes from the documented schemas), trimmed to the fields the forge reads. The `pull request updated` event carries the whole PR resource — approvals, completion, abandon, and reactivation all arrive through it, which is why the mapper disambiguates within it.",
+
+  "created": {
+    "eventType": "git.pullrequest.created",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "active",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "createdBy": { "displayName": "Jamal Hartnett", "uniqueName": "jamal@fabrikam.com" },
+      "reviewers": []
+    }
+  },
+
+  "completed": {
+    "eventType": "git.pullrequest.updated",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "completed",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "mergeStatus": "succeeded",
+      "reviewers": [
+        { "vote": 10, "displayName": "Christie Church", "uniqueName": "christie@fabrikam.com", "isContainer": false }
+      ]
+    }
+  },
+
+  "abandoned": {
+    "eventType": "git.pullrequest.updated",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "abandoned",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "reviewers": []
+    }
+  },
+
+  "approvedByHuman": {
+    "eventType": "git.pullrequest.updated",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "active",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "reviewers": [
+        { "vote": 0, "displayName": "Author", "uniqueName": "author@fabrikam.com", "isContainer": false },
+        { "vote": 10, "displayName": "Christie Church", "uniqueName": "christie@fabrikam.com", "isContainer": false }
+      ]
+    }
+  },
+
+  "approvedByContainerOnly": {
+    "eventType": "git.pullrequest.updated",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "active",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "reviewers": [
+        { "vote": 10, "displayName": "[Fabrikam]\\Reviewers", "id": "team-guid", "isContainer": true }
+      ]
+    }
+  },
+
+  "reactivated": {
+    "eventType": "git.pullrequest.updated",
+    "resource": {
+      "pullRequestId": 42,
+      "status": "active",
+      "sourceRefName": "refs/heads/feat/spec-038",
+      "targetRefName": "refs/heads/main",
+      "reviewers": []
+    }
+  },
+
+  "pushForced": {
+    "eventType": "git.push",
+    "isForcePush": true,
+    "resource": {
+      "refUpdates": [
+        { "name": "refs/heads/feat/spec-038", "oldObjectId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "newObjectId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+      ]
+    }
+  },
+
+  "pushPlain": {
+    "eventType": "git.push",
+    "resource": {
+      "refUpdates": [
+        { "name": "refs/heads/feat/spec-038", "oldObjectId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "newObjectId": "cccccccccccccccccccccccccccccccccccccccc" }
+      ]
+    }
+  },
+
+  "unknown": {
+    "eventType": "git.pullrequest.commented",
+    "resource": { "pullRequestId": 42, "sourceRefName": "refs/heads/feat/spec-038" }
+  }
+}

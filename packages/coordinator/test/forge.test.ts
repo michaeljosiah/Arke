@@ -48,9 +48,8 @@ test("webhookForgeId selects by the URL path, not any remote", () => {
 });
 
 // ---- GitHubForge: behaviour-preserving delegation ----
-test("makeForge('github') builds a GitHubForge; azure is not available yet", () => {
+test("makeForge('github') builds a GitHubForge", () => {
   assert.ok(makeForge("github") instanceof GitHubForge);
-  assert.throws(() => makeForge("azure-repos"), /not available yet/);
 });
 
 test("GitHubForge.mapWebhookEvent is byte-identical to the underlying mapWebhookEvent", () => {
