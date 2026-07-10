@@ -87,7 +87,8 @@ import { FolderInspector, type FolderState } from "./folder-inspector.js";
 import { HarnessReachabilityProbe } from "./reachability.js";
 import { ScaffoldRunner, type ScaffoldTiers } from "./scaffold.js";
 import type { ProjectRegistry } from "./project-registry.js";
-import type { CrossRepoLinker } from "./cross-repo-linker.js";
+import { normalizeRepoSlug, pointerStubFilename, pointerStubId, renderPointerStub } from "./cross-repo-linker.js";
+import type { CanonicalRef, CrossRepoLinker } from "./cross-repo-linker.js";
 
 /**
  * One project, fully isolated (SPEC-018). Owns everything the coordinator used to hold as a
@@ -211,9 +212,12 @@ export class ProjectContext {
   private readonly publish: (event: DomainEvent) => void;
   /** SPEC-030: the supervisor's cross-repo linker (resolve peer contexts + broker ripple work). */
   private readonly linker?: CrossRepoLinker;
-  /** SPEC-030: canonical spec ids in THIS project whose ripple is currently stale (a canonical materially
-   *  changed and this repo hasn't reconciled). Keyed by the LOCAL ripple/pointer spec id. Trace-durable. */
+  /** SPEC-030: LOCAL ripple/pointer spec ids in THIS project that are currently stale (their canonical
+   *  materially changed and this repo hasn't reconciled). Trace-durable (reconstructed on open). */
   private readonly staleRipples = new Set<string>();
+  /** SPEC-030: last-seen normative hash per canonical spec in THIS project, to detect a material edit
+   *  (a content change with no status transition) and cascade staleness to its ripples. */
+  private readonly canonicalHashes = new Map<string, string>();
   /** The project's agents (declared model + provider) and provider/auth profiles (SPEC-016 revised).
    *  Reassigned when an agent's model is edited (`agent.configure`) so the roster stays live. */
   private agents: AgentRegistry;
@@ -417,6 +421,9 @@ export class ProjectContext {
         const t = setTimeout(() => {
           this.indexDebounce.delete(bundleDir);
           this.regenerateBundleIndex(bundleDir);
+          // SPEC-030: a spec edit under docs/specifications may be a material change to a canonical —
+          // cascade staleness to its ripples (no-op unless a changed spec declares ripples).
+          if (bundleDir === resolve(docsRoot, "specifications")) void this.checkCanonicalEdits();
         }, 250);
         if (typeof t.unref === "function") t.unref();
         this.indexDebounce.set(bundleDir, t);
@@ -1105,6 +1112,178 @@ export class ProjectContext {
     };
   }
 
+  // ---- SPEC-030 cross-repo ripple mechanism (supervisor-mediated) ----------
+
+  /** THIS project's own portable `org/repo` slug (from its `origin` remote), or "" when it has no remote. */
+  private repoSlug(): string {
+    try {
+      const name = gitRepoIdentity(this.root).name;
+      return name ? normalizeRepoSlug(name) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** A by-value canonical reference for one of THIS project's specs (carried across contexts by the linker). */
+  private canonicalRefFor(found: { canonicalId: string; text: string; frontmatter: Record<string, string> }): CanonicalRef {
+    return {
+      repo: this.repoSlug(),
+      specId: found.canonicalId,
+      title: found.frontmatter.title ?? found.canonicalId,
+      status: found.frontmatter.status ?? "draft",
+      capabilities: parseCapabilities(found.frontmatter),
+      normativeHash: normativeHash(found.text),
+    };
+  }
+
+  /**
+   * (Re)generate the read-only pointer stub for a canonical spec into THIS project (SPEC-030 RippleTarget).
+   * Idempotent — writes only when the content changes — and traces the write in THIS project's trace;
+   * regenerating a stub clears its staleness. Executed by THIS context on its OWN files (the canonical's
+   * context brokers via the linker, never reaching across). Never auto-commits — the stub lands as a
+   * working-tree change to review + commit here.
+   */
+  writePointerStub(ref: CanonicalRef): { ok: boolean; path?: string; changed?: boolean; reason?: string } {
+    const specsDir = resolve(this.root, "docs", "specifications");
+    try {
+      mkdirSync(specsDir, { recursive: true });
+    } catch {
+      /* best effort */
+    }
+    const filename = pointerStubFilename(ref.specId);
+    const abs = resolve(specsDir, filename);
+    const relPath = `docs/specifications/${filename}`;
+    const next = renderPointerStub(ref);
+    let changed = true;
+    try {
+      if (existsSync(abs) && readFileSync(abs, "utf8") === next) changed = false;
+    } catch {
+      /* unreadable → treat as changed */
+    }
+    if (changed) {
+      try {
+        writeFileSync(abs, next, "utf8");
+      } catch (err) {
+        return { ok: false, reason: `could not write pointer stub: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+    const stubId = pointerStubId(ref.specId);
+    if (this.staleRipples.delete(stubId)) void this.trace.write({ kind: "ripple.acked", projectId: this.projectId, specId: stubId, reason: "pointer regenerated" });
+    void this.trace.write({ kind: "ripple.projected", projectId: this.projectId, specId: stubId, canonicalRepo: ref.repo, canonicalSpec: ref.specId, path: relPath, changed });
+    this.regenerateSpecIndex();
+    return { ok: true, path: relPath, changed };
+  }
+
+  /**
+   * Mark THIS project's ripples of a canonical spec stale (SPEC-030 RippleTarget) — a material canonical
+   * change happened. Scans the local library for specs whose `canonical:` back-reference resolves to `ref`,
+   * flags each, traces it, and emits `spec.ripple-stale` in THIS project. Returns how many were marked.
+   */
+  async markRipplesStaleFor(ref: CanonicalRef, trigger: string): Promise<number> {
+    const wantRepo = normalizeRepoSlug(ref.repo);
+    let count = 0;
+    for (const rec of this.specLibrary()) {
+      const canon = rec.canonical;
+      if (!canon || normalizeRepoSlug(canon.repo) !== wantRepo || canon.spec !== ref.specId) continue;
+      if (this.staleRipples.has(rec.specId)) continue; // already stale
+      this.staleRipples.add(rec.specId);
+      count++;
+      const kind: "delta" | "pointer" = rec.specId.startsWith("ripple-") ? "pointer" : "delta";
+      await this.trace.write({ kind: "ripple.stale", projectId: this.projectId, specId: rec.specId, canonicalRepo: ref.repo, canonicalSpec: ref.specId, trigger });
+      await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.ripple-stale", specId: rec.specId, canonicalRepo: ref.repo, canonicalSpec: ref.specId, kind, trigger } as DomainEvent);
+    }
+    return count;
+  }
+
+  /**
+   * `spec.ripple.ack` (SPEC-030, affected side) — acknowledge a stale ripple in THIS project: clear its
+   * staleness, record who/when/why in THIS project's trace, and emit `spec.ripple-acked`. Refuses a spec
+   * that is not currently a stale ripple (named error, no state change).
+   */
+  private async ackRipple(specId: string, reason: string, actor?: string): Promise<{ ok: true; specId: string }> {
+    const found = this.findSpecFile(specId);
+    const id = found?.canonicalId ?? specId;
+    if (!this.staleRipples.has(id)) throw new Error(`'${id}' is not a currently-stale ripple in this project`);
+    this.staleRipples.delete(id);
+    await this.trace.write({ kind: "ripple.acked", projectId: this.projectId, specId: id, ...(actor ? { actor } : {}), reason });
+    await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.ripple-acked", specId: id, ...(actor ? { actor } : {}), reason } as DomainEvent);
+    return { ok: true, specId: id };
+  }
+
+  /**
+   * `spec.ripple.project` (SPEC-030, canonical side) — (re)generate the pointer stubs this canonical spec
+   * declares (`kind: pointer` ripples), each written by the resolved TARGET project's own context via the
+   * supervisor linker. `delta` ripples are authored, not generated — skipped. An unresolved target is inert
+   * (skipped, reported). Never auto-commits in the target.
+   */
+  private async projectRipples(specId: string): Promise<{ specId: string; results: Array<{ repo: string; kind: string; status: string; path?: string; changed?: boolean; reason?: string }> }> {
+    const found = this.findSpecFile(specId);
+    if (!found) throw new Error(`no specification file found for '${specId}' under docs/specifications`);
+    const cid = found.canonicalId;
+    const ref = this.canonicalRefFor(found);
+    const parsed = parseLinkage(found.text);
+    const results: Array<{ repo: string; kind: string; status: string; path?: string; changed?: boolean; reason?: string }> = [];
+    for (const r of parsed.ripples) {
+      if (r.kind !== "pointer") {
+        results.push({ repo: r.repo, kind: r.kind, status: "skipped-authored" });
+        continue;
+      }
+      const target = this.linker?.resolve(r.repo);
+      if (!target) {
+        results.push({ repo: r.repo, kind: r.kind, status: "unresolved" });
+        await this.trace.write({ kind: "ripple.cascade-skipped", projectId: this.projectId, specId: cid, targetRepo: r.repo, op: "project" });
+        continue;
+      }
+      const out = target.writePointerStub(ref);
+      results.push({ repo: r.repo, kind: r.kind, status: out.ok ? "written" : "error", ...(out.path ? { path: out.path } : {}), ...(out.changed !== undefined ? { changed: out.changed } : {}), ...(out.reason ? { reason: out.reason } : {}) });
+    }
+    return { specId: cid, results };
+  }
+
+  /**
+   * Cascade staleness to the ripples of a canonical spec in THIS project (SPEC-030) — a material change
+   * happened (a status transition or a normative edit). Best-effort: resolves each declared ripple's target
+   * via the linker and asks that target to mark its own ripples stale; an unresolved target is skipped
+   * (logged). NEVER throws into the caller's lifecycle — a cross-repo signal must not make one repo's
+   * governed transition brittle.
+   */
+  private async cascadeRippleStaleness(specId: string, trigger: string): Promise<void> {
+    try {
+      const found = this.findSpecFile(specId);
+      if (!found) return;
+      const parsed = parseLinkage(found.text);
+      if (parsed.ripples.length === 0) return;
+      const ref = this.canonicalRefFor(found);
+      for (const r of parsed.ripples) {
+        const target = this.linker?.resolve(r.repo);
+        if (!target) {
+          await this.trace.write({ kind: "ripple.cascade-skipped", projectId: this.projectId, specId: found.canonicalId, targetRepo: r.repo, trigger }).catch(() => {});
+          continue;
+        }
+        await target.markRipplesStaleFor(ref, trigger).catch(() => 0);
+      }
+    } catch {
+      /* best-effort cascade — never break the canonical's own lifecycle */
+    }
+  }
+
+  /**
+   * Detect a material EDIT to any canonical spec in THIS project (SPEC-030): compare each ripple-declaring
+   * spec's current normative hash to a cached baseline and cascade staleness to its ripples when it changed.
+   * Seeds the baseline on first observation (no cascade on first sight). Called after a spec file changes.
+   */
+  private async checkCanonicalEdits(): Promise<void> {
+    for (const rec of this.specLibrary()) {
+      if (!rec.ripples || rec.ripples.length === 0) continue;
+      const found = this.findSpecFile(rec.specId);
+      if (!found) continue;
+      const h = normativeHash(found.text);
+      const prev = this.canonicalHashes.get(rec.specId);
+      this.canonicalHashes.set(rec.specId, h);
+      if (prev !== undefined && prev !== h) await this.cascadeRippleStaleness(rec.specId, "normative-change");
+    }
+  }
+
   /**
    * Apply a GitHub webhook event to this project's spec lifecycle (SPEC-008). Maps the event to a
    * transition, enforces the second-human (anti-self-approval) gate at the coordinator, runs the
@@ -1201,6 +1380,7 @@ export class ProjectContext {
     await this.trace.write({ kind: "spec.lifecycle", projectId: this.projectId, specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) });
     await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "spec.status", specId, status, reason, ...(opts?.actor ? { actor: opts.actor } : {}) } as DomainEvent);
     this.regenerateSpecIndex(); // SPEC-026: keep the index status column true through the lifecycle
+    await this.cascadeRippleStaleness(specId, `status:${status}`); // SPEC-030: a governed transition is a material change to a canonical's ripples (no-op unless it declares ripples)
   }
 
   /** Legal governed status edges (SPEC-024). The client offers only adjacent moves as an affordance; the
@@ -1938,6 +2118,7 @@ export class ProjectContext {
       /* committed + published already — the preflight recorded the governed action; this is bonus */
     }
     this.regenerateSpecIndex(); // SPEC-026: draft→in-review is written here (bypasses commitStatus) — refresh the index
+    await this.cascadeRippleStaleness(cid, "status:in-review"); // SPEC-030: cascade to ripples (no-op unless canonical)
     return { ok: true, specId: cid, status: "in-review", branch: fmBranch };
   }
 
@@ -2106,6 +2287,10 @@ export class ProjectContext {
       // ANY regression to `draft` (a board send-back via spec.transition writes spec.lifecycle{status:"draft"},
       // not review.sent-back) clears the converged gate — the reopened draft needs a fresh loop (SPEC-035).
       if (rec.kind === "spec.lifecycle" && rec.status === "draft" && typeof rec.specId === "string") this.convergedReviews.delete(rec.specId);
+      // SPEC-030: rebuild the stale-ripple set — a `ripple.stale` marks it, a `ripple.acked` (an ack or a
+      // pointer regeneration) clears it; chronological replay yields the final state.
+      if (rec.kind === "ripple.stale" && typeof rec.specId === "string") this.staleRipples.add(rec.specId);
+      if (rec.kind === "ripple.acked" && typeof rec.specId === "string") this.staleRipples.delete(rec.specId);
       if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
     }
   }
@@ -2895,6 +3080,10 @@ export class ProjectContext {
         return this.specLibrary(); // SPEC-008: every spec in the active project with status
       case "spec.links": // SPEC-030: resolved cross-repo linkage (ripples/canonical) for one spec
         return this.specLinks(String(a.specId ?? ""));
+      case "spec.ripple.project": // SPEC-030 (canonical side): regenerate pointer stubs into resolved targets
+        return this.projectRipples(String(a.specId ?? ""));
+      case "spec.ripple.ack": // SPEC-030 (affected side): acknowledge a stale ripple (recorded)
+        return this.ackRipple(String(a.specId ?? ""), String(a.reason ?? ""), a.actor ? String(a.actor) : undefined);
       case "spec.deliver": // SPEC-024: explicit delivery (decoupled from approval) — single-session implementation + generate
         return this.deliver(String(a.specId ?? ""), a.branch ? String(a.branch) : undefined);
       case "spec.transition": { // SPEC-024: a human manual board move — one op, two triggers, one gate

@@ -33,6 +33,53 @@ export interface CanonicalRef {
   normativeHash: string;
 }
 
+/** The local id a pointer stub carries as its `spec_id` (and the key its staleness is tracked under). */
+export function pointerStubId(canonicalSpecId: string): string {
+  return `ripple-${canonicalSpecId}`.replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
+/** The deterministic filename for a canonical's generated pointer stub in a target repo's docs/specifications/. */
+export function pointerStubFilename(canonicalSpecId: string): string {
+  return `${pointerStubId(canonicalSpecId)}.md`;
+}
+
+/**
+ * Render a canonical spec's read-only pointer stub (SPEC-030) — a deterministic projection of its
+ * frontmatter + summary, carrying `canonical:` back-reference frontmatter (so the target repo's own
+ * `parseLinkage` recognises it as a ripple) and a "generated — do not hand-edit" marker (the SPEC-026
+ * posture). It NEVER copies requirement bodies — a stub is a pointer, not a mirror. Byte-deterministic for
+ * a given ref, so regeneration is idempotent.
+ */
+export function renderPointerStub(ref: CanonicalRef): string {
+  const caps = ref.capabilities.length ? ref.capabilities.join(", ") : "—";
+  return `---
+spec_id: ${pointerStubId(ref.specId)}
+title: ${ref.title} (cross-repo pointer)
+status: ${ref.status}
+type: pointer
+generated: true
+canonical:
+  repo: ${ref.repo}
+  spec: ${ref.specId}
+---
+
+<!-- GENERATED POINTER — do not hand-edit. This repository is affected by a specification whose canonical
+     copy lives in ${ref.repo}. Regenerated deterministically by the Arke coordinator (SPEC-030). Edit the
+     canonical specification, not this stub. -->
+
+# ${ref.title} — cross-repo pointer
+
+This repository is affected by **${ref.specId}** (\`${ref.title}\`), whose **canonical** specification lives
+in **${ref.repo}**.
+
+- **Canonical status:** ${ref.status}
+- **Capabilities:** ${caps}
+
+There is no local contract change in this repository for this specification — this file is a pointer, not a
+copy. See the canonical specification in \`${ref.repo}\` for the full requirements and history.
+`;
+}
+
 /**
  * Supervisor-mediated cross-repo linkage (SPEC-030) — the first cross-context service in Arke. Resolves a
  * ripple's `org/repo` slug to a registered {@link ProjectContext} (via each context's git remote) and
