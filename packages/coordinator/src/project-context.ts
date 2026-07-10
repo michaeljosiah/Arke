@@ -10,7 +10,9 @@ import {
   parseLinkage,
   parseSpecDoc,
   setFrontmatterStatus,
+  specFormatOf,
   validateWellFormed,
+  type SpecFormat,
   bundleEntryFromFile,
   isBundleDoc,
   isSpecFile,
@@ -417,7 +419,7 @@ export class ProjectContext {
       this.docsWatcher = watch(docsRoot, { recursive: true }, (_evt, filename) => {
         if (!filename) return;
         const rel = filename.toString().replaceAll("\\", "/");
-        if (!rel.endsWith(".md") || rel.endsWith("index.md")) return; // .md documents only; never our own writes
+        if (!/\.(?:md|markdown|html?)$/i.test(rel) || rel.endsWith("index.md")) return; // SPEC-036: .md/.html docs; never our own index writes
         const slash = rel.indexOf("/");
         const bundleDir = slash === -1 ? docsRoot : resolve(docsRoot, rel.slice(0, slash));
         const prev = this.indexDebounce.get(bundleDir);
@@ -504,7 +506,7 @@ export class ProjectContext {
           walk(abs);
           continue;
         }
-        if (!st.isFile() || !name.endsWith(".md") || name === "index.md") continue; // generated index is `type: index`, never grounding
+        if (!st.isFile() || !/\.(?:md|markdown|html?)$/i.test(name) || name === "index.md") continue; // SPEC-036: .md/.html; generated index (`type: index`) is never grounding
         const relPath = relative(this.root, abs).replaceAll("\\", "/");
         try {
           const doc = groundingDocFromFile(relPath, readFileSync(abs, "utf8"), summaryBudget ? { summaryBudget } : {});
@@ -950,7 +952,7 @@ export class ProjectContext {
     if (realDir !== expectedDir || !isWithinRoot(realRoot, realDir)) return null;
     let entries: string[];
     try {
-      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "index.md"); // exclude the generated index (SPEC-026)
+      entries = readdirSync(dir).filter((f) => /\.(?:md|markdown|html?)$/i.test(f) && f !== "index.md"); // SPEC-036: .md or .html spec files (exclude the generated index, SPEC-026)
     } catch {
       return null;
     }
@@ -974,7 +976,7 @@ export class ProjectContext {
         continue;
       }
       const { data } = parseFrontmatter(text);
-      const stem = f.replace(/\.md$/, "");
+      const stem = f.replace(/\.(?:md|markdown|html?)$/i, "");
       // Match either frontmatter convention: `spec_id` (the spec files' YAML) or `specId` (the
       // SpecFrontmatter contract shape), plus slug / title / filename stem.
       if (data.spec_id === specId || data.specId === specId || data.slug === specId || data.title === specId || stem === specId) {
@@ -1041,7 +1043,7 @@ export class ProjectContext {
     if (realDir !== expectedDir) return records; // same symlink guard as findSpecFile
     let entries: string[];
     try {
-      entries = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "specification.template.md" && f !== "index.md");
+      entries = readdirSync(dir).filter((f) => /\.(?:md|markdown|html?)$/i.test(f) && f !== "specification.template.md" && f !== "index.md"); // SPEC-036: .md or .html
     } catch {
       return records;
     }
@@ -1060,7 +1062,7 @@ export class ProjectContext {
         continue;
       }
       const { data } = parseFrontmatter(text);
-      const specId = data.spec_id ?? data.specId ?? f.replace(/\.md$/, "");
+      const specId = data.spec_id ?? data.specId ?? f.replace(/\.(?:md|markdown|html?)$/i, "");
       const frontStatus = (data.status ?? "draft") as SpecStatus;
       const known = this.specRecords.get(specId);
       const linkage = this.resolveLinkage(text, specId); // SPEC-030 cross-repo ripples/canonical, resolved
@@ -1652,10 +1654,17 @@ export class ProjectContext {
    * may run later, on any branch. Refuses a spec that is not `approved`, or one already delivering (no
    * double-dispatch).
    */
-  private async deliver(specId: string, branch?: string): Promise<{ ok: boolean; specId?: string; branch?: string; error?: string }> {
+  private async deliver(specId: string, branch?: string): Promise<{ ok: boolean; specId?: string; branch?: string; error?: string; code?: string }> {
     const found = this.findSpecFile(specId);
     if (!found) return { ok: false, error: `no spec '${specId}'` };
     const cid = found.canonicalId;
+    // SPEC-036: delivery drives off the markdown `## Tasks` + `- [ ]` checklist (parseTasks). An HTML spec
+    // would parse zero tasks and never complete, so refuse it with a typed error rather than silently
+    // dispatching an unfinishable delivery. HTML delivery is a bounded follow-up.
+    if (specFormatOf(found.relPath ?? found.absPath) === "html") {
+      await this.trace.write({ kind: "spec.deliver", projectId: this.projectId, specId: cid, ok: false, reason: "unsupported-format" });
+      return { ok: false, specId: cid, code: "spec.deliver-unsupported-format", error: `delivery of an HTML specification is not supported yet ('${cid}'); author the delivery-driving spec in markdown for now` };
+    }
     const status = this.specRecords.get(cid)?.status ?? found.frontmatter.status ?? "draft";
     if (status !== "approved") return { ok: false, specId: cid, error: `cannot deliver: '${cid}' is '${status}', expected 'approved'` };
     // Re-delivery guard: an in-memory claim already in flight (closes the TOCTOU race around the async
@@ -2822,7 +2831,9 @@ export class ProjectContext {
    * template with seeded frontmatter and empty sections. The cockpit then opens on it and it grows in
    * the live preview as the conversation develops. Nothing is authored here.
    */
-  async createSpec(rawTitle: unknown): Promise<{ specId: string; branch: string; path: string; number: number }> {
+  async createSpec(rawTitle: unknown, rawFormat?: unknown): Promise<{ specId: string; branch: string; path: string; number: number; format: SpecFormat }> {
+    const format: SpecFormat = String(rawFormat ?? "").toLowerCase() === "html" ? "html" : "markdown"; // SPEC-036
+    const ext = format === "html" ? "html" : "md";
     const specsDir = resolve(this.root, "docs", "specifications");
     mkdirSync(specsDir, { recursive: true });
     const number = nextSpecNumber(specsDir);
@@ -2847,13 +2858,18 @@ export class ProjectContext {
       branch = gitHeadBranch(this.root) ?? branch;
     }
 
-    const filename = `${nnn}.${slug}.md`;
+    const filename = `${nnn}.${slug}.${ext}`;
     const absPath = resolve(specsDir, filename);
-    if (existsSync(absPath)) throw new Error(`a specification file '${filename}' already exists`);
-    writeFileSync(absPath, renderBlankSpec({ specId, title, branch, date }), "utf8");
-    await this.trace.write({ kind: "spec.create", projectId: this.projectId, specId, branch, path: `docs/specifications/${filename}` });
+    // SPEC-036: reject a collision on the number+slug across ANY spec extension, not just the one being
+    // written — no two specs share a `<nnn>.<slug>` regardless of `.md`/`.markdown`/`.html`/`.htm`.
+    for (const e of ["md", "markdown", "html", "htm"]) {
+      if (existsSync(resolve(specsDir, `${nnn}.${slug}.${e}`))) throw new Error(`a specification '${nnn}.${slug}.${e}' already exists`);
+    }
+    const content = format === "html" ? renderBlankSpecHtml({ specId, title, branch, date }) : renderBlankSpec({ specId, title, branch, date });
+    writeFileSync(absPath, content, "utf8");
+    await this.trace.write({ kind: "spec.create", projectId: this.projectId, specId, branch, format, path: `docs/specifications/${filename}` });
     this.regenerateSpecIndex(); // SPEC-026: the new spec appears in the index immediately
-    return { specId, branch, path: `docs/specifications/${filename}`, number };
+    return { specId, branch, path: `docs/specifications/${filename}`, number, format };
   }
 
   /**
@@ -2873,6 +2889,9 @@ export class ProjectContext {
     try {
       const found = this.findSpecFile(oldSpecId);
       if (!found) return { renamed: false, specId: oldSpecId };
+      // SPEC-036: the untitled→titled auto-rename is markdown-specific (`.md` naming, git branch rename); an
+      // HTML spec is a no-op here (author it with a title). Guarding avoids mangling a `.html` filename.
+      if (specFormatOf(found.absPath) === "html") return { renamed: false, specId: oldSpecId };
       const stem = basename(found.absPath, ".md"); // e.g. "002.untitled-002"
       const m = /^(\d{3})\.(.+)$/.exec(stem);
       if (!m) return { renamed: false, specId: oldSpecId };
@@ -3156,8 +3175,8 @@ export class ProjectContext {
       }
       case "spec.file":
         return this.readSpecFile(String(a.specId ?? ""));
-      case "spec.create": // SPEC-020: new blank-slate specification from the template
-        return this.createSpec(a.title);
+      case "spec.create": // SPEC-020: new blank-slate specification; SPEC-036: markdown or html format
+        return this.createSpec(a.title, a.format);
       case "spec.rename": // SPEC-020: finalise a blank-slate spec's name from its derived title
         return this.renameSpec(String(a.specId ?? ""));
       case "grounding.upload": // SPEC-020: store an uploaded grounding file on the host
@@ -3724,6 +3743,54 @@ updated: ${date}
 
 ## Change history
 - ${date} · ${branch} · draft — created (blank slate)
+`;
+}
+
+/** The HTML blank-slate template (SPEC-036): a valid, browser-renderable HTML file whose frontmatter lives
+ *  in a leading `<!--arke -->` comment, with the same anatomy (`<h2>`/`<h3>`) the markdown template uses. */
+export function renderBlankSpecHtml(seed: { specId: string; title: string; branch: string; date: string }): string {
+  const { specId, title, branch, date } = seed;
+  return `<!--arke
+---
+spec_id: ${specId}
+title: ${title}
+status: draft
+branch: ${branch}
+owner: core-maintainers
+capabilities: []
+type: specification
+created: ${date}
+updated: ${date}
+---
+-->
+<h1>${title}</h1>
+
+<h2>Why</h2>
+
+<h2>What changes</h2>
+
+<h2>Requirements</h2>
+<!-- Author requirements as <h3>Requirement: …</h3> with a <p class="meta">capability: … · delta: ADDED (${branch})</p>,
+     a SHALL/MUST statement, and at least one <h4>Scenario: …</h4> containing WHEN and THEN. -->
+
+<h2>Design</h2>
+<h3>Architectural decision</h3>
+<h3>Target architecture</h3>
+<h3>Interfaces and contracts</h3>
+<h3>Cross-cutting</h3>
+
+<h2>Tasks</h2>
+<h3>Testing</h3>
+<h3>Definition of done</h3>
+
+<h2>Decision log</h2>
+
+<h2>Open questions</h2>
+
+<h2>Change history</h2>
+<ul>
+  <li>${date} · ${branch} · draft — created (blank slate)</li>
+</ul>
 `;
 }
 

@@ -1,4 +1,4 @@
-import { parseFrontmatter } from "./spec-doc.js";
+import { parseFrontmatter, detectSpecFormat, specFormatOf, stripTags } from "./spec-doc.js";
 
 /**
  * Pure generation of a bundle's `index.md` (SPEC-026). A `docs/` bundle's index is a **deterministic
@@ -90,6 +90,21 @@ function firstH1(body: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
+/** The `<title>` element's text (SPEC-036) — the human title of an HTML doc without arke frontmatter.
+ *  Entities are decoded and tags stripped so a `&amp;` or nested `<code>` renders as plain text. */
+function htmlTitle(html: string): string | undefined {
+  const m = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  const t = m ? stripTags(m[1]!) : "";
+  return t || undefined;
+}
+
+/** First `<h1>` heading text in an HTML body, if any (fallback title when there is no `<title>`). */
+function firstHtmlH1(body: string): string | undefined {
+  const m = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(body);
+  const t = m ? stripTags(m[1]!) : "";
+  return t || undefined;
+}
+
 // ---- entry builders (parse + classify; pure over filename + text) -----------------------------
 
 /** Build a {@link SpecIndexEntry} from a spec file's name + text. Unparseable → an `unparsed` row. */
@@ -124,10 +139,19 @@ export function specEntryFromFile(filename: string, text: string): SpecIndexEntr
 export function bundleEntryFromFile(filename: string, text: string): BundleIndexEntry {
   try {
     const { data, body } = parseFrontmatter(text);
-    const title = data.title ?? firstH1(body) ?? filename.replace(/\.md$/, "");
     // Tolerant type derivation (SPEC-026): explicit `type`, else `specification` for a spec_id-bearing
     // doc, else `convention` for any other authored doc.
     const type = data.type ?? (data.spec_id ? "specification" : "convention");
+    // SPEC-036: an HTML doc's title comes from its `<title>`/`<h1>` (not a `# H1`), and its description
+    // comes ONLY from an explicit arke `description:` — NEVER from the raw body. Falling through to
+    // firstParagraph() on HTML would dump inline CSS + external <script> URLs into the index cell.
+    const isHtml = specFormatOf(filename) === "html" || detectSpecFormat(text) === "html";
+    if (isHtml) {
+      const title = data.title ?? htmlTitle(text) ?? firstHtmlH1(body) ?? filename.replace(/\.html?$/i, "");
+      const description = data.description; // no lede-mining for HTML — artifact exports have no clean paragraph
+      return { parseState: "ok", type, title, ...(description ? { description } : {}), path: filename };
+    }
+    const title = data.title ?? firstH1(body) ?? filename.replace(/\.md$/, "");
     const description = data.description ?? firstParagraph(body);
     return { parseState: "ok", type, title, ...(description ? { description } : {}), path: filename };
   } catch (err) {
@@ -144,9 +168,9 @@ export function isSpecFile(filename: string): boolean {
   return NNN.test(filename) && filename !== "specification.template.md" && !ALWAYS_EXCLUDE.has(filename);
 }
 
-/** A generic bundle document: any `.md` that is not the index/README/a template. */
+/** A generic bundle document: any `.md`/`.html` that is not the index/README/a template (SPEC-036). */
 export function isBundleDoc(filename: string): boolean {
-  return filename.endsWith(".md") && !ALWAYS_EXCLUDE.has(filename) && !filename.endsWith(".template.md");
+  return /\.(?:md|markdown|html?)$/i.test(filename) && !ALWAYS_EXCLUDE.has(filename) && !filename.endsWith(".template.md");
 }
 
 // ---- renderers --------------------------------------------------------------------------------

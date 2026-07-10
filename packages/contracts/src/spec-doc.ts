@@ -110,6 +110,13 @@ export function specFormatOf(pathOrName: string): SpecFormat {
   return /\.html?$/i.test((pathOrName ?? "").trim()) ? "html" : "markdown";
 }
 
+/** Content-detect a spec's format from its text (SPEC-036): the self-describing HTML leading `<!--arke -->`
+ *  comment ⇒ html, else markdown. Lets read-side callers that hold only text (normativeHash, grounding, the
+ *  client preview) parse correctly without threading a `format` arg — no silent markdown mis-parse. */
+export function detectSpecFormat(md: string): SpecFormat {
+  return /^<!--\s*arke\b/i.test(md.replace(/^﻿/, "")) ? "html" : "markdown";
+}
+
 // ---- SPEC-036 HTML parsing helpers (tag-based, browser-safe — no DOM library) --------------------
 
 /** Blank out the CONTENT of `<pre>/<code>/<script>/<style>` spans and HTML comments (with same-length
@@ -258,15 +265,16 @@ export function parseLinkage(md: string): ParsedLinkage {
 /** Parse a spec doc into frontmatter, requirements (with delta), and anatomy sections. Format-dispatched
  *  (SPEC-036): markdown splits on `##`/`### Requirement:`; HTML on `<h2>`/`<h3>Requirement:`. Both return the
  *  same shape, so every downstream consumer is unchanged. `format` defaults to markdown. */
-export function parseSpecDoc(md: string, format: SpecFormat = "markdown"): ParsedSpecDoc {
+export function parseSpecDoc(md: string, format?: SpecFormat): ParsedSpecDoc {
   const { data, body } = parseFrontmatter(md);
-  const sectionText = format === "html" ? splitSectionsHtml(body) : splitSections(body); // lowercased title → body
+  const fmt = format ?? detectSpecFormat(md); // content-detect when the caller has only text
+  const sectionText = fmt === "html" ? splitSectionsHtml(body) : splitSections(body); // lowercased title → body
   const sections: ParsedSection[] = SPEC_ANATOMY.map((a) => {
     const markdown = sectionText.get(a.title.toLowerCase()) ?? "";
     return { key: a.key, title: a.title, present: sectionText.has(a.title.toLowerCase()), markdown };
   });
   const requirementsBody = sectionText.get("requirements") ?? "";
-  const requirements = format === "html" ? parseRequirementsHtml(requirementsBody) : parseRequirements(requirementsBody);
+  const requirements = fmt === "html" ? parseRequirementsHtml(requirementsBody) : parseRequirements(requirementsBody);
   return { frontmatter: data, requirements, sections };
 }
 
@@ -361,14 +369,15 @@ function parseRequirements(md: string): ParsedRequirement[] {
  * both a WHEN and a THEN. `missing` names each absent element — `"requirements section"` |
  * `"normative statements"` | `"scenarios"` — so the cockpit can tell the author exactly what to add.
  */
-export function validateWellFormed(md: string, format: SpecFormat = "markdown"): { ok: boolean; missing: string[] } {
+export function validateWellFormed(md: string, format?: SpecFormat): { ok: boolean; missing: string[] } {
   const missing: string[] = [];
   const { body } = parseFrontmatter(md);
-  const requirements = parseSpecDoc(md, format).sections.find((s) => s.key === "requirements");
+  const fmt = format ?? detectSpecFormat(md);
+  const requirements = parseSpecDoc(md, fmt).sections.find((s) => s.key === "requirements");
   const reqBody = requirements?.markdown ?? "";
   // For HTML the normative word-checks run on tag-stripped text (SPEC-036) so inline markup is transparent
   // AND a token hidden in <script>/<style>/comment content cannot reach the governance gate.
-  const reqText = format === "html" ? stripTags(reqBody) : reqBody;
+  const reqText = fmt === "html" ? stripTags(reqBody) : reqBody;
   // (a) the Requirements section — the one SPEC_ANATOMY section that carries the normative content —
   // must be present and non-empty; a draft with no requirements has nothing to review.
   if (!requirements?.present || reqBody.trim() === "") missing.push("requirements section");
@@ -376,7 +385,7 @@ export function validateWellFormed(md: string, format: SpecFormat = "markdown"):
   if (!/\b(?:SHALL|MUST)\b/.test(reqText)) missing.push("normative statements");
   // (c) at least one acceptance scenario with both a trigger and an outcome. Markdown scans each
   // `#### Scenario:` block; HTML scans each `<h4>Scenario:` block's tag-stripped text.
-  const scenarioTexts = format === "html"
+  const scenarioTexts = fmt === "html"
     ? htmlSections(body, "h4").filter((s) => /^Scenario:/i.test(s.title)).map((s) => stripTags(s.content))
     : body.split(/^####\s+Scenario:/im).slice(1).map((block) => block.split(/^#{2,4}\s+/m)[0] ?? block);
   const hasWhenThen = scenarioTexts.some((t) => /\bWHEN\b/i.test(t) && /\bTHEN\b/i.test(t));
@@ -413,8 +422,8 @@ export function setFrontmatterStatus(md: string, status: string): string {
  * markdown the entry is a `- ` list item under `## Change history`; for HTML it is an `<li>` inside the list
  * under `<h2>Change history</h2>` (creating the section + `<ul>` if absent). Defaults to markdown.
  */
-export function appendChangeHistory(md: string, line: string, format: SpecFormat = "markdown"): string {
-  if (format === "html") return appendChangeHistoryHtml(md, line);
+export function appendChangeHistory(md: string, line: string, format?: SpecFormat): string {
+  if ((format ?? detectSpecFormat(md)) === "html") return appendChangeHistoryHtml(md, line);
   const item = line.trimStart().startsWith("- ") ? line.trimEnd() : `- ${line.trim()}`;
   const re = /^##\s+Change history\s*$/im;
   const match = re.exec(md);

@@ -1,7 +1,7 @@
 ---
 type: index
 generated: true
-updated: 2026-07-06
+updated: 2026-07-10
 ---
 
 <!-- GENERATED FILE — do not edit by hand. Regenerated from this folder's document frontmatter
@@ -38,3 +38,12 @@ updated: 2026-07-06
 | 025 | [Project overview dashboard, live git/PR status & desktop chrome cleanup](025.project-overview-dashboard-and-chrome-cleanup.md) | draft | client-shell, dashboard, git-status |
 | 026 | [OKF convention & deterministic docs/ bundle indexes](026.okf-bundle-indexes.md) | draft | spec-library |
 | 027 | [OKF grounding layer — typed grounding on the docs/ tree](027.okf-grounding-layer.md) | draft | grounding |
+| 028 | [Single-session delivery — one implementer session per spec, checklist-based completion](028.single-session-delivery.md) | draft | single-session-delivery, task-fanout, parallel-execution |
+| 029 | [Voice-enabled specification authoring — Voxa voice loop in the authoring cockpit](029.voxa-voice-spec-authoring.md) | draft | voice-authoring, voice-sidecar, client-voice-capture |
+| 030 | [Cross-repo specifications — canonical spec, ripple linkage & deterministic pointer projection](030.cross-repo-specifications.md) | draft | cross-repo-specs, ripple-projection, spec-lifecycle |
+| 031 | [Auto-PR configuration — let the implementer open the PR on delivery](031.auto-pr-configuration.md) | draft | single-session-delivery, project-config |
+| 032 | [Authoring cockpit — adjustable panels and rendered output](032.cockpit-adjustable-panels-and-rendered-output.md) | draft | authoring-cockpit, agent-output-rendering |
+| 033 | [Teal brand accent](033.teal-brand-accent.md) | draft | design-system |
+| 034 | [Codex harness adapter — a second leaf, proving the neutral seam over JSON-RPC](034.codex-harness-adapter.md) | draft | harness-integration |
+| 035 | [Agent-adjudicated review — the spec-author triages the panel, the human only approves](035.agent-adjudicated-review.md) | draft | review-panel, spec-lifecycle |
+| 036 | [HTML specifications alongside markdown — a format-dispatched spec pipeline](036.html-specifications.md) | draft | spec-format, authoring-cockpit, spec-lifecycle |
