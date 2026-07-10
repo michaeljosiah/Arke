@@ -28,7 +28,20 @@ export interface OmnigentConfig {
    * in-memory only (the spike behaviour).
    */
   sessionStorePath?: string;
+  /** Reconnect tuning for the per-session SSE pump (SPEC-037). Defaults to {@link DEFAULT_RECONNECT}. */
+  reconnect?: ReconnectOptions;
 }
+
+export interface ReconnectOptions {
+  /** Max reconnect attempts before a terminal degrade (SPEC-037 reconnect exhaustion). */
+  maxAttempts?: number;
+  /** Base backoff (ms); the delay is `min(base * 2^(attempt-1), max)`. */
+  baseDelayMs?: number;
+  /** Backoff ceiling (ms). */
+  maxDelayMs?: number;
+}
+
+export const DEFAULT_RECONNECT: Required<ReconnectOptions> = { maxAttempts: 5, baseDelayMs: 250, maxDelayMs: 5000 };
 
 export const DEFAULT_OMNIGENT_BASE_URL = "http://localhost:6767";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
