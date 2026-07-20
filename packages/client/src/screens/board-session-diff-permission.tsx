@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage, Textarea } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance, steerTaskLive } from '../live';
+import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance, steerTaskLive, resolveConformanceLive } from '../live';
 import { openCard } from '../nav';
 
 const e = React.createElement;
@@ -63,6 +63,51 @@ const COLS = [
   { id: 'delivered', label: 'Delivered' },
 ];
 
+function ConformanceBadge({ card }: any) {
+  // SPEC-039: show conformance status badge for delivered specs.
+  // Only show if spec is delivered and has conformance state.
+  if (card.status !== 'delivered' || !card.conformanceState) return null;
+
+  const isDrifted = card.conformanceState === 'drifted';
+  const isConformant = card.conformanceState === 'conformant';
+  const isUnknown = card.conformanceState === 'unknown';
+
+  const bgColor = isDrifted ? 'var(--destructive)' : isConformant ? 'var(--success)' : 'var(--muted)';
+  const textColor = isDrifted ? 'var(--destructive-foreground)' : isConformant ? 'var(--success-foreground)' : 'var(--muted-foreground)';
+  const label = isDrifted ? 'Drifted' : isConformant ? 'Conformant' : 'Checking';
+  const unresolved = card.conformanceResolutions?.filter((r: any) => !r.resolution).length || 0;
+
+  const openDriftPanel = (ev: any) => {
+    ev.stopPropagation();
+    store.set({ driftPanel: { cardId: card.id, card } });
+  };
+
+  return e('button', {
+    onClick: isDrifted ? openDriftPanel : undefined,
+    title: isDrifted ? `${unresolved} unresolved violation(s) — click to review` : `Spec is ${label.toLowerCase()}`,
+    style: {
+      marginTop: 6,
+      width: '100%',
+      padding: '4px 8px',
+      border: `1px solid ${bgColor}`,
+      borderRadius: 'var(--radius-sm)',
+      background: isDrifted ? 'rgba(220, 38, 38, 0.1)' : isConformant ? 'rgba(34, 197, 94, 0.1)' : 'var(--background)',
+      color: bgColor,
+      fontFamily: 'var(--font-sans)',
+      fontSize: 11,
+      fontWeight: isDrifted ? 600 : 500,
+      cursor: isDrifted ? 'pointer' : 'default',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    }
+  },
+    e(Icon, { name: isDrifted ? 'alertCircle' : isConformant ? 'check' : 'clock', size: 12 }),
+    label + (unresolved > 0 ? ` (${unresolved})` : '')
+  );
+}
+
 function BoardCard({ c }: any) {
   const open = () => openCard(c);
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -107,6 +152,7 @@ function BoardCard({ c }: any) {
     showBar ? e('div', { style: { position: 'absolute', left: 11, right: 11, top: 0, height: 2, background: 'var(--secondary)', borderRadius: 999, overflow: 'hidden', zIndex: 2 } },
       e('div', { style: { height: '100%', width: (c.progress || 0) + '%', background: 'var(--foreground)', transition: 'width .6s ease' } })) : null,
     e(KanbanCard, { taskId: c.id, title: c.title, status: c.status, harness: c.harness, model: c.model, needsHuman: c.needsHuman }),
+    e(ConformanceBadge, { card: c }),
     canPromote ? e('button', { onClick: promote, title: 'Promote this draft to in-review', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--muted-foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer' } }, 'Promote to review') : null,
     canDeliver ? e('button', { onClick: deliver, title: 'Start delivery — fan the approved spec\'s tasks out', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, cursor: 'pointer' } }, 'Deliver') : null,
     moves.length > 0
@@ -419,4 +465,105 @@ export function PermissionOverlay() {
           e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), onClick: () => decide('once') }, 'Allow once'))),
     ),
   );
+}
+
+function ViolationItem({ req, selected, onSelect }: any) {
+  return e('button', { onClick: () => onSelect(req.requirement), style: { appearance: 'none', textAlign: 'left', width: '100%', cursor: 'pointer', background: selected ? 'var(--accent)' : 'var(--background)', border: 'none', borderBottom: '1px solid var(--line-soft)', padding: '12px 16px', display: 'flex', alignItems: 'flex-start', gap: 12, transition: 'var(--transition-control)' } },
+    e('span', { style: { flex: 'none', marginTop: 2, color: 'var(--warning)', display: 'flex' } }, e(Icon, { name: 'alert', size: 15 })),
+    e('div', { style: { flex: 1, minWidth: 0 } },
+      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, req.requirement),
+      req.evidence && req.evidence.length > 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 } },
+        req.evidence.map((ev: any, i: number) => e('div', { key: i }, ev.file + ':' + (ev.line || '?')))) : null));
+}
+
+export function DriftPanel() {
+  // All hooks run unconditionally BEFORE any early return (Rules of Hooks) — the panel opens and
+  // closes by toggling `driftPanel`, which would otherwise change the hook count between renders.
+  const panel = useStore((s: any) => s.driftPanel) as any;
+  const [selectedResolution, setSelectedResolution] = React.useState<string | null>(null);
+  const [resolutionType, setResolutionType] = React.useState<'ratify' | 'correct' | 'accept' | null>(null);
+  const [acceptReason, setAcceptReason] = React.useState('');
+  const [amendment, setAmendment] = React.useState('');
+  const [resolving, setResolving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const card = panel?.card as any;
+  const resolutions = (card?.conformanceResolutions || []) as any[];
+  const unresolved = resolutions.filter((r) => !r.resolution);
+
+  // Auto-close once every violation is resolved — as an effect, never a setState-during-render call.
+  React.useEffect(() => {
+    if (panel && unresolved.length === 0) engine.closeDriftPanel();
+  }, [panel, unresolved.length]);
+
+  const resolve = async () => {
+    if (!resolutionType) return;
+    if (resolutionType === 'accept' && !acceptReason.trim()) return;
+    if (resolutionType === 'ratify' && !amendment.trim()) return;
+    setResolving(true);
+    setError(null);
+    try {
+      const req = unresolved.find((r) => r.requirement === selectedResolution);
+      if (!req) return;
+      const res = await resolveConformanceLive({
+        specId: card.specId || card.id,
+        requirement: req.requirement,
+        resolution: resolutionType,
+        reason: resolutionType === 'accept' ? acceptReason : undefined,
+        ...(resolutionType === 'ratify' ? { amendment } : {}),
+      });
+      const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+      if (err) {
+        setError(err);
+      } else {
+        engine.closeDriftPanel();
+      }
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  if (!panel || unresolved.length === 0) return null;
+
+  const selected = unresolved.find((r) => r.requirement === selectedResolution);
+
+  return e('div', { onClick: () => engine.closeDriftPanel(), style: { position: 'fixed', inset: 0, zIndex: 81, background: 'rgba(10,10,10,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 } },
+    e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden', boxShadow: 'var(--shadow-lg)' } },
+      e('div', { style: { padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
+        e('span', { style: { width: 34, height: 34, borderRadius: 'var(--radius-md)', background: 'var(--warning-bg, rgba(180, 83, 9, 0.1))', color: 'var(--warning, #B45309)', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' } }, e(Icon, { name: 'alert', size: 18 })),
+        e('div', null,
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--warning, #B45309)' } }, 'Conformance violations'),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, color: 'var(--foreground)' } }, card.title || card.id))),
+      e('div', { style: { flex: 1, overflowY: 'auto', minHeight: 0, padding: '12px 0' } },
+        unresolved.map((req: any) => e(ViolationItem, { key: req.requirement, req, selected: req.requirement === selectedResolution, onSelect: setSelectedResolution }))),
+      selected ? e('div', { style: { padding: '16px 20px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 12 } },
+        e('div', null,
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', marginBottom: 4 } }, 'Violation: ' + selected.requirement),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.5, color: 'var(--muted-foreground)' } }, 'Post-delivery changes violated this requirement. Choose a resolution path.')),
+        resolutionType === 'ratify' ? e('div', null,
+          e('label', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', display: 'block', marginBottom: 4 } }, 'Amendment (update spec to reflect the code change)'),
+          e(Textarea, { rows: 4, value: amendment, placeholder: 'Describe how the requirement has changed and should be updated…', onChange: (ev: any) => setAmendment(ev.target.value), style: { width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-mono)', fontSize: 12 } })) : null,
+        resolutionType === 'accept' ? e('div', null,
+          e('label', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', display: 'block', marginBottom: 4 } }, 'Reason'),
+          e(Textarea, { rows: 3, value: acceptReason, placeholder: 'Why is this violation acceptable?…', onChange: (ev: any) => setAcceptReason(ev.target.value), style: { width: '100%', boxSizing: 'border-box' } })) : null,
+        e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          e(Button, {
+            variant: resolutionType === 'ratify' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'ratify' ? null : 'ratify'); setAmendment(''); setError(null); },
+            size: 'sm'
+          }, '📝 Ratify (amend)'),
+          e(Button, {
+            variant: resolutionType === 'correct' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'correct' ? null : 'correct'); setError(null); },
+            size: 'sm'
+          }, '🔧 Correct (re-deliver)'),
+          e(Button, {
+            variant: resolutionType === 'accept' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'accept' ? null : 'accept'); setAcceptReason(''); setError(null); },
+            size: 'sm'
+          }, '✓ Accept (exception)')),
+        error ? e('div', { style: { padding: 10, borderRadius: 'var(--radius-md)', background: 'var(--destructive-bg, rgba(220, 38, 38, 0.1))', border: '1px solid var(--destructive)', color: 'var(--destructive)', fontFamily: 'var(--font-sans)', fontSize: 12 } }, error) : null,
+        resolutionType ? e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end' } },
+          e(Button, { variant: 'ghost', onClick: () => { setSelectedResolution(null); setResolutionType(null); setAcceptReason(''); setAmendment(''); setError(null); } }, 'Cancel'),
+          e(Button, { onClick: () => void resolve(), disabled: !resolutionType || (resolutionType === 'accept' && !acceptReason.trim()) || (resolutionType === 'ratify' && !amendment.trim()) || resolving }, resolutionType === 'ratify' ? 'Apply amendment' : resolutionType === 'correct' ? 'Start correction' : 'Record exception')) : null) : null));
 }

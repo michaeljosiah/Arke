@@ -31,6 +31,10 @@ export interface CardState {
   column: BoardColumn;
   /** The specification's governed frontmatter status. */
   status: string;
+  /** Conformance state (SPEC-039), orthogonal to status. Projected only on delivered specs. */
+  conformanceState?: string; // "conformant" | "drifted" | "unknown"
+  /** SPEC-039: per-requirement conformance resolutions (ratify/correct/accept). */
+  conformanceResolutions?: Array<{ requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string }>;
   /** Representative harness/model for the card face (from the most recently active session). */
   harness?: string;
   model?: string;
@@ -195,6 +199,45 @@ export class ReadModel {
       case "message.updated":
         this.applyMessageUpdated(event);
         break;
+      case "conformance.drift-detected": {
+        // SPEC-039: drift detected for a single requirement (emitted per violation)
+        const card = this.ensureCard(event.specId);
+        card.conformanceState = "drifted";
+        // Track unresolved violation
+        if (!card.conformanceResolutions) card.conformanceResolutions = [];
+        const existing = card.conformanceResolutions.find((r) => r.requirement === event.requirement);
+        if (!existing) {
+          card.conformanceResolutions.push({
+            requirement: event.requirement,
+            resolution: undefined,
+          });
+        }
+        break;
+      }
+      case "conformance.checked": {
+        // SPEC-039: conformance check completed (Tier-2 review phase)
+        const card = this.ensureCard(event.specId);
+        // Set conformanceState based on check result (conformant if no violations raised)
+        card.conformanceState = event.state === "unknown" ? "unknown" : "conformant";
+        break;
+      }
+      case "conformance.resolved": {
+        // SPEC-039: track per-requirement conformance resolutions on the card
+        const card = this.ensureCard(event.specId);
+        if (!card.conformanceResolutions) card.conformanceResolutions = [];
+        const existing = card.conformanceResolutions.find((r) => r.requirement === event.requirement);
+        if (existing) {
+          existing.resolution = event.resolution;
+          existing.reason = event.reason;
+        } else {
+          card.conformanceResolutions.push({
+            requirement: event.requirement,
+            resolution: event.resolution,
+            ...(event.reason ? { reason: event.reason } : {}),
+          });
+        }
+        break;
+      }
       // turn.quiescent is a runtime receipt for consumers; it carries no read-model state change.
       // todo.updated / projection.write enrich detail views, not the board column here.
       default:
@@ -264,6 +307,12 @@ export class ReadModel {
   private recompute(card: CardState): void {
     card.needsHuman = card.sessions.some((s) => s.needsHuman);
     card.column = this.deriveColumn(card);
+    // SPEC-039: project conformance state orthogonal to lifecycle status (delivered specs only, Phase A = unknown)
+    if (card.status === "delivered") {
+      card.conformanceState = "unknown"; // Phase A: no checks running yet
+    } else {
+      card.conformanceState = undefined;
+    }
   }
 
   /**

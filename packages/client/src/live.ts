@@ -50,6 +50,9 @@ interface LiveCard {
   needsHuman: boolean;
   progress: number;
   sessions: LiveSession[];
+  // SPEC-039: conformance state (orthogonal to status, projected only on delivered specs)
+  conformanceState?: string; // "conformant" | "drifted" | "unknown"
+  conformanceResolutions?: Array<{ requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string }>;
 }
 
 const FAILED_STATUSES = new Set(['interrupted', 'error']);
@@ -533,6 +536,43 @@ function applyEvent(ev: any) {
       });
       break;
     }
+    case 'conformance.checked': {
+      // SPEC-039: conformance check completed (Tier-2 review result or Tier-1 deterministic verdict).
+      // Update card's conformanceState based on check result.
+      const c = ensureCard(ev.specId);
+      c.conformanceState = ev.state === 'unknown' ? 'unknown' : 'conformant';
+      rail('conformance.checked', `conformance.checked · ${ev.specId} · ${ev.state}`, ts);
+      break;
+    }
+    case 'conformance.drift-detected': {
+      // SPEC-039: a single conformance violation was detected (Tier-1 or Tier-2).
+      // Update card state and auto-open the drift panel for user resolution.
+      const c = ensureCard(ev.specId);
+      c.conformanceState = 'drifted';
+      // Auto-open the drift panel overlay so user sees violations immediately.
+      store.set({ driftPanel: { cardId: ev.specId, card: c } });
+      rail('conformance.drift-detected', `conformance.drift-detected · ${ev.specId} · ${ev.requirement}`, ts);
+      break;
+    }
+    case 'conformance.resolved': {
+      // SPEC-039: user resolved a conformance violation (ratify/correct/accept).
+      // Update card state to reflect resolution.
+      const c = ensureCard(ev.specId);
+      if (!c.conformanceResolutions) c.conformanceResolutions = [];
+      const existing = c.conformanceResolutions.find((r) => r.requirement === ev.requirement);
+      if (existing) {
+        existing.resolution = ev.resolution;
+        existing.reason = ev.reason;
+      } else {
+        c.conformanceResolutions.push({
+          requirement: ev.requirement,
+          resolution: ev.resolution,
+          ...(ev.reason ? { reason: ev.reason } : {}),
+        });
+      }
+      rail('conformance.resolved', `conformance.resolved · ${ev.specId} · ${ev.requirement} · ${ev.resolution}`, ts);
+      break;
+    }
     default:
       break;
   }
@@ -709,6 +749,7 @@ function applySnapshot(snap: any) {
   if (snap?.projectId && snap.projectId === desiredProjectId) rebindInFlight = false;
   // The snapshot carries one folded card per specification (SPEC-023): a CardState with `sessions[]`,
   // its aggregate `column`, and the spec's frontmatter `status`. Adopt them and rebuild the session index.
+  // SPEC-039: also includes conformanceState and conformanceResolutions for delivered specs.
   const snapCards: any[] = Array.isArray(snap?.cards) ? snap.cards : [];
   cards.clear();
   sessionSpec.clear();
@@ -722,6 +763,8 @@ function applySnapshot(snap: any) {
       id: c.specId, specId: c.specId, title: c.title, col, status: c.status,
       harness: c.harness, model: c.model, needsHuman: !!c.needsHuman,
       progress: progressFor(sessions.find((s) => s.kind === 'task')?.status ?? c.status, col), sessions,
+      conformanceState: c.conformanceState,
+      conformanceResolutions: c.conformanceResolutions,
     });
     for (const s of sessions) sessionSpec.set(s.sessionId, c.specId);
     if (c.status) specStatus.set(c.specId, c.status);
@@ -1158,6 +1201,12 @@ export function steerTaskLive(args: { sessionId: string; specId?: string | null;
 export async function fetchGovernance(): Promise<void> {
   const res = await liveRequest("governance.status");
   if (res?.ok && res.result) store.set({ governance: res.result });
+}
+
+/** SPEC-039: resolve a conformance violation (ratify/correct/accept). Governed operation — refused while offline. */
+export function resolveConformanceLive(args: { specId: string; requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string; amendment?: string }): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to resolve" });
+  return liveRequest("conformance.resolve", args, 30000);
 }
 
 /**

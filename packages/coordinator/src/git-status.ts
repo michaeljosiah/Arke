@@ -95,6 +95,42 @@ export function gitDiffStat(
 }
 
 /**
+ * Get the full SHA of the current HEAD on the mainline branch (SPEC-039), for detecting
+ * mainline movement. Returns empty string on error (fail-open).
+ */
+export function gitMainlineHeadSha(root: string, mainlineBranch?: string): string {
+  if (!gitAvailable()) return "";
+  const branch = mainlineBranch || gitDefaultBranch(root) || "main";
+  try {
+    const res = spawnSync("git", ["rev-parse", branch], gitOpts(root));
+    if (res.status !== 0) return "";
+    return (res.stdout ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * List the paths of files changed between two git revisions (SPEC-039), via `git diff --name-only`.
+ * Used to derive the conformance footprint at delivery time. Returns an empty array on any error
+ * or if the revisions don't exist (fail-open).
+ */
+export function gitChangedPaths(root: string, from: string, to: string): string[] {
+  if (!gitAvailable()) return [];
+  try {
+    const res = spawnSync("git", ["diff", "--name-only", from, to], gitOpts(root));
+    if (res.status !== 0) return [];
+    const paths = (res.stdout ?? "")
+      .trim()
+      .split("\n")
+      .filter((line) => line.trim().length > 0);
+    return paths;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The count of files with uncommitted changes in `root`'s working tree, via `git status --porcelain`.
  * This is only meaningful for whichever branch is currently checked out — the caller compares against
  * `gitHeadBranch(root)` (queried fresh) and renders `null` ("—") for any other branch (SPEC-025 Dec #4).

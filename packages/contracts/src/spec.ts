@@ -45,6 +45,13 @@ export type SpecFormat = z.infer<typeof SpecFormat>;
 export const RippleKind = z.enum(["delta", "pointer"]);
 export type RippleKind = z.infer<typeof RippleKind>;
 
+/** Conformance state (SPEC-039) — orthogonal to SpecStatus, projected onto delivered specs.
+ *  `conformant` — the spec's requirements are met by the current code.
+ *  `drifted` — one or more requirements are violated (post-delivery change).
+ *  `unknown` — not yet evaluated, no footprint, or an evaluation gap (Tier-1 capability fail-closed). */
+export const ConformanceState = z.enum(["conformant", "drifted", "unknown"]);
+export type ConformanceState = z.infer<typeof ConformanceState>;
+
 /**
  * A cross-repo ripple declared on a canonical spec (SPEC-030): the affected repo (a portable `org/repo`
  * git-remote slug), the ripple spec's id (or the literal `generated` for a pointer stub), and whether it
@@ -85,6 +92,24 @@ export const ResolvedCanonical = CanonicalLink.extend({
   stale: z.boolean().optional(),
 });
 export type ResolvedCanonical = z.infer<typeof ResolvedCanonical>;
+
+/** Conformance frontmatter block (SPEC-039): optional per-spec declaration of footprint paths and
+ *  sentinel coverage opt-out. Parsed by a dedicated `parseConformance`-style walker (flat parser cannot
+ *  read nested lists), round-trips safely through frontmatter rewrites. */
+export const SpecConformance = z.object({
+  paths: z.array(z.string()).optional(), // glob patterns to widen/narrow the footprint, or override
+  off: z.boolean().optional(), // opt-out of sentinel coverage for this spec
+});
+export type SpecConformance = z.infer<typeof SpecConformance>;
+
+/** The recorded footprint of paths a delivered spec's delivery changed (SPEC-039). */
+export const SpecFootprint = z.object({
+  specId: z.string(),
+  paths: z.array(z.string()),
+  source: z.enum(["delivery-diff", "frontmatter"]),
+  recordedAt: z.string().datetime(),
+});
+export type SpecFootprint = z.infer<typeof SpecFootprint>;
 
 /** Frontmatter block at the head of every specification file. */
 export const SpecFrontmatter = z.object({

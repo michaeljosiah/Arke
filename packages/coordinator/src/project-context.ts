@@ -9,6 +9,7 @@ import {
   escapeHtml,
   parseFrontmatter,
   parseLinkage,
+  parseConformance,
   parseSpecDoc,
   setFrontmatterStatus,
   specFormatOf,
@@ -29,6 +30,7 @@ import {
   type AgentImage,
   type AgentModel,
   type CapabilityMaterialisation,
+  type ConformanceState,
   type GovernanceLevel,
   type HarnessAdapter,
   type PermissionAck,
@@ -36,6 +38,7 @@ import {
   type ResolvedCanonical,
   type ResolvedRipple,
   type ScaffoldStep,
+  type SpecFootprint,
 } from "@arke/contracts";
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
@@ -61,13 +64,20 @@ import {
   ISSUE_EXTRACTION_PROMPT_VERSION,
   buildAdjudicationPrompt,
   buildReviewerPrompt,
+  buildConformanceCheckPrompt,
   detectAdjudicatorCollisions,
   detectAgreement,
+  detectConformanceAgreement,
+  extractDeterministicChecks,
+  executeDeterministicChecks,
+  extractRequirementsFromSpec,
+  parseConformanceVerdicts,
   parseDispositions,
   parseReviewerIssues,
   sectionHashOf,
   validateReviewers,
   type AdjudicationIssue,
+  type DeterministicCheckResult,
   type ReviewerConfig,
 } from "./review-panel.js";
 import {
@@ -82,7 +92,7 @@ import {
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage, readConfigTools, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
-import { computeRepoStatus, gitRepoIdentity } from "./git-status.js";
+import { computeRepoStatus, gitChangedPaths, gitMainlineHeadSha, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
 import type { GrantStore } from "./grant-store.js";
@@ -176,6 +186,26 @@ const MAX_REVIEW_ROUNDS = 3;
 /** SPEC-035: how many times a round re-prompts the author for a missing/unjustified blocker disposition. */
 const ADJUDICATION_RETRY_LIMIT = 1;
 
+/** SPEC-039: state for one conformance check (multiple independent reviewers assessing requirement verdicts). */
+interface ConformanceReviewerState {
+  role: string;
+  sessionId: string;
+  model: string;
+  label: string;
+  status: "running" | "done" | "error";
+}
+interface ConformanceFolder {
+  folderId: string;
+  specId: string;
+  revision: string; // the mainline SHA or worktree HEAD being evaluated
+  trigger: "delivery" | "webhook" | "repo-refresh" | "cli";
+  requirements: string[]; // requirement titles from the spec
+  changedPaths: string[]; // files touched by the trigger
+  reviewers: ConformanceReviewerState[];
+  verdicts: Array<{ requirement: string; reviewerRole: string; verdict: "satisfied" | "violated" | "uncertain"; evidence?: Array<{ file: string; line: number }> | null }>;
+  status: "running" | "complete" | "failed";
+}
+
 /** A spec library entry projected from a file's frontmatter + coordinator lifecycle state (SPEC-008). */
 export interface SpecLibraryRecord {
   specId: string;
@@ -201,6 +231,8 @@ interface SpecRecordState {
   status: SpecStatus;
   prNumber?: number;
   normativeHash?: string;
+  footprint?: SpecFootprint;
+  conformanceState?: ConformanceState;
 }
 
 export class ProjectContext {
@@ -260,6 +292,10 @@ export class ProjectContext {
    *  can remove the worktree/branch the same way a pre-dispatch failure does — otherwise the deterministic
    *  branch name lingers and every retry trips the branch-collision guard. */
   private readonly deliveryWorktrees = new Map<string, { wtPath: string; branch: string }>();
+  /** SPEC-039: live conformance folders by id; reviewer sessions folded per-requirement. */
+  private readonly conformanceFolders = new Map<string, ConformanceFolder>();
+  /** SPEC-039: reviewer session id → its folder + role, so the pump routes verdicts to the folder. */
+  private readonly conformanceReviewerSessions = new Map<string, { folderId: string; role: string }>();
   /** Canonical spec ids whose author-adjudicated review loop CONVERGED — the finalisation gate (SPEC-035,
    *  superseding SPEC-007's bare panel-completion gate). A legacy `review.complete` does NOT satisfy it. */
   private readonly convergedReviews = new Set<string>();
@@ -277,6 +313,10 @@ export class ProjectContext {
   private readonly indexDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** SPEC-027: the assembled grounding digest, cached until a `docs/` change or grounding upload. */
   private groundingDigestCache: GroundingDigest | null = null;
+  /** SPEC-039: per-spec conformance check debounce timers, coalescing rapid mainline changes into one check. */
+  private readonly conformanceDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  /** SPEC-039: the last-evaluated mainline SHA for detecting HEAD movement (git-ignored runtime state). */
+  private lastEvaluatedMainlineSha = "";
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -314,6 +354,7 @@ export class ProjectContext {
   async start(): Promise<void> {
     this.classify();
     await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
+    this.loadMainlineShaCheckpoint(); // SPEC-039: restore lastEvaluatedMainlineSha for catch-up on project open
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -652,8 +693,23 @@ export class ProjectContext {
       this.repoSlugCache = null; // SPEC-030: the remote changed — recompute the cached org/repo slug lazily
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "repo.identity", ...id });
     }
-    const ghEnabled = this.hostConfigured();
+
+    // SPEC-039: detect mainline HEAD movement for conformance checking
     const defaultBranch = id.default || "main";
+    const currentMainlineSha = gitMainlineHeadSha(this.root, defaultBranch);
+    if (currentMainlineSha && currentMainlineSha !== this.lastEvaluatedMainlineSha) {
+      // Mainline moved: get the diff and enqueue checks for affected specs
+      const changedPaths = this.lastEvaluatedMainlineSha
+        ? gitChangedPaths(this.root, this.lastEvaluatedMainlineSha, currentMainlineSha)
+        : [];
+      if (changedPaths.length > 0) {
+        this.enqueueConformanceChecks(changedPaths, "repo-refresh", currentMainlineSha);
+      }
+      this.lastEvaluatedMainlineSha = currentMainlineSha;
+      this.saveMainlineShaCheckpoint(); // SPEC-039: persist for catch-up on project reopen
+    }
+
+    const ghEnabled = this.hostConfigured();
     // Resolve the forge ONCE (it shells `git remote`), not per spec row (SPEC-038) — honouring an explicit
     // `.arke/config.json` `forge` override over remote auto-detection. The arrow keeps the forge's `this`
     // bound (AzureReposForge.pullRequestStatus reads the remote off the instance).
@@ -1459,6 +1515,9 @@ export class ProjectContext {
       }
       case "merged": // git-side transition kind (WebhookTransition.kind) — the PR merged
         await this.flattenAndMerge(specId, t.branch);
+        // SPEC-039: record conformance footprint (webhook data doesn't provide base/head SHAs yet;
+        // frontmatter override or empty paths until hosted webhook data is extended).
+        this.recordConformanceFootprint(specId);
         await setStatus("delivered", "pr-merged"); // SPEC-024: the governed terminal status is `delivered`
         return { applied: "delivered", specId };
       case "force-push": {
@@ -1607,6 +1666,9 @@ export class ProjectContext {
       // Post-merge, HEAD is on the mainline. Flatten the delta tags, set `delivered`, and COMMIT that on
       // the mainline so git truly reflects the delivered outcome (no working-tree-vs-HEAD divergence).
       await this.flattenAndMerge(cid, specBranch);
+      // SPEC-039: record conformance footprint (for local merge, use frontmatter override or empty).
+      // Full git diff-based footprint calculation is part of Phase B (mainline-change sensor).
+      this.recordConformanceFootprint(cid);
       await this.commitStatus(cid, "delivered", "manual-merge", { actor });
       gitCommit(this.root, found.relPath, `spec(${cid}): delivered (local merge)`);
       return { applied: "delivered", specId: cid };
@@ -1667,6 +1729,403 @@ export class ProjectContext {
       }
     }
     await this.trace.write({ kind: "flatten.complete", projectId: this.projectId, specId, branch, changed });
+  }
+
+  /**
+   * Record the conformance footprint (SPEC-039) — the set of changed paths from delivery.
+   * Called at the `delivered` transition; records both git-derived and frontmatter-override paths.
+   * Returns the footprint (or undefined if recording failed silently).
+   */
+  private recordConformanceFootprint(specId: string, baseSha?: string, headSha?: string): SpecFootprint | undefined {
+    const found = this.findSpecFile(specId);
+    if (!found) return undefined;
+
+    // Check frontmatter override: `conformance: off` or explicit `paths:`
+    const conformance = parseConformance(found.text);
+    if (conformance.off) {
+      // Opt-out: store footprint with empty paths and source "frontmatter"
+      const fp: SpecFootprint = {
+        specId,
+        paths: [],
+        source: "frontmatter",
+        recordedAt: new Date().toISOString(),
+      };
+      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), footprint: fp });
+      return fp;
+    }
+
+    let paths: string[] = [];
+
+    // If explicit paths declared in frontmatter, use those; otherwise derive from git diff
+    if (conformance.paths && conformance.paths.length > 0) {
+      paths = conformance.paths;
+    } else if (baseSha && headSha) {
+      // Git-derived footprint from delivery merge range
+      paths = gitChangedPaths(this.root, baseSha, headSha);
+    }
+
+    const fp: SpecFootprint = {
+      specId,
+      paths,
+      source: conformance.paths && conformance.paths.length > 0 ? "frontmatter" : "delivery-diff",
+      recordedAt: new Date().toISOString(),
+    };
+
+    this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), footprint: fp });
+    return fp;
+  }
+
+  /**
+   * Sentinel scheduler (SPEC-039): enqueue a conformance check for specs whose footprint
+   * was touched by a given set of changed paths. Debounced and batched per spec to avoid thrashing.
+   * Called when the mainline-change sensor detects a merge or HEAD movement.
+   */
+  private enqueueConformanceChecks(changedPaths: string[], trigger: "webhook" | "repo-refresh" | "cli", targetRevision: string): void {
+    // Map changed paths to affected delivered specs (those with non-empty footprints).
+    const affectedSpecs = new Set<string>();
+    for (const spec of this.specLibrary()) {
+      const record = this.specRecords.get(spec.specId);
+      if (record?.status === "delivered" && record.footprint?.paths && record.footprint.paths.length > 0) {
+        // Check if any changed path matches any footprint glob
+        if (this.footprintTouched(record.footprint.paths, changedPaths)) {
+          affectedSpecs.add(spec.specId);
+        }
+      }
+    }
+
+    // Debounce checks per spec: clear any existing timer and schedule a new one
+    for (const specId of affectedSpecs) {
+      const existing = this.conformanceDebounce.get(specId);
+      if (existing) clearTimeout(existing);
+
+      const timer = setTimeout(() => {
+        this.conformanceDebounce.delete(specId);
+        void this.enqueueConformanceCheck(specId, trigger, targetRevision);
+      }, 500); // 500ms debounce window
+
+      this.conformanceDebounce.set(specId, timer);
+    }
+  }
+
+  /**
+   * Check if any changed path matches any footprint glob pattern.
+   * Simple implementation: direct string matching (globs are TODO).
+   */
+  private footprintTouched(footprintPaths: string[], changedPaths: string[]): boolean {
+    for (const changed of changedPaths) {
+      for (const footprint of footprintPaths) {
+        // TODO: implement glob matching (for now, exact prefix matching)
+        if (changed.startsWith(footprint) || footprint.startsWith(changed)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Enqueue a single conformance check (SPEC-039). Spawns an extended reviewer panel to assess
+   * whether the spec's requirements are still met by the changed code paths.
+   */
+  private async enqueueConformanceCheck(specId: string, trigger: "webhook" | "repo-refresh" | "cli", revision: string): Promise<void> {
+    const found = this.findSpecFile(specId);
+    if (!found) return;
+
+    const doc = parseSpecDoc(found.text);
+    const requirements = extractRequirementsFromSpec(found.text);
+    if (requirements.length === 0) {
+      // No requirements to check, mark as unknown state
+      await this.emit({
+        seq: 0,
+        ts: 0,
+        harness: this.adapter.id,
+        type: "conformance.checked",
+        specId,
+        revision,
+        perRequirement: [],
+        state: "unknown",
+      } as DomainEvent);
+      return;
+    }
+
+    // Get the footprint from the spec record (captured at delivery time)
+    const record = this.specRecords.get(found.canonicalId);
+    const changedPaths = record?.footprint?.paths ?? [];
+
+    // SPEC-039 Phase B Phase 2: Run Tier-1 deterministic checks before Tier-2 reviewer panel
+    const deterministicRules = extractDeterministicChecks(requirements);
+    if (deterministicRules.length > 0) {
+      // Create a file reader for the current state
+      const fileReader = async (path: string): Promise<string | null> => {
+        try {
+          const resolvedPath = resolve(this.projectRoot, path);
+          if (!resolvedPath.startsWith(this.projectRoot)) return null; // Security: prevent path traversal
+          return readFileSync(resolvedPath, "utf-8");
+        } catch {
+          return null;
+        }
+      };
+
+      const checkResults = await executeDeterministicChecks(deterministicRules, changedPaths, fileReader);
+      const failedChecks = checkResults.filter((r) => !r.passed);
+
+      if (failedChecks.length > 0) {
+        // Deterministic checks failed; emit conformance.checked with drifted state (Tier-1 verdict)
+        const verdicts = checkResults.map((r) => ({
+          requirement: r.requirement,
+          verdict: r.passed ? ("satisfied" as const) : ("violated" as const),
+          source: "deterministic" as const,
+          evidence: r.evidence,
+        }));
+
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "conformance.checked",
+          specId: found.canonicalId,
+          revision,
+          perRequirement: verdicts,
+          state: "drifted" as const,
+        } as DomainEvent);
+
+        // Emit per-requirement drift-detected events for each violation
+        for (const verdict of verdicts) {
+          if (verdict.verdict === "violated") {
+            await this.emit({
+              seq: 0,
+              ts: 0,
+              harness: this.adapter.id,
+              type: "conformance.drift-detected",
+              specId: found.canonicalId,
+              requirement: verdict.requirement,
+              verdict,
+            } as DomainEvent);
+          }
+        }
+
+        await this.trace.write({
+          kind: "conformance.drift-detected",
+          projectId: this.projectId,
+          specId: found.canonicalId,
+          revision,
+          verdict: "drift",
+        });
+
+        return; // Skip Tier-2 reviewer panel since we already have drift
+      }
+    }
+
+    // Validate reviewers (SPEC-039: at least two, pairwise distinct)
+    const reviewersArg = [{ role: "conformance-reviewer-a" }, { role: "conformance-reviewer-b" }];
+    const validation = validateReviewers(this.agents, reviewersArg);
+    if (!validation.ok) {
+      // Validation failed; emit unknown state rather than failing
+      await this.emit({
+        seq: 0,
+        ts: 0,
+        harness: this.adapter.id,
+        type: "conformance.checked",
+        specId,
+        revision,
+        perRequirement: requirements.map((req) => ({
+          requirement: req,
+          verdict: "uncertain" as const,
+          source: "judged" as const,
+        })),
+        state: "unknown",
+      } as DomainEvent);
+      return;
+    }
+
+    // Create conformance folder and spawn reviewers
+    const folderId = `conformance-${randomUUID()}`;
+    this.groundingDigestCache = null; // ground reviewers on the CURRENT docs/ tree
+    const grounding = this.groundingSummary();
+    const prompt = buildConformanceCheckPrompt(requirements, changedPaths, found.text, ""); // TODO: fetch code excerpts
+
+    const folder: ConformanceFolder = {
+      folderId,
+      specId: found.canonicalId,
+      revision,
+      trigger,
+      requirements,
+      changedPaths,
+      reviewers: [],
+      verdicts: [],
+      status: "running",
+    };
+
+    // Create reviewer sessions and register folder before dispatching
+    for (const r of validation.reviewers) {
+      const ref = await this.adapter.createSession({ specId: found.canonicalId });
+      this.conformanceReviewerSessions.set(ref.sessionId, { folderId, role: r.role });
+      folder.reviewers.push({ role: r.role, sessionId: ref.sessionId, model: r.model, label: r.label, status: "running" });
+    }
+    this.conformanceFolders.set(folderId, folder);
+
+    // Dispatch reviewers in parallel
+    for (const r of folder.reviewers) {
+      await this.adapter.dispatchAsync({
+        sessionId: r.sessionId,
+        agent: r.role,
+        ...this.modelArg(r.role),
+        parts: [{ type: "text", text: prompt }],
+      });
+    }
+
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.enqueued",
+      specId: found.canonicalId,
+      revision,
+      trigger,
+      paths: changedPaths,
+    } as DomainEvent);
+
+    await this.trace.write({
+      kind: "conformance.enqueued",
+      projectId: this.projectId,
+      specId: found.canonicalId,
+      revision,
+      trigger,
+    });
+  }
+
+  /**
+   * Resolve a conformance drift violation (SPEC-039): ratify (accept as-is, optionally amend spec),
+   * correct (dispatch corrective delivery), or accept (record exception with reason).
+   */
+  private async resolveConformance(
+    specId: string,
+    requirement: string,
+    resolution: "ratify" | "correct" | "accept",
+    reason?: string,
+    amendment?: string,
+    actor?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { ok: false, error: `specification '${specId}' not found` };
+
+    const doc = parseSpecDoc(found.text);
+    const requirements = extractRequirementsFromSpec(found.text);
+    const requirementExists = requirements.includes(requirement);
+    if (!requirementExists) return { ok: false, error: `requirement '${requirement}' not found in spec` };
+
+    // Emit conformance.resolved event
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.resolved",
+      specId: found.canonicalId,
+      requirement,
+      resolution,
+      ...(reason ? { reason } : {}),
+      ...(amendment ? { amendment } : {}),
+      ...(actor ? { actor } : {}),
+    } as DomainEvent);
+
+    await this.trace.write({
+      kind: "conformance.resolved",
+      projectId: this.projectId,
+      specId: found.canonicalId,
+      requirement,
+      resolution,
+      reason: reason ?? null,
+      actor: actor ?? null,
+    });
+
+    // Handle each resolution type
+    if (resolution === "ratify") {
+      // Accept the drift: optionally apply amendment to the spec
+      if (amendment) {
+        try {
+          writeFileSync(found.absPath, amendment, "utf8");
+          await this.trace.write({
+            kind: "conformance.amended",
+            projectId: this.projectId,
+            specId: found.canonicalId,
+            requirement,
+            actor: actor ?? null,
+          });
+        } catch (err) {
+          return { ok: false, error: `failed to apply amendment: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { ok: true };
+    } else if (resolution === "correct") {
+      // Dispatch corrective delivery: spawn a task session focused on fixing the violation
+      try {
+        // Create a corrective delivery task with the failed requirement in focus
+        const tasks = [`Fix conformance violation: "${requirement}"`];
+        const cid = found.canonicalId;
+
+        // Reuse delivery session spawning logic but mark it as corrective
+        const wtPath = resolve(this.root, ".arke", `wt-${randomUUID()}`);
+        const branch = `arke/conformance-fix-${randomUUID().split("-")[0]}`;
+        try {
+          mkdirSync(wtPath, { recursive: true });
+        } catch (err) {
+          return { ok: false, error: `failed to create worktree: ${err instanceof Error ? err.message : String(err)}` };
+        }
+
+        this.deliveryWorktrees.set(cid, { wtPath, branch });
+        const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
+
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "session.status",
+          sessionId: `${cid}#corrective-delivery`,
+          specId: cid,
+          kind: "task",
+          status: "running",
+        } as DomainEvent);
+
+        // Dispatch corrective delivery prompt (similar to buildDeliveryPrompt but focused on the requirement)
+        const correctionPrompt = [
+          `A conformance check detected that the specification's requirement "${requirement}" is no longer satisfied by the code.`,
+          `Your task: fix the code to satisfy this requirement again.`,
+          ``,
+          `Specification: ${found.relPath}`,
+          `Failed requirement: ${requirement}`,
+          ``,
+          `Make minimal, focused changes to fix only this violation. Do not refactor unrelated code.`,
+        ].join("\n");
+
+        await this.adapter.dispatchAsync({
+          sessionId: ref.sessionId,
+          agent: "implementer",
+          ...this.modelArg("implementer"),
+          parts: [{ type: "text", text: correctionPrompt }],
+        });
+
+        this.deliverySessions.set(cid, ref.sessionId);
+        this.deliverySessionOwner.set(ref.sessionId, cid);
+
+        await this.trace.write({
+          kind: "conformance.corrective-delivery",
+          projectId: this.projectId,
+          specId: cid,
+          requirement,
+          sessionId: ref.sessionId,
+          actor: actor ?? null,
+        });
+
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: `failed to dispatch corrective delivery: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    } else {
+      // resolution === "accept": record the exception
+      if (!reason) return { ok: false, error: `accept resolution requires a reason` };
+      // Exception recorded in the trace above; no further action needed
+      return { ok: true };
+    }
   }
 
   /** Find the spec file whose frontmatter `branch` matches (for webhook routing by branch). */
@@ -2426,6 +2885,33 @@ export class ProjectContext {
     }
   }
 
+  /** SPEC-039: load the last-evaluated mainline SHA from .arke/.mainline-head for catch-up on project open. */
+  private loadMainlineShaCheckpoint(): void {
+    try {
+      const checkpointPath = resolve(this.root, ".arke", ".mainline-head");
+      if (existsSync(checkpointPath)) {
+        this.lastEvaluatedMainlineSha = readFileSync(checkpointPath, "utf8").trim();
+      }
+    } catch (err) {
+      // If reading the checkpoint fails, just proceed with empty SHA (will check all current changes)
+      this.lastEvaluatedMainlineSha = "";
+    }
+  }
+
+  /** SPEC-039: save the last-evaluated mainline SHA to .arke/.mainline-head for catch-up on project open. */
+  private saveMainlineShaCheckpoint(): void {
+    if (!this.lastEvaluatedMainlineSha) return; // Don't persist empty SHA
+    try {
+      const checkpointDir = resolve(this.root, ".arke");
+      if (!existsSync(checkpointDir)) mkdirSync(checkpointDir, { recursive: true });
+      const checkpointPath = resolve(checkpointDir, ".mainline-head");
+      writeFileSync(checkpointPath, this.lastEvaluatedMainlineSha, "utf8");
+    } catch (err) {
+      // If persisting the checkpoint fails, log and continue — it's not fatal
+      console.warn(`Failed to save mainline SHA checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /**
    * Grounding for reviewers (SPEC-007, upgraded by SPEC-027): the AGENTS.md house-rules head plus the
    * typed grounding digest — foundational business grounding, the existing spec corpus, and the
@@ -2516,6 +3002,151 @@ export class ProjectContext {
       return;
     }
     await this.startAdjudication(loop, panel);
+  }
+
+  /**
+   * Route a conformance reviewer session's completed turn into its folder (SPEC-039): parse verdicts,
+   * fold them with the quorum rule (≥2 reviewers for drift), and complete the folder when all reviewers are done.
+   * Called from the pump for conformance reviewer sessions only.
+   */
+  private async ingestConformanceVerdict(sessionId: string, text: string): Promise<void> {
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    const folder = this.conformanceFolders.get(link.folderId);
+    if (!folder) return;
+    const reviewer = folder.reviewers.find((r) => r.sessionId === sessionId);
+    if (!reviewer || reviewer.status !== "running") return;
+
+    for (const parsed of parseConformanceVerdicts(text)) {
+      folder.verdicts.push({
+        requirement: parsed.requirement,
+        reviewerRole: link.role,
+        verdict: parsed.verdict,
+        evidence: parsed.evidence,
+      });
+    }
+    reviewer.status = "done";
+    await this.maybeCompleteConformanceFolder(folder);
+  }
+
+  /** Mark a conformance reviewer errored and continue the folder; complete (failed) if all reviewers errored. */
+  private async failConformanceReviewer(sessionId: string, reason: string): Promise<void> {
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    const folder = this.conformanceFolders.get(link.folderId);
+    const reviewer = folder?.reviewers.find((r) => r.sessionId === sessionId);
+    if (!folder || !reviewer || reviewer.status !== "running") return;
+    reviewer.status = "error";
+    await this.maybeCompleteConformanceFolder(folder);
+  }
+
+  /**
+   * Complete a conformance folder once all reviewers have finished (SPEC-039). Fold verdicts with the
+   * agreement rule (≥2 reviewers for drift), emit conformance.checked with the final state, and emit
+   * conformance.drift-detected for each violated requirement. Handle low-confidence verdicts (sub-quorum).
+   */
+  private async maybeCompleteConformanceFolder(folder: ConformanceFolder): Promise<void> {
+    if (folder.reviewers.some((r) => r.status === "running")) return;
+    const anySucceeded = folder.reviewers.some((r) => r.status === "done");
+    folder.status = anySucceeded ? "complete" : "failed";
+
+    for (const r of folder.reviewers) this.conformanceReviewerSessions.delete(r.sessionId);
+
+    // Fold verdicts: group by requirement and apply quorum rule
+    const agreement = detectConformanceAgreement(folder.verdicts);
+
+    const perRequirement: Array<{ requirement: string; verdict: "satisfied" | "violated" | "uncertain"; source: "judged"; evidence?: Array<{ file: string; line: number }> | null }> = [];
+    let state: "conformant" | "drifted" | "unknown" = "conformant";
+
+    for (const group of agreement) {
+      // Quorum: violation raised only when ≥2 reviewers agree it's violated
+      const violationCount = group.verdictCounts.violated;
+      const satisfiedCount = group.verdictCounts.satisfied;
+      const uncertainCount = group.verdictCounts.uncertain;
+      const totalReviewers = group.reviewerVerdicts.length;
+
+      let finalVerdict: "satisfied" | "violated" | "uncertain";
+      let evidence: Array<{ file: string; line: number }> | null = null;
+
+      if (violationCount >= 2) {
+        // Quorum for violation reached
+        finalVerdict = "violated";
+        state = "drifted";
+        // Collect evidence from all reviewers who said violated
+        const evidenceSet = new Map<string, { file: string; line: number }>();
+        for (const v of group.reviewerVerdicts) {
+          if (v.verdict === "violated") {
+            // Find the verdict with evidence in the verdicts array
+            const verdictEntry = folder.verdicts.find((fv) => fv.requirement === group.requirement && fv.reviewerRole === v.role);
+            if (verdictEntry?.evidence) {
+              for (const e of verdictEntry.evidence) {
+                evidenceSet.set(`${e.file}:${e.line}`, e);
+              }
+            }
+          }
+        }
+        evidence = Array.from(evidenceSet.values());
+      } else if (violationCount === 1 && totalReviewers === 2) {
+        // Sub-quorum violation: emit low-confidence event
+        finalVerdict = "uncertain";
+        const singleViolator = group.reviewerVerdicts.find((v) => v.verdict === "violated");
+        if (singleViolator) {
+          await this.emit({
+            seq: 0,
+            ts: 0,
+            harness: this.adapter.id,
+            type: "conformance.low-confidence",
+            specId: folder.specId,
+            requirement: group.requirement,
+            verdicts: group.reviewerVerdicts.map((v) => ({
+              requirement: group.requirement,
+              verdict: v.verdict,
+              source: "judged" as const,
+            })),
+          } as DomainEvent);
+        }
+      } else if (satisfiedCount >= totalReviewers - 1) {
+        // Consensus for satisfied (allowing one uncertain)
+        finalVerdict = "satisfied";
+      } else {
+        // Otherwise uncertain
+        finalVerdict = "uncertain";
+      }
+
+      perRequirement.push({
+        requirement: group.requirement,
+        verdict: finalVerdict,
+        source: "judged",
+        ...(evidence && evidence.length > 0 ? { evidence } : {}),
+      });
+
+      // Emit drift-detected for violated requirements (with quorum)
+      if (finalVerdict === "violated") {
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "conformance.drift-detected",
+          specId: folder.specId,
+          requirement: group.requirement,
+          verdict: { requirement: group.requirement, verdict: "violated", evidence, source: "judged" },
+        } as DomainEvent);
+      }
+    }
+
+    // Emit conformance.checked with final state
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.checked",
+      specId: folder.specId,
+      revision: folder.revision,
+      perRequirement,
+      state,
+    } as DomainEvent);
+
+    this.conformanceFolders.delete(folder.folderId);
   }
 
   /**
@@ -3293,6 +3924,23 @@ export class ProjectContext {
           a.confirm === true,
         );
       }
+      case "conformance.resolve": { // SPEC-039: resolve a conformance drift violation (ratify/correct/accept)
+        const resolution = String(a.resolution ?? "");
+        if (resolution !== "ratify" && resolution !== "correct" && resolution !== "accept") {
+          throw new Error(`invalid conformance resolution '${resolution}': must be ratify | correct | accept`);
+        }
+        if (resolution === "accept" && !a.reason) {
+          throw new Error(`conformance.resolve with action 'accept' requires a reason`);
+        }
+        return this.resolveConformance(
+          String(a.specId ?? ""),
+          String(a.requirement ?? ""),
+          resolution,
+          a.reason ? String(a.reason) : undefined,
+          a.amendment ? String(a.amendment) : undefined,
+          a.actor ? String(a.actor) : undefined,
+        );
+      }
       case "folder.inspect":
         return this.inspectFolder(a.path);
       case "repo.clone":
@@ -3527,6 +4175,7 @@ export class ProjectContext {
       await this.emit(event);
       await this.observeReviewerEvent(event);
       await this.observeAdjudication(event); // SPEC-035: ingest the spec-author's adjudication turn
+      await this.observeConformanceVerdictEvent(event); // SPEC-039: ingest conformance reviewer verdicts
       await this.observeGeneration(event); // SPEC-013: ingest the generation agent's proposal
       await this.observeDeliveryProgress(event); // SPEC-009 revised: has every task been checked off (or errored)?
 
@@ -3608,6 +4257,23 @@ export class ProjectContext {
       this.adjudicationSessions.delete(sessionId);
       const loop = this.reviewLoops.get(link.specId);
       if (loop && loop.panelId === link.panelId) await this.failReviewLoop(loop, "adjudication session reported error");
+    }
+  }
+
+  /**
+   * Route conformance reviewer sessions' completed turns into their folder (SPEC-039): a completed
+   * ASSISTANT turn → parse verdicts + fold; an errored session → mark failed and continue.
+   * No-op for non-conformance-reviewer sessions.
+   */
+  private async observeConformanceVerdictEvent(event: DomainEvent): Promise<void> {
+    if (!("sessionId" in event)) return;
+    const sessionId = (event as { sessionId: string }).sessionId;
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    if (event.type === "message.updated" && !event.isStreaming && event.role === "assistant") {
+      await this.ingestConformanceVerdict(sessionId, event.text);
+    } else if (event.type === "session.status" && event.status === "error") {
+      await this.failConformanceReviewer(sessionId, "conformance reviewer session reported error");
     }
   }
 

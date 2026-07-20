@@ -61,6 +61,8 @@ export const store = createStore({
   // Live generation proposal (SPEC-013): the agent's pre-write artefacts awaiting review.
   generation: null,
   permission: null,
+  // SPEC-039: conformance drift panel overlay for delivered specs.
+  driftPanel: null,
   entryFolder: null,
   theme: 'light',
   density: 'comfortable',
@@ -168,6 +170,19 @@ function acceptDiff(id) {
   notify('merge', id + ' merged into main', 'board');
 }
 
+function openDriftPanel(cardId) {
+  const s = store.get();
+  const card = s.cards.find((c) => c.id === cardId);
+  if (!card) return;
+  const unresolved = (card.conformanceResolutions || []).filter((r) => !r.resolution);
+  if (unresolved.length === 0) return;
+  store.set({ driftPanel: { cardId, card } });
+}
+
+function closeDriftPanel() {
+  store.set({ driftPanel: null });
+}
+
 // SPEC-033: brand-accent hexes applied to --primary/--ring. `teal` (#0E7490) is the default; it
 // clears WCAG AA in both themes (≈5.1:1 white-on-teal for text; ≈3.7:1 teal-on-#0A0A0A for the
 // component/focus ring in dark), so a separate dark-theme teal is not needed. `mono` = no override
@@ -205,4 +220,4 @@ export function useStore(selector?) {
   return selector ? selector(s) : s;
 }
 
-export const engine = { raisePermission, resolvePermission, acceptDiff, logEvent, logAudit, notify, markNotifsRead, moveCard, patchCard, applyTheme, COL_ORDER };
+export const engine = { raisePermission, resolvePermission, acceptDiff, openDriftPanel, closeDriftPanel, logEvent, logAudit, notify, markNotifsRead, moveCard, patchCard, applyTheme, COL_ORDER };

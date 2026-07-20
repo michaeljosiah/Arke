@@ -6,7 +6,7 @@ import { Shell } from './shell';
 import { Picker, Initialisation, Library } from './screens/picker-init-library';
 import { Cockpit } from './screens/cockpit';
 import { Review, Generation } from './screens/review-generation';
-import { Board, Session, DiffReview, PermissionOverlay } from './screens/board-session-diff-permission';
+import { Board, Session, DiffReview, PermissionOverlay, DriftPanel } from './screens/board-session-diff-permission';
 import { Overview } from './screens/overview';
 import { Audit, Projections, Agents, Notifications } from './screens/audit-projections-roster-notifications';
 import { Harnesses, Settings } from './screens/harnesses-settings';
@@ -118,6 +118,7 @@ export function Root() {
   return e(React.Fragment, null,
     e(Shell, { crumbs },
       e(ScreenContent, { view }),
-      e(PermissionOverlay, null)),
+      e(PermissionOverlay, null),
+      e(DriftPanel, null)),
     e(Tweaks, null));
 }

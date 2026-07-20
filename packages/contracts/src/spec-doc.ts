@@ -480,3 +480,65 @@ function appendChangeHistoryHtml(html: string, line: string): string {
   // No list yet in the section — create one right after the heading.
   return `${html.slice(0, start)}\n<ul>\n  ${li}\n</ul>${html.slice(start)}`;
 }
+
+/**
+ * Parse the SPEC-039 conformance block — nested `paths:` list and a scalar `off` — from a spec's
+ * frontmatter. Like {@link parseLinkage}, the flat {@link parseFrontmatter} cannot read nested structures,
+ * so this walks the frontmatter's inner lines by indentation. Malformed entries yield a warning (never a
+ * throw) and are dropped. A spec with no conformance block yields `{ paths: [], off: false, warnings: [] }`.
+ */
+export function parseConformance(md: string): { paths: string[]; off: boolean; warnings: string[] } {
+  const warnings: string[] = [];
+  const paths: string[] = [];
+  let off = false;
+  let mode: "none" | "conformance" = "none";
+
+  for (const raw of frontmatterInner(md).split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim()) continue;
+
+    // Top-level `conformance:` key opens the block (or a scalar `conformance: off`).
+    if (/^conformance:\s*(.*)$/i.test(line) && !/^\s/.test(line)) {
+      const m = /^conformance:\s*(.*)$/i.exec(line)!;
+      const value = m[1]!.trim().toLowerCase();
+      if (value === "off") {
+        off = true;
+        mode = "none";
+      } else if (value === "" || value === "~" || value === "null") {
+        // No scalar value — the block structure (nested paths/off) may follow
+        mode = "conformance";
+      } else {
+        warnings.push(`conformance block has unexpected scalar value: ${value}`);
+        mode = "none";
+      }
+      continue;
+    }
+
+    // Nested keys: indent 2+ spaces, key: value pairs within the block.
+    if (mode === "conformance") {
+      const nested = /^\s{2,}([a-z_]+):\s*(.*)$/i.exec(line);
+      if (nested) {
+        const key = nested[1]?.toLowerCase() ?? "";
+        const value = nested[2] ?? "";
+        switch (key) {
+          case "paths":
+            // Nested `paths:` opens a list; items are unquoted strings on indented lines
+            break; // Will be collected on following lines
+          case "off":
+            off = value.toLowerCase().trim() === "true" || value.trim() === "yes";
+            break;
+        }
+      } else {
+        // Indented line without a colon — assume it's a list item under `paths:`
+        const item = line.trim();
+        if (item && !item.startsWith("#")) {
+          // Remove leading `- ` (YAML list item marker) if present
+          const itemText = item.replace(/^-\s*/, "").trim();
+          if (itemText) paths.push(itemText);
+        }
+      }
+    }
+  }
+
+  return { paths, off, warnings };
+}
