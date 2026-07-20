@@ -1925,6 +1925,140 @@ export class ProjectContext {
     });
   }
 
+  /**
+   * Resolve a conformance drift violation (SPEC-039): ratify (accept as-is, optionally amend spec),
+   * correct (dispatch corrective delivery), or accept (record exception with reason).
+   */
+  private async resolveConformance(
+    specId: string,
+    requirement: string,
+    resolution: "ratify" | "correct" | "accept",
+    reason?: string,
+    amendment?: string,
+    actor?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const found = this.findSpecFile(specId);
+    if (!found) return { ok: false, error: `specification '${specId}' not found` };
+
+    const doc = parseSpecDoc(found.text);
+    const requirements = extractRequirementsFromSpec(found.text);
+    const requirementExists = requirements.includes(requirement);
+    if (!requirementExists) return { ok: false, error: `requirement '${requirement}' not found in spec` };
+
+    // Emit conformance.resolved event
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.resolved",
+      specId: found.canonicalId,
+      requirement,
+      resolution,
+      ...(reason ? { reason } : {}),
+      ...(amendment ? { amendment } : {}),
+      ...(actor ? { actor } : {}),
+    } as DomainEvent);
+
+    await this.trace.write({
+      kind: "conformance.resolved",
+      projectId: this.projectId,
+      specId: found.canonicalId,
+      requirement,
+      resolution,
+      reason: reason ?? null,
+      actor: actor ?? null,
+    });
+
+    // Handle each resolution type
+    if (resolution === "ratify") {
+      // Accept the drift: optionally apply amendment to the spec
+      if (amendment) {
+        try {
+          writeFileSync(found.absPath, amendment, "utf8");
+          await this.trace.write({
+            kind: "conformance.amended",
+            projectId: this.projectId,
+            specId: found.canonicalId,
+            requirement,
+            actor: actor ?? null,
+          });
+        } catch (err) {
+          return { ok: false, error: `failed to apply amendment: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { ok: true };
+    } else if (resolution === "correct") {
+      // Dispatch corrective delivery: spawn a task session focused on fixing the violation
+      try {
+        // Create a corrective delivery task with the failed requirement in focus
+        const tasks = [`Fix conformance violation: "${requirement}"`];
+        const cid = found.canonicalId;
+
+        // Reuse delivery session spawning logic but mark it as corrective
+        const wtPath = resolve(this.root, ".arke", `wt-${randomUUID()}`);
+        const branch = `arke/conformance-fix-${randomUUID().split("-")[0]}`;
+        try {
+          mkdirSync(wtPath, { recursive: true });
+        } catch (err) {
+          return { ok: false, error: `failed to create worktree: ${err instanceof Error ? err.message : String(err)}` };
+        }
+
+        this.deliveryWorktrees.set(cid, { wtPath, branch });
+        const ref = await this.adapter.createSession({ specId: cid, parent: cid, cwd: wtPath });
+
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "session.status",
+          sessionId: `${cid}#corrective-delivery`,
+          specId: cid,
+          kind: "task",
+          status: "running",
+        } as DomainEvent);
+
+        // Dispatch corrective delivery prompt (similar to buildDeliveryPrompt but focused on the requirement)
+        const correctionPrompt = [
+          `A conformance check detected that the specification's requirement "${requirement}" is no longer satisfied by the code.`,
+          `Your task: fix the code to satisfy this requirement again.`,
+          ``,
+          `Specification: ${found.relPath}`,
+          `Failed requirement: ${requirement}`,
+          ``,
+          `Make minimal, focused changes to fix only this violation. Do not refactor unrelated code.`,
+        ].join("\n");
+
+        await this.adapter.dispatchAsync({
+          sessionId: ref.sessionId,
+          agent: "implementer",
+          ...this.modelArg("implementer"),
+          parts: [{ type: "text", text: correctionPrompt }],
+        });
+
+        this.deliverySessions.set(cid, ref.sessionId);
+        this.deliverySessionOwner.set(ref.sessionId, cid);
+
+        await this.trace.write({
+          kind: "conformance.corrective-delivery",
+          projectId: this.projectId,
+          specId: cid,
+          requirement,
+          sessionId: ref.sessionId,
+          actor: actor ?? null,
+        });
+
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: `failed to dispatch corrective delivery: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    } else {
+      // resolution === "accept": record the exception
+      if (!reason) return { ok: false, error: `accept resolution requires a reason` };
+      // Exception recorded in the trace above; no further action needed
+      return { ok: true };
+    }
+  }
+
   /** Find the spec file whose frontmatter `branch` matches (for webhook routing by branch). */
   private findSpecByBranch(branch: string): { canonicalId: string; text: string; frontmatter: Record<string, string>; absPath: string } | null {
     for (const rec of this.specLibrary()) {
@@ -3692,6 +3826,23 @@ export class ProjectContext {
           action,
           a.rationale ? String(a.rationale) : undefined,
           a.confirm === true,
+        );
+      }
+      case "conformance.resolve": { // SPEC-039: resolve a conformance drift violation (ratify/correct/accept)
+        const resolution = String(a.resolution ?? "");
+        if (resolution !== "ratify" && resolution !== "correct" && resolution !== "accept") {
+          throw new Error(`invalid conformance resolution '${resolution}': must be ratify | correct | accept`);
+        }
+        if (resolution === "accept" && !a.reason) {
+          throw new Error(`conformance.resolve with action 'accept' requires a reason`);
+        }
+        return this.resolveConformance(
+          String(a.specId ?? ""),
+          String(a.requirement ?? ""),
+          resolution,
+          a.reason ? String(a.reason) : undefined,
+          a.amendment ? String(a.amendment) : undefined,
+          a.actor ? String(a.actor) : undefined,
         );
       }
       case "folder.inspect":
