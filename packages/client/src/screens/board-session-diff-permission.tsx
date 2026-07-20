@@ -477,17 +477,24 @@ function ViolationItem({ req, selected, onSelect }: any) {
 }
 
 export function DriftPanel() {
+  // All hooks run unconditionally BEFORE any early return (Rules of Hooks) — the panel opens and
+  // closes by toggling `driftPanel`, which would otherwise change the hook count between renders.
   const panel = useStore((s: any) => s.driftPanel) as any;
-  if (!panel) return null;
-  const card = panel.card as any;
-  const resolutions = (card?.conformanceResolutions || []) as any[];
-  const unresolved = resolutions.filter((r) => !r.resolution);
   const [selectedResolution, setSelectedResolution] = React.useState<string | null>(null);
   const [resolutionType, setResolutionType] = React.useState<'ratify' | 'correct' | 'accept' | null>(null);
   const [acceptReason, setAcceptReason] = React.useState('');
   const [amendment, setAmendment] = React.useState('');
   const [resolving, setResolving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+
+  const card = panel?.card as any;
+  const resolutions = (card?.conformanceResolutions || []) as any[];
+  const unresolved = resolutions.filter((r) => !r.resolution);
+
+  // Auto-close once every violation is resolved — as an effect, never a setState-during-render call.
+  React.useEffect(() => {
+    if (panel && unresolved.length === 0) engine.closeDriftPanel();
+  }, [panel, unresolved.length]);
 
   const resolve = async () => {
     if (!resolutionType) return;
@@ -516,13 +523,9 @@ export function DriftPanel() {
     }
   };
 
-  if (unresolved.length === 0) {
-    engine.closeDriftPanel();
-    return null;
-  }
+  if (!panel || unresolved.length === 0) return null;
 
   const selected = unresolved.find((r) => r.requirement === selectedResolution);
-  const canResolve = !!selectedResolution && (selectedResolution !== 'accept' || acceptReason.trim());
 
   return e('div', { onClick: () => engine.closeDriftPanel(), style: { position: 'fixed', inset: 0, zIndex: 81, background: 'rgba(10,10,10,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 } },
     e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden', boxShadow: 'var(--shadow-lg)' } },
