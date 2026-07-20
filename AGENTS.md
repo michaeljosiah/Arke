@@ -27,8 +27,12 @@ Read `docs/PRD-Arke.html` for the full product definition.
    behaviour, and every projection write is logged with its trigger.
 5. **Every governed action is recorded.** Spec history is in git; permission decisions and
    projections are in the append-only trace (`.arke/trace.ndjson`).
-6. **Agents reference logical model tiers** (`capable`, `mid`), resolved per project to the
-   internal model gateway — never hardcoded vendor model IDs.
+6. **Each agent image declares its own concrete model** — provider-qualified (`provider/model`)
+   plus config-time effort — in its versioned config (`agents/<name>/config.yaml`), edited via
+   the agent editor, never hardcoded in coordinator or client code. "The agent is the model"
+   (SPEC-016 revised): the logical-tier resolver (`capable`/`mid`) was removed; tier fields in
+   `.arke/config.json` are inert legacy storage, and reviewer independence is enforced by
+   comparing the models agents declare (`validateReviewers`), not by tier indirection.
 
 ## Architecture (where things live)
 
@@ -44,10 +48,14 @@ Read `docs/PRD-Arke.html` for the full product definition.
   (`packages/adapter-omnigent` is the separate *meta-harness* substrate spike, ADR-0002.)
 - `packages/client` — the React orchestrator UI (cockpit, board, review, generation, …).
 - `apps/desktop` — Electron shell that embeds the coordinator (one signed app).
-- `.opencode/agents` — the versioned agent roster (spec-author, architect, reviewer-a,
-  reviewer-b, implementer, researcher); roles reference a logical `tier`, resolved to a
-  concrete model/instance by the coordinator registry. See
-  [`docs/agent-roster-and-model-resolution.md`](docs/agent-roster-and-model-resolution.md).
+- `.opencode/agents` — the harness-materialised agent roster (spec-author, architect,
+  reviewer-a, reviewer-b, implementer, researcher). The portable source of truth is the agent
+  image (`agents/<name>/config.yaml`, loaded by the coordinator's `AgentRegistry`): each role
+  declares its own concrete `provider/model` and effort there — there is no runtime tier
+  resolution (SPEC-016 revised). See
+  [`docs/agent-roster-and-model-resolution.md`](docs/agent-roster-and-model-resolution.md)
+  (note: that document still describes the removed tier-resolution model and needs its own
+  update).
 - `docs/specifications` — the specifications themselves + `specification.template.md`.
 - `.claude/skills/arke-design` — the **canonical design template** for Arke (the `arke-design`
   skill): the shadcn/ui neutral monochrome token contract (`_ds/.../tokens/`), Geist
