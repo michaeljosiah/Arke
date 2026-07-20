@@ -354,6 +354,7 @@ export class ProjectContext {
   async start(): Promise<void> {
     this.classify();
     await this.reconstructReviewGate(); // SPEC-007: rebuild completed-review set from the durable trace
+    this.loadMainlineShaCheckpoint(); // SPEC-039: restore lastEvaluatedMainlineSha for catch-up on project open
     this.registry.upsert({ root: this.root, name: this.name, state: this.projectState });
     await this.refreshReachability();
     // Build the registry projection even when the harness isn't ready: a configured-but-unreachable
@@ -705,6 +706,7 @@ export class ProjectContext {
         this.enqueueConformanceChecks(changedPaths, "repo-refresh", currentMainlineSha);
       }
       this.lastEvaluatedMainlineSha = currentMainlineSha;
+      this.saveMainlineShaCheckpoint(); // SPEC-039: persist for catch-up on project reopen
     }
 
     const ghEnabled = this.hostConfigured();
@@ -2880,6 +2882,33 @@ export class ProjectContext {
       if (rec.kind === "ripple.stale" && typeof rec.specId === "string") this.staleRipples.add(rec.specId);
       if (rec.kind === "ripple.acked" && typeof rec.specId === "string") this.staleRipples.delete(rec.specId);
       if (rec.kind === "client.request" && rec.verb === "pr.approve" && typeof rec.sessionId === "string") this.prApproved.add(rec.sessionId);
+    }
+  }
+
+  /** SPEC-039: load the last-evaluated mainline SHA from .arke/.mainline-head for catch-up on project open. */
+  private loadMainlineShaCheckpoint(): void {
+    try {
+      const checkpointPath = resolve(this.root, ".arke", ".mainline-head");
+      if (existsSync(checkpointPath)) {
+        this.lastEvaluatedMainlineSha = readFileSync(checkpointPath, "utf8").trim();
+      }
+    } catch (err) {
+      // If reading the checkpoint fails, just proceed with empty SHA (will check all current changes)
+      this.lastEvaluatedMainlineSha = "";
+    }
+  }
+
+  /** SPEC-039: save the last-evaluated mainline SHA to .arke/.mainline-head for catch-up on project open. */
+  private saveMainlineShaCheckpoint(): void {
+    if (!this.lastEvaluatedMainlineSha) return; // Don't persist empty SHA
+    try {
+      const checkpointDir = resolve(this.root, ".arke");
+      if (!existsSync(checkpointDir)) mkdirSync(checkpointDir, { recursive: true });
+      const checkpointPath = resolve(checkpointDir, ".mainline-head");
+      writeFileSync(checkpointPath, this.lastEvaluatedMainlineSha, "utf8");
+    } catch (err) {
+      // If persisting the checkpoint fails, log and continue — it's not fatal
+      console.warn(`Failed to save mainline SHA checkpoint: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
