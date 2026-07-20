@@ -31,6 +31,8 @@ export interface CardState {
   column: BoardColumn;
   /** The specification's governed frontmatter status. */
   status: string;
+  /** Conformance state (SPEC-039), orthogonal to status. Projected only on delivered specs. */
+  conformanceState?: string; // "conformant" | "drifted" | "unknown"
   /** Representative harness/model for the card face (from the most recently active session). */
   harness?: string;
   model?: string;
@@ -264,6 +266,12 @@ export class ReadModel {
   private recompute(card: CardState): void {
     card.needsHuman = card.sessions.some((s) => s.needsHuman);
     card.column = this.deriveColumn(card);
+    // SPEC-039: project conformance state orthogonal to lifecycle status (delivered specs only, Phase A = unknown)
+    if (card.status === "delivered") {
+      card.conformanceState = "unknown"; // Phase A: no checks running yet
+    } else {
+      card.conformanceState = undefined;
+    }
   }
 
   /**

@@ -9,6 +9,7 @@ import {
   escapeHtml,
   parseFrontmatter,
   parseLinkage,
+  parseConformance,
   parseSpecDoc,
   setFrontmatterStatus,
   specFormatOf,
@@ -29,6 +30,7 @@ import {
   type AgentImage,
   type AgentModel,
   type CapabilityMaterialisation,
+  type ConformanceState,
   type GovernanceLevel,
   type HarnessAdapter,
   type PermissionAck,
@@ -36,6 +38,7 @@ import {
   type ResolvedCanonical,
   type ResolvedRipple,
   type ScaffoldStep,
+  type SpecFootprint,
 } from "@arke/contracts";
 import { isWithinRoot, resolveDirectory } from "@arke/adapter-opencode";
 import {
@@ -82,7 +85,7 @@ import {
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage, readConfigTools, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
-import { computeRepoStatus, gitRepoIdentity } from "./git-status.js";
+import { computeRepoStatus, gitChangedPaths, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
 import type { GrantStore } from "./grant-store.js";
@@ -201,6 +204,8 @@ interface SpecRecordState {
   status: SpecStatus;
   prNumber?: number;
   normativeHash?: string;
+  footprint?: SpecFootprint;
+  conformanceState?: ConformanceState;
 }
 
 export class ProjectContext {
@@ -1459,6 +1464,9 @@ export class ProjectContext {
       }
       case "merged": // git-side transition kind (WebhookTransition.kind) — the PR merged
         await this.flattenAndMerge(specId, t.branch);
+        // SPEC-039: record conformance footprint (webhook data doesn't provide base/head SHAs yet;
+        // frontmatter override or empty paths until hosted webhook data is extended).
+        this.recordConformanceFootprint(specId);
         await setStatus("delivered", "pr-merged"); // SPEC-024: the governed terminal status is `delivered`
         return { applied: "delivered", specId };
       case "force-push": {
@@ -1607,6 +1615,9 @@ export class ProjectContext {
       // Post-merge, HEAD is on the mainline. Flatten the delta tags, set `delivered`, and COMMIT that on
       // the mainline so git truly reflects the delivered outcome (no working-tree-vs-HEAD divergence).
       await this.flattenAndMerge(cid, specBranch);
+      // SPEC-039: record conformance footprint (for local merge, use frontmatter override or empty).
+      // Full git diff-based footprint calculation is part of Phase B (mainline-change sensor).
+      this.recordConformanceFootprint(cid);
       await this.commitStatus(cid, "delivered", "manual-merge", { actor });
       gitCommit(this.root, found.relPath, `spec(${cid}): delivered (local merge)`);
       return { applied: "delivered", specId: cid };
@@ -1667,6 +1678,50 @@ export class ProjectContext {
       }
     }
     await this.trace.write({ kind: "flatten.complete", projectId: this.projectId, specId, branch, changed });
+  }
+
+  /**
+   * Record the conformance footprint (SPEC-039) — the set of changed paths from delivery.
+   * Called at the `delivered` transition; records both git-derived and frontmatter-override paths.
+   * Returns the footprint (or undefined if recording failed silently).
+   */
+  private recordConformanceFootprint(specId: string, baseSha?: string, headSha?: string): SpecFootprint | undefined {
+    const found = this.findSpecFile(specId);
+    if (!found) return undefined;
+
+    // Check frontmatter override: `conformance: off` or explicit `paths:`
+    const conformance = parseConformance(found.text);
+    if (conformance.off) {
+      // Opt-out: store footprint with empty paths and source "frontmatter"
+      const fp: SpecFootprint = {
+        specId,
+        paths: [],
+        source: "frontmatter",
+        recordedAt: new Date().toISOString(),
+      };
+      this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), footprint: fp });
+      return fp;
+    }
+
+    let paths: string[] = [];
+
+    // If explicit paths declared in frontmatter, use those; otherwise derive from git diff
+    if (conformance.paths && conformance.paths.length > 0) {
+      paths = conformance.paths;
+    } else if (baseSha && headSha) {
+      // Git-derived footprint from delivery merge range
+      paths = gitChangedPaths(this.root, baseSha, headSha);
+    }
+
+    const fp: SpecFootprint = {
+      specId,
+      paths,
+      source: conformance.paths && conformance.paths.length > 0 ? "frontmatter" : "delivery-diff",
+      recordedAt: new Date().toISOString(),
+    };
+
+    this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), footprint: fp });
+    return fp;
   }
 
   /** Find the spec file whose frontmatter `branch` matches (for webhook routing by branch). */
