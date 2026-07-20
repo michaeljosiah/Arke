@@ -64,8 +64,12 @@ import {
   ISSUE_EXTRACTION_PROMPT_VERSION,
   buildAdjudicationPrompt,
   buildReviewerPrompt,
+  buildConformanceCheckPrompt,
   detectAdjudicatorCollisions,
   detectAgreement,
+  detectConformanceAgreement,
+  extractRequirementsFromSpec,
+  parseConformanceVerdicts,
   parseDispositions,
   parseReviewerIssues,
   sectionHashOf,
@@ -179,6 +183,26 @@ const MAX_REVIEW_ROUNDS = 3;
 /** SPEC-035: how many times a round re-prompts the author for a missing/unjustified blocker disposition. */
 const ADJUDICATION_RETRY_LIMIT = 1;
 
+/** SPEC-039: state for one conformance check (multiple independent reviewers assessing requirement verdicts). */
+interface ConformanceReviewerState {
+  role: string;
+  sessionId: string;
+  model: string;
+  label: string;
+  status: "running" | "done" | "error";
+}
+interface ConformanceFolder {
+  folderId: string;
+  specId: string;
+  revision: string; // the mainline SHA or worktree HEAD being evaluated
+  trigger: "delivery" | "webhook" | "repo-refresh" | "cli";
+  requirements: string[]; // requirement titles from the spec
+  changedPaths: string[]; // files touched by the trigger
+  reviewers: ConformanceReviewerState[];
+  verdicts: Array<{ requirement: string; reviewerRole: string; verdict: "satisfied" | "violated" | "uncertain"; evidence?: Array<{ file: string; line: number }> | null }>;
+  status: "running" | "complete" | "failed";
+}
+
 /** A spec library entry projected from a file's frontmatter + coordinator lifecycle state (SPEC-008). */
 export interface SpecLibraryRecord {
   specId: string;
@@ -265,6 +289,10 @@ export class ProjectContext {
    *  can remove the worktree/branch the same way a pre-dispatch failure does — otherwise the deterministic
    *  branch name lingers and every retry trips the branch-collision guard. */
   private readonly deliveryWorktrees = new Map<string, { wtPath: string; branch: string }>();
+  /** SPEC-039: live conformance folders by id; reviewer sessions folded per-requirement. */
+  private readonly conformanceFolders = new Map<string, ConformanceFolder>();
+  /** SPEC-039: reviewer session id → its folder + role, so the pump routes verdicts to the folder. */
+  private readonly conformanceReviewerSessions = new Map<string, { folderId: string; role: string }>();
   /** Canonical spec ids whose author-adjudicated review loop CONVERGED — the finalisation gate (SPEC-035,
    *  superseding SPEC-007's bare panel-completion gate). A legacy `review.complete` does NOT satisfy it. */
   private readonly convergedReviews = new Set<string>();
@@ -1791,27 +1819,107 @@ export class ProjectContext {
   }
 
   /**
-   * Enqueue a single conformance check (SPEC-039). Records the enqueue event and schedules
-   * the check for harness execution (Phase B: extended reviewer panel).
+   * Enqueue a single conformance check (SPEC-039). Spawns an extended reviewer panel to assess
+   * whether the spec's requirements are still met by the changed code paths.
    */
   private async enqueueConformanceCheck(specId: string, trigger: "webhook" | "repo-refresh" | "cli", revision: string): Promise<void> {
     const found = this.findSpecFile(specId);
     if (!found) return;
+
+    const doc = parseSpecDoc(found.text);
+    const requirements = extractRequirementsFromSpec(found.text);
+    if (requirements.length === 0) {
+      // No requirements to check, mark as unknown state
+      await this.emit({
+        seq: 0,
+        ts: 0,
+        harness: this.adapter.id,
+        type: "conformance.checked",
+        specId,
+        revision,
+        perRequirement: [],
+        state: "unknown",
+      } as DomainEvent);
+      return;
+    }
+
+    // Get the footprint from the spec record (captured at delivery time)
+    const record = this.specRecords.get(found.canonicalId);
+    const changedPaths = record?.footprint?.paths ?? [];
+
+    // Validate reviewers (SPEC-039: at least two, pairwise distinct)
+    const reviewersArg = [{ role: "conformance-reviewer-a" }, { role: "conformance-reviewer-b" }];
+    const validation = validateReviewers(this.agents, reviewersArg);
+    if (!validation.ok) {
+      // Validation failed; emit unknown state rather than failing
+      await this.emit({
+        seq: 0,
+        ts: 0,
+        harness: this.adapter.id,
+        type: "conformance.checked",
+        specId,
+        revision,
+        perRequirement: requirements.map((req) => ({
+          requirement: req,
+          verdict: "uncertain" as const,
+          source: "judged" as const,
+        })),
+        state: "unknown",
+      } as DomainEvent);
+      return;
+    }
+
+    // Create conformance folder and spawn reviewers
+    const folderId = `conformance-${randomUUID()}`;
+    this.groundingDigestCache = null; // ground reviewers on the CURRENT docs/ tree
+    const grounding = this.groundingSummary();
+    const prompt = buildConformanceCheckPrompt(requirements, changedPaths, found.text, ""); // TODO: fetch code excerpts
+
+    const folder: ConformanceFolder = {
+      folderId,
+      specId: found.canonicalId,
+      revision,
+      trigger,
+      requirements,
+      changedPaths,
+      reviewers: [],
+      verdicts: [],
+      status: "running",
+    };
+
+    // Create reviewer sessions and register folder before dispatching
+    for (const r of validation.reviewers) {
+      const ref = await this.adapter.createSession({ specId: found.canonicalId });
+      this.conformanceReviewerSessions.set(ref.sessionId, { folderId, role: r.role });
+      folder.reviewers.push({ role: r.role, sessionId: ref.sessionId, model: r.model, label: r.label, status: "running" });
+    }
+    this.conformanceFolders.set(folderId, folder);
+
+    // Dispatch reviewers in parallel
+    for (const r of folder.reviewers) {
+      await this.adapter.dispatchAsync({
+        sessionId: r.sessionId,
+        agent: r.role,
+        ...this.modelArg(r.role),
+        parts: [{ type: "text", text: prompt }],
+      });
+    }
 
     await this.emit({
       seq: 0,
       ts: 0,
       harness: this.adapter.id,
       type: "conformance.enqueued",
-      specId,
+      specId: found.canonicalId,
       revision,
       trigger,
+      paths: changedPaths,
     } as DomainEvent);
 
     await this.trace.write({
       kind: "conformance.enqueued",
       projectId: this.projectId,
-      specId,
+      specId: found.canonicalId,
       revision,
       trigger,
     });
@@ -2664,6 +2772,151 @@ export class ProjectContext {
       return;
     }
     await this.startAdjudication(loop, panel);
+  }
+
+  /**
+   * Route a conformance reviewer session's completed turn into its folder (SPEC-039): parse verdicts,
+   * fold them with the quorum rule (≥2 reviewers for drift), and complete the folder when all reviewers are done.
+   * Called from the pump for conformance reviewer sessions only.
+   */
+  private async ingestConformanceVerdict(sessionId: string, text: string): Promise<void> {
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    const folder = this.conformanceFolders.get(link.folderId);
+    if (!folder) return;
+    const reviewer = folder.reviewers.find((r) => r.sessionId === sessionId);
+    if (!reviewer || reviewer.status !== "running") return;
+
+    for (const parsed of parseConformanceVerdicts(text)) {
+      folder.verdicts.push({
+        requirement: parsed.requirement,
+        reviewerRole: link.role,
+        verdict: parsed.verdict,
+        evidence: parsed.evidence,
+      });
+    }
+    reviewer.status = "done";
+    await this.maybeCompleteConformanceFolder(folder);
+  }
+
+  /** Mark a conformance reviewer errored and continue the folder; complete (failed) if all reviewers errored. */
+  private async failConformanceReviewer(sessionId: string, reason: string): Promise<void> {
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    const folder = this.conformanceFolders.get(link.folderId);
+    const reviewer = folder?.reviewers.find((r) => r.sessionId === sessionId);
+    if (!folder || !reviewer || reviewer.status !== "running") return;
+    reviewer.status = "error";
+    await this.maybeCompleteConformanceFolder(folder);
+  }
+
+  /**
+   * Complete a conformance folder once all reviewers have finished (SPEC-039). Fold verdicts with the
+   * agreement rule (≥2 reviewers for drift), emit conformance.checked with the final state, and emit
+   * conformance.drift-detected for each violated requirement. Handle low-confidence verdicts (sub-quorum).
+   */
+  private async maybeCompleteConformanceFolder(folder: ConformanceFolder): Promise<void> {
+    if (folder.reviewers.some((r) => r.status === "running")) return;
+    const anySucceeded = folder.reviewers.some((r) => r.status === "done");
+    folder.status = anySucceeded ? "complete" : "failed";
+
+    for (const r of folder.reviewers) this.conformanceReviewerSessions.delete(r.sessionId);
+
+    // Fold verdicts: group by requirement and apply quorum rule
+    const agreement = detectConformanceAgreement(folder.verdicts);
+
+    const perRequirement: Array<{ requirement: string; verdict: "satisfied" | "violated" | "uncertain"; source: "judged"; evidence?: Array<{ file: string; line: number }> | null }> = [];
+    let state: "conformant" | "drifted" | "unknown" = "conformant";
+
+    for (const group of agreement) {
+      // Quorum: violation raised only when ≥2 reviewers agree it's violated
+      const violationCount = group.verdictCounts.violated;
+      const satisfiedCount = group.verdictCounts.satisfied;
+      const uncertainCount = group.verdictCounts.uncertain;
+      const totalReviewers = group.reviewerVerdicts.length;
+
+      let finalVerdict: "satisfied" | "violated" | "uncertain";
+      let evidence: Array<{ file: string; line: number }> | null = null;
+
+      if (violationCount >= 2) {
+        // Quorum for violation reached
+        finalVerdict = "violated";
+        state = "drifted";
+        // Collect evidence from all reviewers who said violated
+        const evidenceSet = new Map<string, { file: string; line: number }>();
+        for (const v of group.reviewerVerdicts) {
+          if (v.verdict === "violated") {
+            // Find the verdict with evidence in the verdicts array
+            const verdictEntry = folder.verdicts.find((fv) => fv.requirement === group.requirement && fv.reviewerRole === v.role);
+            if (verdictEntry?.evidence) {
+              for (const e of verdictEntry.evidence) {
+                evidenceSet.set(`${e.file}:${e.line}`, e);
+              }
+            }
+          }
+        }
+        evidence = Array.from(evidenceSet.values());
+      } else if (violationCount === 1 && totalReviewers === 2) {
+        // Sub-quorum violation: emit low-confidence event
+        finalVerdict = "uncertain";
+        const singleViolator = group.reviewerVerdicts.find((v) => v.verdict === "violated");
+        if (singleViolator) {
+          await this.emit({
+            seq: 0,
+            ts: 0,
+            harness: this.adapter.id,
+            type: "conformance.low-confidence",
+            specId: folder.specId,
+            requirement: group.requirement,
+            verdicts: group.reviewerVerdicts.map((v) => ({
+              requirement: group.requirement,
+              verdict: v.verdict,
+              source: "judged" as const,
+            })),
+          } as DomainEvent);
+        }
+      } else if (satisfiedCount >= totalReviewers - 1) {
+        // Consensus for satisfied (allowing one uncertain)
+        finalVerdict = "satisfied";
+      } else {
+        // Otherwise uncertain
+        finalVerdict = "uncertain";
+      }
+
+      perRequirement.push({
+        requirement: group.requirement,
+        verdict: finalVerdict,
+        source: "judged",
+        ...(evidence && evidence.length > 0 ? { evidence } : {}),
+      });
+
+      // Emit drift-detected for violated requirements (with quorum)
+      if (finalVerdict === "violated") {
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "conformance.drift-detected",
+          specId: folder.specId,
+          requirement: group.requirement,
+          verdict: { requirement: group.requirement, verdict: "violated", evidence, source: "judged" },
+        } as DomainEvent);
+      }
+    }
+
+    // Emit conformance.checked with final state
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.checked",
+      specId: folder.specId,
+      revision: folder.revision,
+      perRequirement,
+      state,
+    } as DomainEvent);
+
+    this.conformanceFolders.delete(folder.folderId);
   }
 
   /**
@@ -3675,6 +3928,7 @@ export class ProjectContext {
       await this.emit(event);
       await this.observeReviewerEvent(event);
       await this.observeAdjudication(event); // SPEC-035: ingest the spec-author's adjudication turn
+      await this.observeConformanceVerdictEvent(event); // SPEC-039: ingest conformance reviewer verdicts
       await this.observeGeneration(event); // SPEC-013: ingest the generation agent's proposal
       await this.observeDeliveryProgress(event); // SPEC-009 revised: has every task been checked off (or errored)?
 
@@ -3756,6 +4010,23 @@ export class ProjectContext {
       this.adjudicationSessions.delete(sessionId);
       const loop = this.reviewLoops.get(link.specId);
       if (loop && loop.panelId === link.panelId) await this.failReviewLoop(loop, "adjudication session reported error");
+    }
+  }
+
+  /**
+   * Route conformance reviewer sessions' completed turns into their folder (SPEC-039): a completed
+   * ASSISTANT turn → parse verdicts + fold; an errored session → mark failed and continue.
+   * No-op for non-conformance-reviewer sessions.
+   */
+  private async observeConformanceVerdictEvent(event: DomainEvent): Promise<void> {
+    if (!("sessionId" in event)) return;
+    const sessionId = (event as { sessionId: string }).sessionId;
+    const link = this.conformanceReviewerSessions.get(sessionId);
+    if (!link) return;
+    if (event.type === "message.updated" && !event.isStreaming && event.role === "assistant") {
+      await this.ingestConformanceVerdict(sessionId, event.text);
+    } else if (event.type === "session.status" && event.status === "error") {
+      await this.failConformanceReviewer(sessionId, "conformance reviewer session reported error");
     }
   }
 

@@ -354,3 +354,162 @@ export function detectAgreement(
   }
   return groups;
 }
+
+/**
+ * Extract requirements from a specification's Requirements section. Parses `### Requirement: <title>`
+ * subsections (or falls back to plain requirement text). Returns an array of requirement titles/keys
+ * for conformance checking.
+ */
+export function extractRequirementsFromSpec(specText: string): string[] {
+  const requirements: string[] = [];
+  // Match `### Requirement: <title>` sections
+  const reqPattern = /^###\s+Requirement:\s*(.+?)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = reqPattern.exec(specText))) {
+    const title = (match[1] ?? "").trim();
+    if (title) requirements.push(title);
+  }
+  return requirements;
+}
+
+/**
+ * Build the conformance-check prompt for reviewers (SPEC-039). Reviewers assess whether
+ * the changed paths still satisfy each requirement, given the spec's current requirements.
+ */
+export function buildConformanceCheckPrompt(
+  requirements: string[],
+  changedPaths: string[],
+  specText: string,
+  codeExcerpts: string,
+): string {
+  return [
+    "You are an independent conformance reviewer (SPEC-039). The specification's requirements are below.",
+    "Code at certain paths was recently changed. Your task: assess whether the changed code still",
+    "satisfies each requirement.",
+    "",
+    "For each requirement, emit a verdict: satisfied (code confirms requirement), violated (code contradicts",
+    "or fails requirement), or uncertain (insufficient evidence to judge).",
+    "",
+    "When your analysis is complete, your reply MUST END WITH a single fenced code block containing a JSON",
+    "array of verdicts. A machine parses ONLY that block; if it is missing your review is discarded.",
+    "",
+    'Each verdict is: {"requirement": string, "verdict": "satisfied"|"violated"|"uncertain", "evidence": [{file, line}] | null}',
+    "  • requirement — the requirement title (match exactly from the list below).",
+    '  • verdict — "satisfied" (code meets it), "violated" (code breaks it), "uncertain" (not enough info).',
+    "  • evidence — optional array of {file, line} pointers to code that supports the verdict.",
+    "If you find no clear violations, emit satisfied verdicts for those requirements.",
+    "",
+    "Your reply must end with exactly this shape (values illustrative):",
+    "```json",
+    "[",
+    '  {"requirement": "All changes are async-safe", "verdict": "satisfied", "evidence": null},',
+    '  {"requirement": "Cache invalidation triggers on type change", "verdict": "violated", "evidence": [{"file": "src/cache.ts", "line": 45}]}',
+    "]",
+    "```",
+    "",
+    "## Requirements to verify",
+    requirements.length ? requirements.map((r) => `- ${r}`).join("\n") : "(none)",
+    "",
+    "## Changed paths",
+    changedPaths.length ? changedPaths.map((p) => `- ${p}`).join("\n") : "(none)",
+    "",
+    "## Specification",
+    specText,
+    "",
+    codeExcerpts ? `## Code excerpts from changed paths\n${codeExcerpts}` : "",
+  ].join("\n");
+}
+
+export interface ParsedConformanceVerdict {
+  requirement: string;
+  verdict: "satisfied" | "violated" | "uncertain";
+  evidence?: Array<{ file: string; line: number }> | null;
+}
+
+/**
+ * Parse a conformance reviewer's output into structured verdicts. Mirrors the spec-review pattern:
+ * reviewers write prose + analysis, then end with a fenced JSON array of verdicts.
+ */
+export function parseConformanceVerdicts(text: string): ParsedConformanceVerdict[] {
+  let best: ParsedConformanceVerdict[] = [];
+  for (const candidate of jsonArrayCandidates(text)) {
+    let arr: unknown;
+    try {
+      arr = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(arr)) continue;
+    const parsed = coerceConformanceVerdicts(arr);
+    if (parsed.length > best.length) best = parsed;
+  }
+  return best;
+}
+
+/** Keep only well-formed verdicts: non-empty requirement, valid verdict enum, optional evidence. */
+function coerceConformanceVerdicts(arr: unknown[]): ParsedConformanceVerdict[] {
+  const out: ParsedConformanceVerdict[] = [];
+  for (const raw of arr) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const requirement = typeof r.requirement === "string" ? r.requirement.trim() : "";
+    if (!requirement) continue;
+    const verdict = r.verdict === "satisfied" || r.verdict === "violated" || r.verdict === "uncertain" ? r.verdict : undefined;
+    if (!verdict) continue;
+    const evidence = Array.isArray(r.evidence)
+      ? r.evidence
+          .map((e: unknown) => {
+            if (!e || typeof e !== "object") return null;
+            const ev = e as Record<string, unknown>;
+            const file = typeof ev.file === "string" ? ev.file.trim() : "";
+            const line = typeof ev.line === "number" ? ev.line : null;
+            return file && line ? { file, line } : null;
+          })
+          .filter((e): e is { file: string; line: number } => e !== null)
+      : null;
+    out.push({ requirement, verdict, evidence: evidence && evidence.length > 0 ? evidence : null });
+  }
+  return out;
+}
+
+export interface ConformanceAgreementGroup {
+  requirement: string;
+  verdictCounts: { satisfied: number; violated: number; uncertain: number };
+  reviewerVerdicts: Array<{ role: string; verdict: "satisfied" | "violated" | "uncertain" }>;
+}
+
+/**
+ * Detect agreement on conformance verdicts. Groups verdicts by requirement and counts reviewer
+ * agreement. A requirement is raised as drifted only when ≥2 reviewers agree it's violated,
+ * or ≥1 deterministic check failed (Tier-1). Returns groups with verdict distributions and
+ * individual reviewer verdicts for each requirement.
+ */
+export function detectConformanceAgreement(
+  verdicts: Array<{
+    requirement: string;
+    reviewerRole: string;
+    verdict: "satisfied" | "violated" | "uncertain";
+  }>,
+): ConformanceAgreementGroup[] {
+  const byReq = new Map<string, { verdictCounts: { satisfied: number; violated: number; uncertain: number }; reviewers: Array<{ role: string; verdict: "satisfied" | "violated" | "uncertain" }> }>();
+
+  for (const v of verdicts) {
+    let g = byReq.get(v.requirement);
+    if (!g) {
+      g = { verdictCounts: { satisfied: 0, violated: 0, uncertain: 0 }, reviewers: [] };
+      byReq.set(v.requirement, g);
+    }
+    g.verdictCounts[v.verdict]++;
+    g.reviewers.push({ role: v.reviewerRole, verdict: v.verdict });
+  }
+
+  const groups: ConformanceAgreementGroup[] = [];
+  for (const [requirement, g] of byReq) {
+    groups.push({
+      requirement,
+      verdictCounts: g.verdictCounts,
+      reviewerVerdicts: g.reviewers,
+    });
+  }
+  return groups;
+}
