@@ -518,8 +518,9 @@ export function parseConformance(md: string): { paths: string[]; off: boolean; w
     if (mode === "conformance") {
       const nested = /^\s{2,}([a-z_]+):\s*(.*)$/i.exec(line);
       if (nested) {
-        const [, key, value] = nested;
-        switch (key?.toLowerCase()) {
+        const key = nested[1]?.toLowerCase() ?? "";
+        const value = nested[2] ?? "";
+        switch (key) {
           case "paths":
             // Nested `paths:` opens a list; items are unquoted strings on indented lines
             break; // Will be collected on following lines
