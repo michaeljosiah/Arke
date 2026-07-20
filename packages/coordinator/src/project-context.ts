@@ -85,7 +85,7 @@ import {
 import { idempotencyKey, probeIntegrations, type IntegrationRecord } from "./projection.js";
 import { loadAgentImage, readConfigTools, setAgentModel, setAgentMode, setAgentPermission, setAgentTools, writeNewAgent, type NewAgentSpec } from "@arke/agent-image";
 import { ReadModel } from "./read-model.js";
-import { computeRepoStatus, gitChangedPaths, gitRepoIdentity } from "./git-status.js";
+import { computeRepoStatus, gitChangedPaths, gitMainlineHeadSha, gitRepoIdentity } from "./git-status.js";
 import { sanitizeSpanAttributes } from "./trace.js";
 import type { Trace } from "./trace.js";
 import type { GrantStore } from "./grant-store.js";
@@ -282,6 +282,10 @@ export class ProjectContext {
   private readonly indexDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** SPEC-027: the assembled grounding digest, cached until a `docs/` change or grounding upload. */
   private groundingDigestCache: GroundingDigest | null = null;
+  /** SPEC-039: per-spec conformance check debounce timers, coalescing rapid mainline changes into one check. */
+  private readonly conformanceDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  /** SPEC-039: the last-evaluated mainline SHA for detecting HEAD movement (git-ignored runtime state). */
+  private lastEvaluatedMainlineSha = "";
 
   private readonly read = new ReadModel();
   private readonly abort = new AbortController();
@@ -657,8 +661,22 @@ export class ProjectContext {
       this.repoSlugCache = null; // SPEC-030: the remote changed — recompute the cached org/repo slug lazily
       await this.emit({ seq: 0, ts: 0, harness: this.adapter.id, type: "repo.identity", ...id });
     }
-    const ghEnabled = this.hostConfigured();
+
+    // SPEC-039: detect mainline HEAD movement for conformance checking
     const defaultBranch = id.default || "main";
+    const currentMainlineSha = gitMainlineHeadSha(this.root, defaultBranch);
+    if (currentMainlineSha && currentMainlineSha !== this.lastEvaluatedMainlineSha) {
+      // Mainline moved: get the diff and enqueue checks for affected specs
+      const changedPaths = this.lastEvaluatedMainlineSha
+        ? gitChangedPaths(this.root, this.lastEvaluatedMainlineSha, currentMainlineSha)
+        : [];
+      if (changedPaths.length > 0) {
+        this.enqueueConformanceChecks(changedPaths, "repo-refresh", currentMainlineSha);
+      }
+      this.lastEvaluatedMainlineSha = currentMainlineSha;
+    }
+
+    const ghEnabled = this.hostConfigured();
     // Resolve the forge ONCE (it shells `git remote`), not per spec row (SPEC-038) — honouring an explicit
     // `.arke/config.json` `forge` override over remote auto-detection. The arrow keeps the forge's `this`
     // bound (AzureReposForge.pullRequestStatus reads the remote off the instance).
@@ -1722,6 +1740,81 @@ export class ProjectContext {
 
     this.specRecords.set(specId, { ...(this.specRecords.get(specId) ?? {}), footprint: fp });
     return fp;
+  }
+
+  /**
+   * Sentinel scheduler (SPEC-039): enqueue a conformance check for specs whose footprint
+   * was touched by a given set of changed paths. Debounced and batched per spec to avoid thrashing.
+   * Called when the mainline-change sensor detects a merge or HEAD movement.
+   */
+  private enqueueConformanceChecks(changedPaths: string[], trigger: "webhook" | "repo-refresh" | "cli", targetRevision: string): void {
+    // Map changed paths to affected delivered specs (those with non-empty footprints).
+    const affectedSpecs = new Set<string>();
+    for (const spec of this.specLibrary()) {
+      const record = this.specRecords.get(spec.specId);
+      if (record?.status === "delivered" && record.footprint?.paths && record.footprint.paths.length > 0) {
+        // Check if any changed path matches any footprint glob
+        if (this.footprintTouched(record.footprint.paths, changedPaths)) {
+          affectedSpecs.add(spec.specId);
+        }
+      }
+    }
+
+    // Debounce checks per spec: clear any existing timer and schedule a new one
+    for (const specId of affectedSpecs) {
+      const existing = this.conformanceDebounce.get(specId);
+      if (existing) clearTimeout(existing);
+
+      const timer = setTimeout(() => {
+        this.conformanceDebounce.delete(specId);
+        void this.enqueueConformanceCheck(specId, trigger, targetRevision);
+      }, 500); // 500ms debounce window
+
+      this.conformanceDebounce.set(specId, timer);
+    }
+  }
+
+  /**
+   * Check if any changed path matches any footprint glob pattern.
+   * Simple implementation: direct string matching (globs are TODO).
+   */
+  private footprintTouched(footprintPaths: string[], changedPaths: string[]): boolean {
+    for (const changed of changedPaths) {
+      for (const footprint of footprintPaths) {
+        // TODO: implement glob matching (for now, exact prefix matching)
+        if (changed.startsWith(footprint) || footprint.startsWith(changed)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Enqueue a single conformance check (SPEC-039). Records the enqueue event and schedules
+   * the check for harness execution (Phase B: extended reviewer panel).
+   */
+  private async enqueueConformanceCheck(specId: string, trigger: "webhook" | "repo-refresh" | "cli", revision: string): Promise<void> {
+    const found = this.findSpecFile(specId);
+    if (!found) return;
+
+    await this.emit({
+      seq: 0,
+      ts: 0,
+      harness: this.adapter.id,
+      type: "conformance.enqueued",
+      specId,
+      revision,
+      trigger,
+    } as DomainEvent);
+
+    await this.trace.write({
+      kind: "conformance.enqueued",
+      projectId: this.projectId,
+      specId,
+      revision,
+      trigger,
+    });
   }
 
   /** Find the spec file whose frontmatter `branch` matches (for webhook routing by branch). */
