@@ -63,6 +63,51 @@ const COLS = [
   { id: 'delivered', label: 'Delivered' },
 ];
 
+function ConformanceBadge({ card }: any) {
+  // SPEC-039: show conformance status badge for delivered specs.
+  // Only show if spec is delivered and has conformance state.
+  if (card.status !== 'delivered' || !card.conformanceState) return null;
+
+  const isDrifted = card.conformanceState === 'drifted';
+  const isConformant = card.conformanceState === 'conformant';
+  const isUnknown = card.conformanceState === 'unknown';
+
+  const bgColor = isDrifted ? 'var(--destructive)' : isConformant ? 'var(--success)' : 'var(--muted)';
+  const textColor = isDrifted ? 'var(--destructive-foreground)' : isConformant ? 'var(--success-foreground)' : 'var(--muted-foreground)';
+  const label = isDrifted ? 'Drifted' : isConformant ? 'Conformant' : 'Checking';
+  const unresolved = card.conformanceResolutions?.filter((r: any) => !r.resolution).length || 0;
+
+  const openDriftPanel = (ev: any) => {
+    ev.stopPropagation();
+    store.set({ driftPanel: { cardId: card.id, card } });
+  };
+
+  return e('button', {
+    onClick: isDrifted ? openDriftPanel : undefined,
+    title: isDrifted ? `${unresolved} unresolved violation(s) — click to review` : `Spec is ${label.toLowerCase()}`,
+    style: {
+      marginTop: 6,
+      width: '100%',
+      padding: '4px 8px',
+      border: `1px solid ${bgColor}`,
+      borderRadius: 'var(--radius-sm)',
+      background: isDrifted ? 'rgba(220, 38, 38, 0.1)' : isConformant ? 'rgba(34, 197, 94, 0.1)' : 'var(--background)',
+      color: bgColor,
+      fontFamily: 'var(--font-sans)',
+      fontSize: 11,
+      fontWeight: isDrifted ? 600 : 500,
+      cursor: isDrifted ? 'pointer' : 'default',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    }
+  },
+    e(Icon, { name: isDrifted ? 'alertCircle' : isConformant ? 'check' : 'clock', size: 12 }),
+    label + (unresolved > 0 ? ` (${unresolved})` : '')
+  );
+}
+
 function BoardCard({ c }: any) {
   const open = () => openCard(c);
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -107,6 +152,7 @@ function BoardCard({ c }: any) {
     showBar ? e('div', { style: { position: 'absolute', left: 11, right: 11, top: 0, height: 2, background: 'var(--secondary)', borderRadius: 999, overflow: 'hidden', zIndex: 2 } },
       e('div', { style: { height: '100%', width: (c.progress || 0) + '%', background: 'var(--foreground)', transition: 'width .6s ease' } })) : null,
     e(KanbanCard, { taskId: c.id, title: c.title, status: c.status, harness: c.harness, model: c.model, needsHuman: c.needsHuman }),
+    e(ConformanceBadge, { card: c }),
     canPromote ? e('button', { onClick: promote, title: 'Promote this draft to in-review', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--muted-foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, cursor: 'pointer' } }, 'Promote to review') : null,
     canDeliver ? e('button', { onClick: deliver, title: 'Start delivery — fan the approved spec\'s tasks out', style: { marginTop: 6, width: '100%', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--card)', color: 'var(--foreground)', fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, cursor: 'pointer' } }, 'Deliver') : null,
     moves.length > 0
