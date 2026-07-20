@@ -1868,7 +1868,7 @@ export class ProjectContext {
       const failedChecks = checkResults.filter((r) => !r.passed);
 
       if (failedChecks.length > 0) {
-        // Deterministic checks failed; emit drift-detected immediately without reviewer involvement
+        // Deterministic checks failed; emit conformance.checked with drifted state (Tier-1 verdict)
         const verdicts = checkResults.map((r) => ({
           requirement: r.requirement,
           verdict: r.passed ? ("satisfied" as const) : ("violated" as const),
@@ -1880,19 +1880,33 @@ export class ProjectContext {
           seq: 0,
           ts: 0,
           harness: this.adapter.id,
-          type: "conformance.drift-detected",
+          type: "conformance.checked",
           specId: found.canonicalId,
           revision,
-          trigger,
           perRequirement: verdicts,
+          state: "drifted" as const,
         } as DomainEvent);
+
+        // Emit per-requirement drift-detected events for each violation
+        for (const verdict of verdicts) {
+          if (verdict.verdict === "violated") {
+            await this.emit({
+              seq: 0,
+              ts: 0,
+              harness: this.adapter.id,
+              type: "conformance.drift-detected",
+              specId: found.canonicalId,
+              requirement: verdict.requirement,
+              verdict,
+            } as DomainEvent);
+          }
+        }
 
         await this.trace.write({
           kind: "conformance.drift-detected",
           projectId: this.projectId,
           specId: found.canonicalId,
           revision,
-          trigger,
           verdict: "drift",
         });
 

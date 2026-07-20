@@ -199,6 +199,28 @@ export class ReadModel {
       case "message.updated":
         this.applyMessageUpdated(event);
         break;
+      case "conformance.drift-detected": {
+        // SPEC-039: drift detected for a single requirement (emitted per violation)
+        const card = this.ensureCard(event.specId);
+        card.conformanceState = "drifted";
+        // Track unresolved violation
+        if (!card.conformanceResolutions) card.conformanceResolutions = [];
+        const existing = card.conformanceResolutions.find((r) => r.requirement === event.requirement);
+        if (!existing) {
+          card.conformanceResolutions.push({
+            requirement: event.requirement,
+            resolution: undefined,
+          });
+        }
+        break;
+      }
+      case "conformance.checked": {
+        // SPEC-039: conformance check completed (Tier-2 review phase)
+        const card = this.ensureCard(event.specId);
+        // Set conformanceState based on check result (conformant if no violations raised)
+        card.conformanceState = event.state === "unknown" ? "unknown" : "conformant";
+        break;
+      }
       case "conformance.resolved": {
         // SPEC-039: track per-requirement conformance resolutions on the card
         const card = this.ensureCard(event.specId);
