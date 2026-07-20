@@ -572,6 +572,60 @@ export const SpecRippleAckedEvent = base.extend({
   reason: z.string(),
 });
 
+/** SPEC-039: a conformance check was enqueued for a delivered spec (mainline change touched its footprint). */
+export const ConformanceEnqueuedEvent = base.extend({
+  type: z.literal("conformance.enqueued"),
+  specId: z.string(),
+  revision: z.string(), // the mainline SHA or delivery-worktree HEAD being evaluated
+  trigger: z.enum(["delivery", "webhook", "repo-refresh", "cli"]), // how the check was triggered
+  paths: z.array(z.string()).optional(), // the changed paths that triggered the check
+});
+
+/** SPEC-039: a per-requirement verdict from a conformance check (deterministic or judged). */
+export const ConformanceRequirementVerdict = z.object({
+  requirement: z.string(), // the parsed `### Requirement:` title
+  verdict: z.enum(["satisfied", "violated", "uncertain"]),
+  evidence: z.array(z.object({ file: z.string(), line: z.number().int().positive() })).optional(),
+  source: z.enum(["deterministic", "judged"]), // Tier-1 (automated check) or Tier-2 (panel verdict)
+});
+export type ConformanceRequirementVerdict = z.infer<typeof ConformanceRequirementVerdict>;
+
+/** SPEC-039: the result of a completed conformance check against a specific revision. */
+export const ConformanceCheckedEvent = base.extend({
+  type: z.literal("conformance.checked"),
+  specId: z.string(),
+  revision: z.string(), // the mainline SHA or delivery-worktree HEAD that was evaluated
+  perRequirement: z.array(ConformanceRequirementVerdict),
+  state: z.enum(["conformant", "drifted", "unknown"]), // computed from perRequirement
+});
+
+/** SPEC-039: a requirement's verdict was below the quorum threshold (logged, not raised as drift). */
+export const ConformanceLowConfidenceEvent = base.extend({
+  type: z.literal("conformance.low-confidence"),
+  specId: z.string(),
+  requirement: z.string(),
+  verdicts: z.array(ConformanceRequirementVerdict),
+});
+
+/** SPEC-039: a conformance drift was confirmed and surfaced (no code/spec changes, just signal + trace). */
+export const ConformanceDriftDetectedEvent = base.extend({
+  type: z.literal("conformance.drift-detected"),
+  specId: z.string(),
+  requirement: z.string(),
+  verdict: ConformanceRequirementVerdict,
+});
+
+/** SPEC-039: a human resolved one violated requirement's drift signal (ratify/correct/accept). */
+export const ConformanceResolvedEvent = base.extend({
+  type: z.literal("conformance.resolved"),
+  specId: z.string(),
+  requirement: z.string(), // the parsed `### Requirement:` title
+  resolution: z.enum(["ratify", "correct", "accept"]),
+  actor: z.string().optional(),
+  reason: z.string().optional(), // required for "accept", optional for others
+  amendment: z.string().optional(), // the accepted amendment text (for "ratify")
+});
+
 /** Discriminated union of every normalized domain event. */
 export const DomainEvent = z.discriminatedUnion("type", [
   SpecStatusEvent,
@@ -619,6 +673,11 @@ export const DomainEvent = z.discriminatedUnion("type", [
   ReviewConvergedEvent,
   SpecRippleStaleEvent,
   SpecRippleAckedEvent,
+  ConformanceEnqueuedEvent,
+  ConformanceCheckedEvent,
+  ConformanceLowConfidenceEvent,
+  ConformanceDriftDetectedEvent,
+  ConformanceResolvedEvent,
 ]);
 export type DomainEvent = z.infer<typeof DomainEvent>;
 
