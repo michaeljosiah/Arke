@@ -3,7 +3,7 @@ import { Icon } from '../icons';
 import { KanbanCard, Button, Badge, Card, Callout, StatusDot, Tabs, AgentMessage, Textarea } from '../ds';
 import { ago } from '../utils';
 import { store, useStore, engine } from '../store';
-import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance, steerTaskLive } from '../live';
+import { liveSend, reconnectLive, promoteSpecLive, deliverSpecLive, transitionSpecLive, fetchGovernance, steerTaskLive, resolveConformanceLive } from '../live';
 import { openCard } from '../nav';
 
 const e = React.createElement;
@@ -419,4 +419,80 @@ export function PermissionOverlay() {
           e(Button, { iconLeft: e(Icon, { name: 'check', size: 15 }), onClick: () => decide('once') }, 'Allow once'))),
     ),
   );
+}
+
+function ViolationItem({ req, selected, onSelect }: any) {
+  return e('button', { onClick: () => onSelect(req.requirement), style: { appearance: 'none', textAlign: 'left', width: '100%', cursor: 'pointer', background: selected ? 'var(--accent)' : 'var(--background)', border: 'none', borderBottom: '1px solid var(--line-soft)', padding: '12px 16px', display: 'flex', alignItems: 'flex-start', gap: 12, transition: 'var(--transition-control)' } },
+    e('span', { style: { flex: 'none', marginTop: 2, color: 'var(--warning)', display: 'flex' } }, e(Icon, { name: 'alert', size: 15 })),
+    e('div', { style: { flex: 1, minWidth: 0 } },
+      e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: 'var(--foreground)' } }, req.requirement),
+      req.evidence && req.evidence.length > 0 ? e('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted-foreground)', marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 } },
+        req.evidence.map((ev: any, i: number) => e('div', { key: i }, ev.file + ':' + (ev.line || '?')))) : null));
+}
+
+export function DriftPanel() {
+  const panel = useStore((s: any) => s.driftPanel) as any;
+  if (!panel) return null;
+  const card = panel.card as any;
+  const resolutions = (card?.conformanceResolutions || []) as any[];
+  const unresolved = resolutions.filter((r) => !r.resolution);
+  const [selectedResolution, setSelectedResolution] = React.useState<string | null>(null);
+  const [acceptReason, setAcceptReason] = React.useState('');
+  const [resolving, setResolving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const resolve = async (resolution: 'ratify' | 'correct' | 'accept') => {
+    if (resolution === 'accept' && !acceptReason.trim()) return;
+    setResolving(true);
+    setError(null);
+    try {
+      const req = unresolved.find((r) => r.requirement === selectedResolution);
+      if (!req) return;
+      const res = await resolveConformanceLive({
+        specId: card.specId || card.id,
+        requirement: req.requirement,
+        resolution,
+        reason: resolution === 'accept' ? acceptReason : undefined,
+      });
+      const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
+      if (err) {
+        setError(err);
+      } else {
+        engine.closeDriftPanel();
+      }
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  if (unresolved.length === 0) {
+    engine.closeDriftPanel();
+    return null;
+  }
+
+  const selected = unresolved.find((r) => r.requirement === selectedResolution);
+  const canResolve = !!selectedResolution && (selectedResolution !== 'accept' || acceptReason.trim());
+
+  return e('div', { onClick: () => engine.closeDriftPanel(), style: { position: 'fixed', inset: 0, zIndex: 81, background: 'rgba(10,10,10,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 } },
+    e('div', { onClick: (ev: any) => ev.stopPropagation(), style: { width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-xl)', overflow: 'hidden', boxShadow: 'var(--shadow-lg)' } },
+      e('div', { style: { padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 } },
+        e('span', { style: { width: 34, height: 34, borderRadius: 'var(--radius-md)', background: 'var(--warning-bg, rgba(180, 83, 9, 0.1))', color: 'var(--warning, #B45309)', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' } }, e(Icon, { name: 'alert', size: 18 })),
+        e('div', null,
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--warning, #B45309)' } }, 'Conformance violations'),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 15, fontWeight: 600, color: 'var(--foreground)' } }, card.title || card.id))),
+      e('div', { style: { flex: 1, overflowY: 'auto', minHeight: 0, padding: '12px 0' } },
+        unresolved.map((req: any) => e(ViolationItem, { key: req.requirement, req, selected: req.requirement === selectedResolution, onSelect: setSelectedResolution }))),
+      selected ? e('div', { style: { padding: '16px 20px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 12 } },
+        e('div', null,
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', marginBottom: 4 } }, 'Violation: ' + selected.requirement),
+          e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.5, color: 'var(--muted-foreground)' } }, 'Post-delivery changes violated this requirement. Choose a resolution path.')),
+        selectedResolution === 'accept' ? e('div', null,
+          e('label', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', display: 'block', marginBottom: 4 } }, 'Reason'),
+          e(Textarea, { rows: 3, value: acceptReason, placeholder: 'Why is this violation acceptable?…', onChange: (ev: any) => setAcceptReason(ev.target.value), style: { width: '100%', boxSizing: 'border-box' } })) : null,
+        error ? e('div', { style: { padding: 10, borderRadius: 'var(--radius-md)', background: 'var(--destructive-bg, rgba(220, 38, 38, 0.1))', border: '1px solid var(--destructive)', color: 'var(--destructive)', fontFamily: 'var(--font-sans)', fontSize: 12 } }, error) : null,
+        e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end' } },
+          e(Button, { variant: 'ghost', onClick: () => { setSelectedResolution(null); setAcceptReason(''); setError(null); } }, 'Cancel'),
+          e(Button, { variant: 'outline', onClick: () => void resolve('ratify'), disabled: resolving }, 'Ratify (amend spec)'),
+          e(Button, { variant: 'outline', onClick: () => void resolve('correct'), disabled: resolving }, 'Correct (re-deliver)'),
+          e(Button, { onClick: () => void resolve('accept'), disabled: !canResolve || resolving }, 'Accept (exception)'))) : null));
 }

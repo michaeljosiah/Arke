@@ -1160,6 +1160,12 @@ export async function fetchGovernance(): Promise<void> {
   if (res?.ok && res.result) store.set({ governance: res.result });
 }
 
+/** SPEC-039: resolve a conformance violation (ratify/correct/accept). Governed operation — refused while offline. */
+export function resolveConformanceLive(args: { specId: string; requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string }): Promise<any> {
+  if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to resolve" });
+  return liveRequest("conformance.resolve", args, 30000);
+}
+
 /**
  * SPEC-030: persist the per-project auto-PR preference to `.arke/config.json` via the coordinator
  * (governed write — refused, not queued, while offline). Optimistically reflects the choice in the store
