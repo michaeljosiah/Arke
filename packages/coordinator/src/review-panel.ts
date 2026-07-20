@@ -513,3 +513,190 @@ export function detectConformanceAgreement(
   }
   return groups;
 }
+
+// ---- Deterministic checks (Tier-1, SPEC-039 Phase B Phase 2) ----
+
+export interface DeterministicCheckRule {
+  requirement: string;
+  checkType: "file-exists" | "file-absent" | "file-contains" | "pattern-match";
+  pattern?: RegExp | string;
+  filePatterns?: string[];
+  description: string;
+}
+
+export interface DeterministicCheckResult {
+  requirement: string;
+  passed: boolean;
+  evidence?: Array<{ file: string; line: number }>;
+  reason?: string;
+}
+
+/**
+ * Extract deterministic check rules from requirement text (SPEC-039 Phase B Phase 2).
+ * Looks for patterns like:
+ *   - "file X must exist" → file-exists check
+ *   - "file X must be removed" → file-absent check
+ *   - "function foo must be defined" → file-contains check
+ *   - "imports must start with" → pattern-match check
+ */
+export function extractDeterministicChecks(requirements: string[]): DeterministicCheckRule[] {
+  const rules: DeterministicCheckRule[] = [];
+
+  for (const req of requirements) {
+    // File must exist pattern: "file src/foo.ts must exist" or "add file src/foo.ts"
+    if (/(?:file|add file)\s+(\S+)\s+must\s+exist|add\s+(?:file\s+)?(\S+)/i.test(req)) {
+      const match = req.match(/(?:file|add file)\s+(\S+)|add\s+(?:file\s+)?(\S+)/i);
+      const file = match?.[1] || match?.[2];
+      if (file) {
+        rules.push({
+          requirement: req,
+          checkType: "file-exists",
+          filePatterns: [file],
+          description: `File ${file} must exist`,
+        });
+      }
+    }
+
+    // File must not exist / be removed pattern
+    if (/(?:file|remove file)\s+(\S+)\s+(?:must\s+)?(?:be\s+)?removed|delete\s+(?:file\s+)?(\S+)/i.test(req)) {
+      const match = req.match(/(?:file|remove file)\s+(\S+)|delete\s+(?:file\s+)?(\S+)/i);
+      const file = match?.[1] || match?.[2];
+      if (file) {
+        rules.push({
+          requirement: req,
+          checkType: "file-absent",
+          filePatterns: [file],
+          description: `File ${file} must not exist`,
+        });
+      }
+    }
+
+    // Function/class must be defined pattern: "function foo must be defined" or "export class Bar"
+    if (/(?:function|class|export)\s+(\w+)\s+must\s+(?:be\s+)?defined|define\s+(?:function|class)\s+(\w+)/i.test(req)) {
+      const match = req.match(/(?:function|class|export)\s+(\w+)|define\s+(?:function|class)\s+(\w+)/i);
+      const identifier = match?.[1] || match?.[2];
+      if (identifier) {
+        rules.push({
+          requirement: req,
+          checkType: "file-contains",
+          pattern: new RegExp(`(?:function|class|export[\\s\\w]*?)\\s+${identifier}\\b`),
+          description: `${identifier} must be defined`,
+        });
+      }
+    }
+
+    // Import pattern: "must import from X" or "imports must use"
+    if (/must\s+import|import\s+must/i.test(req)) {
+      const match = req.match(/from\s+['"]([\w/@-]+)['"]|import\s+(.+?)\s+from/i);
+      const module = match?.[1] || match?.[2];
+      if (module) {
+        rules.push({
+          requirement: req,
+          checkType: "pattern-match",
+          pattern: new RegExp(`from\\s+['"](${module})['""]`, "i"),
+          description: `Must import from ${module}`,
+        });
+      }
+    }
+  }
+
+  return rules;
+}
+
+/**
+ * Execute deterministic checks against changed files and their content (SPEC-039 Phase B Phase 2).
+ * Returns immediate verdicts without reviewer involvement.
+ */
+export async function executeDeterministicChecks(
+  rules: DeterministicCheckRule[],
+  changedPaths: string[],
+  fileReader: (path: string) => Promise<string | null>,
+): Promise<DeterministicCheckResult[]> {
+  const results: DeterministicCheckResult[] = [];
+
+  for (const rule of rules) {
+    let passed = false;
+    const evidence: Array<{ file: string; line: number }> = [];
+
+    if (rule.checkType === "file-exists") {
+      // Check if any of the patterns match changed files
+      passed = await checkFileExists(changedPaths, rule.filePatterns || [], fileReader);
+    } else if (rule.checkType === "file-absent") {
+      // Check that none of the patterns match changed files
+      passed = await checkFileAbsent(changedPaths, rule.filePatterns || [], fileReader);
+    } else if (rule.checkType === "file-contains" && rule.pattern) {
+      // Search for pattern in changed files
+      const result = await searchPattern(changedPaths, rule.pattern, fileReader);
+      passed = result.matches.length > 0;
+      evidence.push(...result.matches);
+    } else if (rule.checkType === "pattern-match" && rule.pattern) {
+      // Search for pattern in changed files
+      const result = await searchPattern(changedPaths, rule.pattern, fileReader);
+      passed = result.matches.length > 0;
+      evidence.push(...result.matches);
+    }
+
+    results.push({
+      requirement: rule.requirement,
+      passed,
+      evidence: evidence.length > 0 ? evidence : undefined,
+      reason: rule.description,
+    });
+  }
+
+  return results;
+}
+
+async function checkFileExists(
+  changedPaths: string[],
+  filePatterns: string[],
+  fileReader: (path: string) => Promise<string | null>,
+): Promise<boolean> {
+  for (const pattern of filePatterns) {
+    for (const path of changedPaths) {
+      if (path.includes(pattern)) {
+        const content = await fileReader(path);
+        if (content !== null) return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function checkFileAbsent(
+  changedPaths: string[],
+  filePatterns: string[],
+  fileReader: (path: string) => Promise<string | null>,
+): Promise<boolean> {
+  for (const pattern of filePatterns) {
+    for (const path of changedPaths) {
+      if (path.includes(pattern)) {
+        const content = await fileReader(path);
+        if (content !== null) return false; // File exists, check fails
+      }
+    }
+  }
+  return true; // No files matched the pattern, check passes
+}
+
+async function searchPattern(
+  changedPaths: string[],
+  pattern: RegExp,
+  fileReader: (path: string) => Promise<string | null>,
+): Promise<{ matches: Array<{ file: string; line: number }> }> {
+  const matches: Array<{ file: string; line: number }> = [];
+
+  for (const path of changedPaths) {
+    const content = await fileReader(path);
+    if (!content) continue;
+
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (pattern.test(lines[i])) {
+        matches.push({ file: path, line: i + 1 });
+      }
+    }
+  }
+
+  return { matches };
+}

@@ -68,6 +68,8 @@ import {
   detectAdjudicatorCollisions,
   detectAgreement,
   detectConformanceAgreement,
+  extractDeterministicChecks,
+  executeDeterministicChecks,
   extractRequirementsFromSpec,
   parseConformanceVerdicts,
   parseDispositions,
@@ -75,6 +77,7 @@ import {
   sectionHashOf,
   validateReviewers,
   type AdjudicationIssue,
+  type DeterministicCheckResult,
   type ReviewerConfig,
 } from "./review-panel.js";
 import {
@@ -1846,6 +1849,56 @@ export class ProjectContext {
     // Get the footprint from the spec record (captured at delivery time)
     const record = this.specRecords.get(found.canonicalId);
     const changedPaths = record?.footprint?.paths ?? [];
+
+    // SPEC-039 Phase B Phase 2: Run Tier-1 deterministic checks before Tier-2 reviewer panel
+    const deterministicRules = extractDeterministicChecks(requirements);
+    if (deterministicRules.length > 0) {
+      // Create a file reader for the current state
+      const fileReader = async (path: string): Promise<string | null> => {
+        try {
+          const resolvedPath = resolve(this.projectRoot, path);
+          if (!resolvedPath.startsWith(this.projectRoot)) return null; // Security: prevent path traversal
+          return readFileSync(resolvedPath, "utf-8");
+        } catch {
+          return null;
+        }
+      };
+
+      const checkResults = await executeDeterministicChecks(deterministicRules, changedPaths, fileReader);
+      const failedChecks = checkResults.filter((r) => !r.passed);
+
+      if (failedChecks.length > 0) {
+        // Deterministic checks failed; emit drift-detected immediately without reviewer involvement
+        const verdicts = checkResults.map((r) => ({
+          requirement: r.requirement,
+          verdict: r.passed ? ("satisfied" as const) : ("violated" as const),
+          source: "deterministic" as const,
+          evidence: r.evidence,
+        }));
+
+        await this.emit({
+          seq: 0,
+          ts: 0,
+          harness: this.adapter.id,
+          type: "conformance.drift-detected",
+          specId: found.canonicalId,
+          revision,
+          trigger,
+          perRequirement: verdicts,
+        } as DomainEvent);
+
+        await this.trace.write({
+          kind: "conformance.drift-detected",
+          projectId: this.projectId,
+          specId: found.canonicalId,
+          revision,
+          trigger,
+          verdict: "drift",
+        });
+
+        return; // Skip Tier-2 reviewer panel since we already have drift
+      }
+    }
 
     // Validate reviewers (SPEC-039: at least two, pairwise distinct)
     const reviewersArg = [{ role: "conformance-reviewer-a" }, { role: "conformance-reviewer-b" }];
