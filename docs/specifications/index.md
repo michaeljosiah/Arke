@@ -1,7 +1,7 @@
 ---
 type: index
 generated: true
-updated: 2026-07-10
+updated: 2026-07-20
 ---
 
 <!-- GENERATED FILE — do not edit by hand. Regenerated from this folder's document frontmatter
@@ -49,3 +49,6 @@ updated: 2026-07-10
 | 036 | [HTML specifications alongside markdown — a format-dispatched spec pipeline](036.html-specifications.md) | draft | spec-format, authoring-cockpit, spec-lifecycle |
 | 037 | [Omnigent meta-harness — from spike to production substrate](037.omnigent-production-substrate.md) | draft | harness-integration, omnigent-substrate, adapter-resilience |
 | 038 | [Azure Repos as a lifecycle host — a neutral forge seam](038.azure-repos-forge.md) | draft | forge-seam, spec-lifecycle, delivery |
+| 039 | [Conformance sentinel — delivered code kept honest against its specification](039.conformance-sentinel.md) | draft | conformance, drift-detection, spec-lifecycle |
+| 040 | [Governed delivery loop — verify-and-iterate delivery, bounded by a budget and a human boundary](040.governed-delivery-loop.md) | draft | delivery-loop, single-session-delivery, conformance |
+| 041 | [Project reference library — directly-citable business-context entries with durable spec links](041.project-reference-library.md) | draft | reference-library, grounding, authoring-cockpit |
