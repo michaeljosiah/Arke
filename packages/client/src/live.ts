@@ -1204,7 +1204,7 @@ export async function fetchGovernance(): Promise<void> {
 }
 
 /** SPEC-039: resolve a conformance violation (ratify/correct/accept). Governed operation — refused while offline. */
-export function resolveConformanceLive(args: { specId: string; requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string }): Promise<any> {
+export function resolveConformanceLive(args: { specId: string; requirement: string; resolution: "ratify" | "correct" | "accept"; reason?: string; amendment?: string }): Promise<any> {
   if (!isCoordinatorConnected()) return Promise.resolve({ ok: false, error: "offline — reconnect to resolve" });
   return liveRequest("conformance.resolve", args, 30000);
 }

@@ -483,12 +483,16 @@ export function DriftPanel() {
   const resolutions = (card?.conformanceResolutions || []) as any[];
   const unresolved = resolutions.filter((r) => !r.resolution);
   const [selectedResolution, setSelectedResolution] = React.useState<string | null>(null);
+  const [resolutionType, setResolutionType] = React.useState<'ratify' | 'correct' | 'accept' | null>(null);
   const [acceptReason, setAcceptReason] = React.useState('');
+  const [amendment, setAmendment] = React.useState('');
   const [resolving, setResolving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const resolve = async (resolution: 'ratify' | 'correct' | 'accept') => {
-    if (resolution === 'accept' && !acceptReason.trim()) return;
+  const resolve = async () => {
+    if (!resolutionType) return;
+    if (resolutionType === 'accept' && !acceptReason.trim()) return;
+    if (resolutionType === 'ratify' && !amendment.trim()) return;
     setResolving(true);
     setError(null);
     try {
@@ -497,8 +501,9 @@ export function DriftPanel() {
       const res = await resolveConformanceLive({
         specId: card.specId || card.id,
         requirement: req.requirement,
-        resolution,
-        reason: resolution === 'accept' ? acceptReason : undefined,
+        resolution: resolutionType,
+        reason: resolutionType === 'accept' ? acceptReason : undefined,
+        ...(resolutionType === 'ratify' ? { amendment } : {}),
       });
       const err = res?.ok === false ? res.error : res?.result && res.result.ok === false ? res.result.error : null;
       if (err) {
@@ -532,13 +537,30 @@ export function DriftPanel() {
         e('div', null,
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', marginBottom: 4 } }, 'Violation: ' + selected.requirement),
           e('div', { style: { fontFamily: 'var(--font-sans)', fontSize: 13, lineHeight: 1.5, color: 'var(--muted-foreground)' } }, 'Post-delivery changes violated this requirement. Choose a resolution path.')),
-        selectedResolution === 'accept' ? e('div', null,
+        resolutionType === 'ratify' ? e('div', null,
+          e('label', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', display: 'block', marginBottom: 4 } }, 'Amendment (update spec to reflect the code change)'),
+          e(Textarea, { rows: 4, value: amendment, placeholder: 'Describe how the requirement has changed and should be updated…', onChange: (ev: any) => setAmendment(ev.target.value), style: { width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-mono)', fontSize: 12 } })) : null,
+        resolutionType === 'accept' ? e('div', null,
           e('label', { style: { fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)', display: 'block', marginBottom: 4 } }, 'Reason'),
           e(Textarea, { rows: 3, value: acceptReason, placeholder: 'Why is this violation acceptable?…', onChange: (ev: any) => setAcceptReason(ev.target.value), style: { width: '100%', boxSizing: 'border-box' } })) : null,
+        e('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          e(Button, {
+            variant: resolutionType === 'ratify' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'ratify' ? null : 'ratify'); setAmendment(''); setError(null); },
+            size: 'sm'
+          }, '📝 Ratify (amend)'),
+          e(Button, {
+            variant: resolutionType === 'correct' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'correct' ? null : 'correct'); setError(null); },
+            size: 'sm'
+          }, '🔧 Correct (re-deliver)'),
+          e(Button, {
+            variant: resolutionType === 'accept' ? 'default' : 'outline',
+            onClick: () => { setResolutionType(resolutionType === 'accept' ? null : 'accept'); setAcceptReason(''); setError(null); },
+            size: 'sm'
+          }, '✓ Accept (exception)')),
         error ? e('div', { style: { padding: 10, borderRadius: 'var(--radius-md)', background: 'var(--destructive-bg, rgba(220, 38, 38, 0.1))', border: '1px solid var(--destructive)', color: 'var(--destructive)', fontFamily: 'var(--font-sans)', fontSize: 12 } }, error) : null,
-        e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end' } },
-          e(Button, { variant: 'ghost', onClick: () => { setSelectedResolution(null); setAcceptReason(''); setError(null); } }, 'Cancel'),
-          e(Button, { variant: 'outline', onClick: () => void resolve('ratify'), disabled: resolving }, 'Ratify (amend spec)'),
-          e(Button, { variant: 'outline', onClick: () => void resolve('correct'), disabled: resolving }, 'Correct (re-deliver)'),
-          e(Button, { onClick: () => void resolve('accept'), disabled: !canResolve || resolving }, 'Accept (exception)'))) : null));
+        resolutionType ? e('div', { style: { display: 'flex', gap: 10, justifyContent: 'flex-end' } },
+          e(Button, { variant: 'ghost', onClick: () => { setSelectedResolution(null); setResolutionType(null); setAcceptReason(''); setAmendment(''); setError(null); } }, 'Cancel'),
+          e(Button, { onClick: () => void resolve(), disabled: !resolutionType || (resolutionType === 'accept' && !acceptReason.trim()) || (resolutionType === 'ratify' && !amendment.trim()) || resolving }, resolutionType === 'ratify' ? 'Apply amendment' : resolutionType === 'correct' ? 'Start correction' : 'Record exception')) : null) : null));
 }
